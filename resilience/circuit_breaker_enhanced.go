@@ -215,9 +215,7 @@ func (cb *SlidingWindowCircuitBreaker) RecordResult(failed bool, latency time.Du
 			}
 
 			if shouldTrip {
-				cb.mu.Lock()
 				cb.transitionTo(bastion.CircuitOpen)
-				cb.mu.Unlock()
 			}
 		}
 
