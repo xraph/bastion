@@ -1,226 +1,279 @@
 ---
 title: Configuration
-description: Configuring a Herald instance and the Forge extension.
+description: Programmatic and YAML configuration for Bastion with hot-reload support.
 ---
 
-Herald can run standalone or as a Forge extension. Both modes share the same core `Config` struct, with the extension adding route and migration options on top.
+Bastion can be configured programmatically via option functions, declaratively via YAML/JSON configuration files, or through a combination of both. Configuration changes can be applied at runtime without restarting the gateway.
 
-## herald.Config
+## Programmatic configuration
 
-**Import:** `github.com/xraph/herald`
-
-The root `Config` struct controls core notification delivery behavior:
+Bastion uses the functional options pattern. Options are passed to `bastion.NewExtension`:
 
 ```go
-type Config struct {
-    // DefaultLocale is the default locale for template rendering (default: "en").
-    DefaultLocale string
-
-    // MaxBatchSize is the maximum number of notifications per batch send.
-    MaxBatchSize int
-
-    // TruncateBodyAt is the maximum message body length stored in the delivery log.
-    // Bodies longer than this are truncated. 0 means no truncation.
-    TruncateBodyAt int
-}
-```
-
-### Field reference
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `DefaultLocale` | `string` | `"en"` | BCP 47 locale tag used when a `SendRequest` does not specify a locale. |
-| `MaxBatchSize` | `int` | `100` | Maximum recipients per batch send via `Herald.Notify`. |
-| `TruncateBodyAt` | `int` | `4096` | Maximum character length for the `Body` field in delivery log messages. Set to `0` to disable truncation. |
-
-### DefaultConfig
-
-`DefaultConfig()` returns a `Config` with sensible defaults:
-
-```go
-cfg := herald.DefaultConfig()
-// cfg.DefaultLocale  = "en"
-// cfg.MaxBatchSize   = 100
-// cfg.TruncateBodyAt = 4096
-```
-
-## Option functions
-
-Herald uses the functional options pattern. `Option` is a function type that configures a `Herald` instance:
-
-```go
-type Option func(*Herald) error
-```
-
-Options are passed to the `herald.New` constructor:
-
-```go
-h, err := herald.New(
-    herald.WithStore(myStore),
-    herald.WithDefaultLocale("fr"),
-    herald.WithMaxBatchSize(50),
-    herald.WithDriver(&email.SMTPDriver{}),
-    herald.WithLogger(slog.Default()),
+bastion.NewExtension(
+    bastion.WithBasePath("/api"),
+    bastion.WithRoute(bastion.RouteConfig{
+        Path:    "/users/*",
+        Targets: []bastion.TargetConfig{
+            {URL: "http://user-service:8080", Weight: 1},
+        },
+        StripPrefix: true,
+        Protocol:    bastion.ProtocolHTTP,
+        Enabled:     true,
+    }),
+    bastion.WithCircuitBreaker(bastion.CircuitBreakerConfig{
+        Enabled:          true,
+        FailureThreshold: 5,
+        ResetTimeout:     30 * time.Second,
+    }),
+    bastion.WithRateLimiting(bastion.RateLimitConfig{
+        Enabled:        true,
+        RequestsPerSec: 1000,
+        Burst:          100,
+    }),
+    bastion.WithHealthCheck(bastion.HealthCheckConfig{
+        Enabled:  true,
+        Interval: 10 * time.Second,
+        Path:     "/health",
+    }),
+    bastion.WithDiscovery(bastion.DiscoveryConfig{
+        Enabled:    true,
+        WatchMode:  true,
+        AutoPrefix: true,
+    }),
+    bastion.WithDashboard(bastion.DashboardConfig{
+        Enabled:  true,
+        BasePath: "/bastion",
+        Realtime: true,
+    }),
 )
 ```
 
-### Available options
+### Available option functions
 
 | Option | Description |
 |--------|-------------|
-| `WithStore(s store.Store)` | Sets the persistence backend. **Required** -- Herald returns `ErrNoStore` without it. |
-| `WithLogger(l *slog.Logger)` | Sets the structured logger. Defaults to `slog.Default()`. |
-| `WithDriver(d driver.Driver)` | Registers a notification driver (SMTP, Twilio, FCM, etc.). Can be called multiple times. |
-| `WithDefaultLocale(locale string)` | Overrides the default locale for template rendering. |
-| `WithMaxBatchSize(n int)` | Overrides the maximum batch size. |
+| `WithBasePath(path)` | Sets the base URL prefix for all gateway routes (default: `"/api"`) |
+| `WithRoute(cfg)` | Adds a static route. Can be called multiple times. |
+| `WithCircuitBreaker(cfg)` | Configures global circuit breaker settings |
+| `WithRateLimiting(cfg)` | Configures global rate limiting |
+| `WithHealthCheck(cfg)` | Configures active health checking |
+| `WithDiscovery(cfg)` | Configures FARP service discovery integration |
+| `WithDashboard(cfg)` | Enables the admin dashboard and REST API |
+| `WithTLS(cfg)` | Configures default upstream TLS settings |
+| `WithCORS(cfg)` | Configures CORS headers |
+| `WithIPFilter(cfg)` | Configures IP allow/deny lists |
+| `WithAuth(cfg)` | Configures global authentication |
+| `WithCache(cfg)` | Configures global response caching |
+| `WithRetry(cfg)` | Configures global retry policy |
+| `WithTimeout(d)` | Sets the global upstream request timeout |
+| `WithLogger(l)` | Sets the structured logger (`*slog.Logger`) |
 
-### Minimal standalone setup
+## YAML configuration
 
-```go
-import (
-    "log/slog"
-
-    "github.com/xraph/herald"
-    "github.com/xraph/herald/driver/email"
-    "github.com/xraph/herald/store/memory"
-)
-
-h, err := herald.New(
-    herald.WithStore(memory.New()),
-    herald.WithDriver(&email.SMTPDriver{}),
-)
-if err != nil {
-    log.Fatal(err)
-}
-```
-
-## Extension configuration
-
-**Import:** `github.com/xraph/herald/extension`
-
-When running as a Forge extension, Herald wraps the core config with additional fields for route registration, migration control, and Grove database integration.
-
-### extension.Config
-
-```go
-type Config struct {
-    herald.Config `json:",inline" yaml:",inline" mapstructure:",squash"`
-
-    // BasePath is the URL prefix for all herald routes (default: "/herald").
-    BasePath string `json:"base_path" yaml:"base_path" mapstructure:"base_path"`
-
-    // DisableRoutes disables automatic route registration with the Forge router.
-    DisableRoutes bool `json:"disable_routes" yaml:"disable_routes" mapstructure:"disable_routes"`
-
-    // DisableMigrate disables automatic database migration on Register.
-    DisableMigrate bool `json:"disable_migrate" yaml:"disable_migrate" mapstructure:"disable_migrate"`
-
-    // GroveDatabase is the name of a grove.DB registered in the DI container.
-    GroveDatabase string `json:"grove_database" yaml:"grove_database" mapstructure:"grove_database"`
-}
-```
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `BasePath` | `string` | `"/herald"` | URL prefix for all Herald API routes. |
-| `DisableRoutes` | `bool` | `false` | When `true`, the extension does not register routes automatically. |
-| `DisableMigrate` | `bool` | `false` | When `true`, the extension skips automatic schema migration. |
-| `GroveDatabase` | `string` | `""` | Name of the Grove database in the DI container. Empty uses the default unnamed DB. |
-
-### Extension options
-
-```go
-ext := extension.New(
-    extension.WithGroveDatabase("primary"),
-    extension.WithBasePath("/notifications"),
-    extension.WithDisableRoutes(),
-    extension.WithDisableMigrate(),
-    extension.WithDriver(&sms.TwilioDriver{}),
-)
-```
-
-| ExtOption | Description |
-|-----------|-------------|
-| `WithStore(s store.Store)` | Sets the persistence backend directly (bypasses Grove auto-detection). |
-| `WithBasePath(path string)` | Sets the URL prefix for Herald API routes. |
-| `WithConfig(cfg Config)` | Sets the full extension configuration. |
-| `WithHeraldOption(opt herald.Option)` | Passes a raw `herald.Option` through to the core engine. |
-| `WithDriver(d driver.Driver)` | Registers a notification driver. |
-| `WithDisableRoutes()` | Disables automatic route registration. |
-| `WithDisableMigrate()` | Disables automatic schema migration. |
-| `WithRequireConfig(bool)` | Requires config to be present in YAML files (errors if missing). |
-| `WithGroveDatabase(name string)` | Sets the Grove database name for auto-detection of the store backend. |
-
-### YAML configuration
-
-The extension loads configuration from Forge YAML config files. It checks two keys in order:
-
-1. `extensions.herald` (namespaced, preferred)
-2. `herald` (legacy)
+Bastion reads configuration from Forge YAML config files under the `bastion` key:
 
 ```yaml
-# config.yaml
-extensions:
-  herald:
-    default_locale: "en"
-    max_batch_size: 100
-    truncate_body_at: 4096
-    base_path: "/herald"
-    disable_routes: false
-    disable_migrate: false
-    grove_database: "primary"
+bastion:
+  enabled: true
+  basePath: "/api"
+  routes:
+    - path: "/users/*"
+      targets:
+        - url: "http://user-service:8080"
+          weight: 1
+      stripPrefix: true
+      protocol: http
+      enabled: true
+    - path: "/orders/*"
+      targets:
+        - url: "http://order-service:8080"
+          weight: 1
+      stripPrefix: true
+      protocol: http
+      enabled: true
+  circuitBreaker:
+    enabled: true
+    failureThreshold: 5
+    resetTimeout: 30s
+  rateLimiting:
+    enabled: true
+    requestsPerSec: 1000
+    burst: 100
+  healthCheck:
+    enabled: true
+    interval: 10s
+    path: "/health"
+    timeout: 5s
+  discovery:
+    enabled: true
+    watchMode: true
+    autoPrefix: true
+  dashboard:
+    enabled: true
+    basePath: "/bastion"
+    realtime: true
 ```
 
-YAML configuration takes precedence over programmatic defaults. Programmatic boolean flags (`DisableRoutes`, `DisableMigrate`) override YAML when set to `true`.
+YAML configuration is merged with programmatic defaults. Programmatic options that are explicitly set take precedence over YAML values.
 
-### Grove auto-detection
+## Configuration keys reference
 
-When `GroveDatabase` is set (via YAML or `WithGroveDatabase`), the extension resolves a `*grove.DB` from the Forge DI container and auto-constructs the appropriate store backend based on the Grove driver type:
+### Top-level
 
-| Grove driver | Store backend |
-|--------------|---------------|
-| `pg` | `store/postgres.Store` |
-| `sqlite` | `store/sqlite.Store` |
-| `mongo` | `store/mongo.Store` |
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `enabled` | `bool` | `true` | Enable or disable the entire gateway |
+| `basePath` | `string` | `"/api"` | Base URL prefix for all proxied routes |
 
-```go
-// The extension does this internally:
-switch db.Driver().Name() {
-case "pg":
-    return pgstore.New(db), nil
-case "sqlite":
-    return sqlitestore.New(db), nil
-case "mongo":
-    return mongostore.New(db), nil
-}
+### Routes (`routes[]`)
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `path` | `string` | -- | URL pattern to match (required) |
+| `targets` | `[]object` | -- | Upstream targets (required, at least one) |
+| `targets[].url` | `string` | -- | Target base URL |
+| `targets[].weight` | `int` | `1` | Relative traffic weight |
+| `stripPrefix` | `bool` | `false` | Remove matched prefix before forwarding |
+| `protocol` | `string` | `"http"` | Proxy protocol: `http`, `websocket`, `sse`, `grpc` |
+| `enabled` | `bool` | `true` | Whether the route is active |
+| `loadBalancer` | `string` | `""` | Override: `round-robin`, `weighted-round-robin`, `random`, `least-connections`, `consistent-hash` |
+| `timeout` | `duration` | `30s` | Override: upstream request timeout |
+
+### Circuit breaker (`circuitBreaker`)
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `enabled` | `bool` | `false` | Enable circuit breakers |
+| `failureThreshold` | `int` | `5` | Consecutive failures before opening the circuit |
+| `resetTimeout` | `duration` | `30s` | Time to wait before transitioning from open to half-open |
+
+### Rate limiting (`rateLimiting`)
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `enabled` | `bool` | `false` | Enable rate limiting |
+| `requestsPerSec` | `float64` | `1000` | Token refill rate (requests per second) |
+| `burst` | `int` | `100` | Maximum burst size (token bucket capacity) |
+
+### Health check (`healthCheck`)
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `enabled` | `bool` | `false` | Enable active health probes |
+| `interval` | `duration` | `10s` | Time between health check requests |
+| `path` | `string` | `"/health"` | HTTP path to probe on each target |
+| `timeout` | `duration` | `5s` | Health check request timeout |
+
+### Discovery (`discovery`)
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `enabled` | `bool` | `false` | Enable FARP service discovery |
+| `watchMode` | `bool` | `false` | Watch for service registrations/deregistrations in real time |
+| `autoPrefix` | `bool` | `false` | Auto-create route prefixes from service names |
+
+### Dashboard (`dashboard`)
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `enabled` | `bool` | `false` | Enable the admin dashboard and REST API |
+| `basePath` | `string` | `"/bastion"` | Base path for dashboard and API routes |
+| `realtime` | `bool` | `false` | Enable WebSocket real-time event stream |
+
+### Authentication (`auth`)
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `type` | `string` | `""` | Auth type: `api-key`, `bearer`, `forward-auth` |
+| `secret` | `string` | `""` | Secret or token for validation |
+| `header` | `string` | `""` | Header name for API key auth |
+| `forwardURL` | `string` | `""` | URL for forward-auth delegation |
+
+### TLS (`tls`)
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `caCertFile` | `string` | `""` | CA certificate for upstream verification |
+| `certFile` | `string` | `""` | Client certificate for mTLS |
+| `keyFile` | `string` | `""` | Client key for mTLS |
+| `insecureSkipVerify` | `bool` | `false` | Skip certificate verification (development only) |
+
+### Retry (`retry`)
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `maxRetries` | `int` | `0` | Maximum retry attempts (0 = disabled) |
+| `strategy` | `string` | `"exponential"` | Backoff strategy: `exponential`, `linear`, `fixed` |
+| `baseDelay` | `duration` | `100ms` | Initial delay between retries |
+| `maxDelay` | `duration` | `5s` | Maximum delay cap |
+| `jitter` | `bool` | `false` | Add randomized jitter to delays |
+
+### Cache (`cache`)
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `enabled` | `bool` | `false` | Enable response caching |
+| `ttl` | `duration` | `5m` | Default cache entry time-to-live |
+
+## Hot-reload behavior
+
+Bastion supports hot-reloading of configuration changes without restarting the gateway process. There are two mechanisms:
+
+### File watcher
+
+When the Forge configuration file changes on disk, Bastion detects the change and reloads:
+
+- **Route additions and removals** -- New routes are added to the route table; removed routes stop accepting traffic
+- **Target changes** -- New targets are added to the load balancer pool; removed targets are drained
+- **Rate limit changes** -- Token bucket parameters are updated immediately
+- **Circuit breaker changes** -- Thresholds are updated; existing circuit states are preserved
+- **Health check changes** -- Interval and path changes take effect on the next probe cycle
+
+### Admin API
+
+The admin REST API provides runtime configuration changes:
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `POST` | `/bastion/api/routes` | Create a new route |
+| `PUT` | `/bastion/api/routes/:id` | Update an existing route |
+| `DELETE` | `/bastion/api/routes/:id` | Remove a route |
+| `POST` | `/bastion/api/routes/:id/enable` | Enable a route |
+| `POST` | `/bastion/api/routes/:id/disable` | Disable a route |
+
+Changes made through the admin API take effect immediately and are reflected in the running configuration.
+
+### What does not hot-reload
+
+Some settings require a restart to take effect:
+
+- `basePath` (the gateway base URL prefix)
+- `dashboard.basePath` (the admin dashboard prefix)
+- TLS certificate file paths (though certificate contents are reloaded automatically when the files change)
+
+## Per-route config overrides
+
+Many global settings can be overridden at the route level. Route-level settings take precedence over global settings.
+
+```yaml
+bastion:
+  rateLimiting:
+    enabled: true
+    requestsPerSec: 1000
+    burst: 100
+  routes:
+    - path: "/uploads/*"
+      targets:
+        - url: "http://upload-service:8080"
+      rateLimit:
+        enabled: true
+        requestsPerSec: 10     # stricter limit for uploads
+        burst: 5
+    - path: "/api/*"
+      targets:
+        - url: "http://api-service:8080"
+      # inherits the global rate limit (1000 req/s)
 ```
 
-### Built-in drivers
-
-The Forge extension automatically registers all built-in drivers during `Init`:
-
-- `email.SMTPDriver` -- SMTP email delivery
-- `email.ResendDriver` -- Resend API email delivery
-- `sms.TwilioDriver` -- Twilio SMS delivery
-- `push.FCMDriver` -- Firebase Cloud Messaging push notifications
-- `inapp.Driver` -- In-app inbox notifications
-
-You only need to call `WithDriver` for custom or third-party drivers.
-
-## Accessing the Herald instance
-
-After extension registration, the `*herald.Herald` instance is available from the Forge DI container:
-
-```go
-import "github.com/xraph/vessel"
-
-h, err := vessel.Inject[*herald.Herald](app.Container())
-```
-
-Or directly from the extension:
-
-```go
-ext.Herald() // *herald.Herald (nil until Register is called)
-ext.API()    // *api.ForgeAPI
-ext.Config() // herald.Config
-```
+Overridable settings: `rateLimit`, `loadBalancer`, `auth`, `cache`, `timeout`, `retryPolicy`.

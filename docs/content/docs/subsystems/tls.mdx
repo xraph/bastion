@@ -1,0 +1,195 @@
+---
+title: TLS & mTLS
+description: Upstream TLS with CA certificates, client certs for mTLS, and auto cert reloading.
+---
+
+Bastion supports TLS for upstream connections, including custom CA certificate bundles, client certificates for mutual TLS (mTLS), and automatic certificate reloading. TLS is configured both globally and per-target.
+
+## Global TLS Configuration
+
+```go
+bastion.WithTLS(bastion.TLSConfig{
+    Enabled:        true,
+    CACertFile:     "/etc/certs/ca.pem",
+    MinVersion:     "1.2",
+    ReloadInterval: 1 * time.Hour,
+})
+```
+
+### Configuration Fields
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `Enabled` | `bool` | `false` | Enable TLS for upstream connections |
+| `CACertFile` | `string` | `""` | Path to CA certificate bundle for server verification |
+| `ClientCertFile` | `string` | `""` | Path to client certificate for mTLS |
+| `ClientKeyFile` | `string` | `""` | Path to client private key for mTLS |
+| `InsecureSkipVerify` | `bool` | `false` | Skip server certificate verification (development only) |
+| `MinVersion` | `string` | `"1.2"` | Minimum TLS version (`"1.0"`, `"1.1"`, `"1.2"`, `"1.3"`) |
+| `CipherSuites` | `[]string` | `[]` | Allowed cipher suites (empty = Go defaults) |
+| `ReloadInterval` | `time.Duration` | `0` | Interval for automatic certificate reloading (0 = disabled) |
+
+## CA Certificate Bundles
+
+When connecting to upstreams that use certificates signed by a private CA, provide the CA certificate bundle:
+
+```go
+bastion.WithTLS(bastion.TLSConfig{
+    Enabled:    true,
+    CACertFile: "/etc/certs/internal-ca.pem",
+})
+```
+
+The CA certificate is loaded into the TLS root certificate pool. The proxy verifies upstream server certificates against this pool.
+
+## Mutual TLS (mTLS)
+
+mTLS requires the gateway to present a client certificate when connecting to upstreams. Both the certificate and private key must be provided:
+
+```go
+bastion.WithTLS(bastion.TLSConfig{
+    Enabled:        true,
+    CACertFile:     "/etc/certs/ca.pem",
+    ClientCertFile: "/etc/certs/gateway-client.pem",
+    ClientKeyFile:  "/etc/certs/gateway-client-key.pem",
+    MinVersion:     "1.2",
+})
+```
+
+The gateway presents this client certificate during the TLS handshake with upstream servers. The upstream server verifies the certificate against its trusted CA list.
+
+## Per-Target TLS
+
+Individual targets can override the global TLS configuration. This is useful when different upstreams use different CAs or require different client certificates:
+
+```go
+bastion.WithRoute(bastion.RouteConfig{
+    Path: "/api/*",
+    Targets: []bastion.TargetConfig{
+        {
+            URL: "https://internal-service:8443",
+            TLS: &bastion.TargetTLSConfig{
+                Enabled:        true,
+                CACertFile:     "/etc/certs/internal-ca.pem",
+                ClientCertFile: "/etc/certs/service-a-client.pem",
+                ClientKeyFile:  "/etc/certs/service-a-client-key.pem",
+                ServerName:     "internal-service.svc.cluster.local",
+            },
+        },
+        {
+            URL: "https://partner-api:443",
+            TLS: &bastion.TargetTLSConfig{
+                Enabled:    true,
+                CACertFile: "/etc/certs/partner-ca.pem",
+            },
+        },
+    },
+})
+```
+
+### TargetTLSConfig Fields
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `Enabled` | `bool` | Enable per-target TLS override |
+| `CACertFile` | `string` | Target-specific CA certificate |
+| `ClientCertFile` | `string` | Target-specific client certificate for mTLS |
+| `ClientKeyFile` | `string` | Target-specific client private key |
+| `InsecureSkipVerify` | `bool` | Skip verification for this target |
+| `ServerName` | `string` | Override the TLS server name (SNI) |
+
+When a target has per-target TLS settings, the TLS manager clones the global config and applies the overrides. The resulting config is cached per target ID.
+
+## Auto Certificate Reloading
+
+When `ReloadInterval` is set, the TLS manager periodically reloads certificates from disk. This allows certificate rotation without restarting the gateway:
+
+```go
+bastion.WithTLS(bastion.TLSConfig{
+    Enabled:        true,
+    CACertFile:     "/etc/certs/ca.pem",
+    ClientCertFile: "/etc/certs/client.pem",
+    ClientKeyFile:  "/etc/certs/client-key.pem",
+    ReloadInterval: 1 * time.Hour,
+})
+```
+
+On each reload cycle:
+
+1. The global TLS configuration is rebuilt from the current certificate files.
+2. The per-target TLS cache is cleared, forcing targets to pick up new certificates on their next request.
+3. A log message is emitted: `"TLS certificates reloaded"`.
+
+### Manual Reload
+
+Force an immediate certificate reload via the TLS manager:
+
+```go
+tlsManager.Reload()
+```
+
+The `LastReload()` method returns the timestamp of the most recent reload.
+
+## Skip Verify for Development
+
+For local development with self-signed certificates:
+
+```go
+bastion.WithTLS(bastion.TLSConfig{
+    Enabled:            true,
+    InsecureSkipVerify: true,
+})
+```
+
+Per-target skip verify:
+
+```go
+TLS: &bastion.TargetTLSConfig{
+    Enabled:            true,
+    InsecureSkipVerify: true,
+}
+```
+
+**Warning**: Never use `InsecureSkipVerify` in production. It disables all certificate verification, making connections vulnerable to man-in-the-middle attacks.
+
+## TLS Version Configuration
+
+The `MinVersion` field sets the minimum TLS protocol version for upstream connections:
+
+| Value | TLS Version |
+|-------|-------------|
+| `"1.0"` | TLS 1.0 (not recommended) |
+| `"1.1"` | TLS 1.1 (not recommended) |
+| `"1.2"` | TLS 1.2 (default, recommended minimum) |
+| `"1.3"` | TLS 1.3 (strongest) |
+
+## Cipher Suite Configuration
+
+Optionally restrict the allowed cipher suites:
+
+```go
+bastion.WithTLS(bastion.TLSConfig{
+    Enabled: true,
+    CipherSuites: []string{
+        "TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384",
+        "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256",
+    },
+})
+```
+
+When empty, Go's default cipher suites are used. The cipher suite names must match Go's `tls.CipherSuites()` names.
+
+## Validation
+
+The `ValidateTLSConfig` function checks that the TLS configuration is valid before the gateway starts:
+
+- CA cert file exists and is readable.
+- Client cert and key are both present (not just one).
+- Client cert/key pair loads correctly.
+- Min version is a recognized value.
+
+```go
+if err := bastion.ValidateTLSConfig(tlsConfig); err != nil {
+    log.Fatalf("invalid TLS config: %v", err)
+}
+```

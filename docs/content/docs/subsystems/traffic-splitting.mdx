@@ -1,0 +1,224 @@
+---
+title: Traffic Splitting
+description: Canary releases, blue-green deployments, A/B testing, and shadow traffic.
+---
+
+Bastion supports traffic splitting for safe deployments and experimentation. Traffic policies are configured per-route and control how requests are distributed across target groups. Four strategies are available: canary, blue-green, A/B testing, and traffic mirroring.
+
+## Traffic Policy Structure
+
+Each route can have a `TrafficPolicy` that defines the splitting strategy and rules:
+
+```go
+type TrafficPolicy struct {
+    Type         TrafficSplitType // canary, blueGreen, abTest, mirror, weighted
+    Rules        []TrafficRule    // Routing rules
+    MirrorTarget string           // Target URL for mirror traffic
+}
+
+type TrafficRule struct {
+    Match      TrafficMatch // How to match requests
+    TargetTags []string     // Tags identifying which targets receive matched traffic
+    Weight     int          // Weight for percentage-based matching
+}
+
+type TrafficMatch struct {
+    Type   TrafficMatchType // header, cookie, weight, ipRange
+    Key    string           // Header name or cookie name
+    Value  string           // Expected value
+    Negate bool             // Invert the match
+}
+```
+
+## Target Tags
+
+Traffic splitting uses tags to identify target groups. Assign tags to targets when configuring routes:
+
+```go
+bastion.WithRoute(bastion.RouteConfig{
+    Path: "/api/*",
+    Targets: []bastion.TargetConfig{
+        {URL: "http://v1-stable:8080", Weight: 1, Tags: []string{"stable"}},
+        {URL: "http://v2-canary:8080", Weight: 1, Tags: []string{"canary"}},
+    },
+    TrafficPolicy: &bastion.TrafficPolicy{
+        Type: bastion.TrafficCanary,
+        Rules: []bastion.TrafficRule{
+            {
+                Match:      bastion.TrafficMatch{Type: bastion.MatchWeight},
+                TargetTags: []string{"canary"},
+                Weight:     10, // 10% to canary
+            },
+        },
+    },
+})
+```
+
+## Canary Deployments
+
+Canary deployments route a configurable percentage of traffic to a new version while the majority continues to hit the stable version.
+
+```go
+TrafficPolicy: &bastion.TrafficPolicy{
+    Type: bastion.TrafficCanary,
+    Rules: []bastion.TrafficRule{
+        {
+            Match:      bastion.TrafficMatch{Type: bastion.MatchWeight},
+            TargetTags: []string{"canary"},
+            Weight:     5, // 5% of traffic goes to canary targets
+        },
+    },
+}
+```
+
+How it works:
+
+1. For each request, a random number between 0-99 is generated.
+2. If the number is less than the `Weight`, the request is routed to targets with the specified tags.
+3. Otherwise, the request goes to non-canary targets (targets without the `"canary"` tag).
+
+Gradually increase the weight as confidence in the new version grows:
+
+- **5%** -- initial canary validation
+- **25%** -- broader testing
+- **50%** -- half-split comparison
+- **100%** -- full rollout (or remove the traffic policy)
+
+## Blue-Green Deployments
+
+Blue-green deployments maintain two complete environments and switch traffic between them. The active version is determined by matching rules:
+
+```go
+TrafficPolicy: &bastion.TrafficPolicy{
+    Type: bastion.TrafficBlueGreen,
+    Rules: []bastion.TrafficRule{
+        {
+            Match:      bastion.TrafficMatch{Type: bastion.MatchHeader, Key: "X-Version", Value: "green"},
+            TargetTags: []string{"green"},
+        },
+    },
+}
+```
+
+With targets:
+
+```go
+Targets: []bastion.TargetConfig{
+    {URL: "http://blue-v1:8080", Tags: []string{"blue"}},
+    {URL: "http://green-v2:8080", Tags: []string{"green"}},
+}
+```
+
+Requests with `X-Version: green` go to the green environment. All other requests go to the blue environment. To switch, update the default routing or swap the tags.
+
+## A/B Testing
+
+A/B testing routes requests based on header or cookie values, enabling experiments where different user segments see different implementations:
+
+### Header-Based Routing
+
+```go
+TrafficPolicy: &bastion.TrafficPolicy{
+    Type: bastion.TrafficABTest,
+    Rules: []bastion.TrafficRule{
+        {
+            Match:      bastion.TrafficMatch{Type: bastion.MatchHeader, Key: "X-Experiment", Value: "new-checkout"},
+            TargetTags: []string{"experiment-b"},
+        },
+    },
+}
+```
+
+### Cookie-Based Routing
+
+```go
+TrafficPolicy: &bastion.TrafficPolicy{
+    Type: bastion.TrafficABTest,
+    Rules: []bastion.TrafficRule{
+        {
+            Match:      bastion.TrafficMatch{Type: bastion.MatchCookie, Key: "ab_group", Value: "B"},
+            TargetTags: []string{"variant-b"},
+        },
+    },
+}
+```
+
+Requests matching the rule go to the specified target tags. Unmatched requests go to the default (untagged or remaining) targets.
+
+### Negated Matching
+
+Use `Negate: true` to invert a match:
+
+```go
+Match: bastion.TrafficMatch{
+    Type:   bastion.MatchHeader,
+    Key:    "X-Internal",
+    Value:  "true",
+    Negate: true, // Route to this group when the header is NOT "true"
+}
+```
+
+## Traffic Mirroring (Shadow Traffic)
+
+Traffic mirroring duplicates requests to a secondary target for testing without affecting the primary response. The client always receives the response from the primary targets -- the mirror response is discarded.
+
+```go
+TrafficPolicy: &bastion.TrafficPolicy{
+    Type:         bastion.TrafficMirror,
+    MirrorTarget: "http://shadow-v2:8080",
+}
+```
+
+How it works:
+
+1. The request is forwarded to the primary target as usual.
+2. A copy of the request is sent asynchronously to the `MirrorTarget`.
+3. The mirror response is discarded.
+4. The client receives the primary response without any added latency.
+
+Use mirroring to validate a new version handles production traffic correctly before routing real users to it.
+
+## Weighted Traffic Distribution
+
+For explicit weight-based distribution across multiple target groups:
+
+```go
+TrafficPolicy: &bastion.TrafficPolicy{
+    Type: bastion.TrafficWeighted,
+    Rules: []bastion.TrafficRule{
+        {
+            Match:      bastion.TrafficMatch{Type: bastion.MatchWeight},
+            TargetTags: []string{"v1"},
+            Weight:     70,
+        },
+        {
+            Match:      bastion.TrafficMatch{Type: bastion.MatchWeight},
+            TargetTags: []string{"v2"},
+            Weight:     30,
+        },
+    },
+}
+```
+
+## Match Types
+
+| Type | Constant | Description |
+|------|----------|-------------|
+| Header | `bastion.MatchHeader` | Match on request header value |
+| Cookie | `bastion.MatchCookie` | Match on cookie value |
+| Weight | `bastion.MatchWeight` | Random percentage-based matching |
+| IP Range | `bastion.MatchIPRange` | Match on client IP range |
+
+## Global Traffic Split Toggle
+
+Traffic splitting can be enabled or disabled globally:
+
+```go
+bastion.WithConfig(bastion.Config{
+    TrafficSplit: bastion.TrafficSplitConfig{
+        Enabled: true,
+    },
+})
+```
+
+When `Enabled` is false, all traffic policies on routes are ignored and requests go to the full target list.

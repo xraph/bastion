@@ -1,0 +1,178 @@
+---
+title: Response Caching
+description: In-memory response caching with per-route policies.
+---
+
+Bastion caches HTTP responses to reduce upstream load and improve response times. The caching subsystem respects standard `Cache-Control` headers, supports per-route policies, and provides a pluggable store interface for custom backends.
+
+## Configuration
+
+```go
+bastion.WithCaching(bastion.CachingConfig{
+    Enabled:    true,
+    DefaultTTL: 5 * time.Minute,
+    MaxSize:    1000,
+    Methods:    []string{"GET", "HEAD"},
+    VaryBy:     []string{"Accept", "Accept-Language"},
+})
+```
+
+### Configuration Fields
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `Enabled` | `bool` | `false` | Enable or disable response caching |
+| `DefaultTTL` | `time.Duration` | `5m` | Default cache entry lifetime |
+| `MaxSize` | `int` | `1000` | Maximum number of cached responses (in-memory store) |
+| `Methods` | `[]string` | `["GET", "HEAD"]` | HTTP methods eligible for caching |
+| `VaryBy` | `[]string` | `[]` | Headers to include in the cache key |
+
+## Cache-Control Header Respect
+
+The cache respects standard `Cache-Control` directives from both the client and the upstream:
+
+### Client Directives
+
+| Directive | Behavior |
+|-----------|----------|
+| `no-cache` | Bypass cache, fetch from upstream |
+| `no-store` | Bypass cache, fetch from upstream |
+
+### Upstream Directives
+
+| Directive | Behavior |
+|-----------|----------|
+| `no-store` | Response is not cached |
+| `private` | Response is not cached |
+| `max-age=N` | Response is cached for N seconds (overrides `DefaultTTL`) |
+
+### TTL Priority
+
+The effective TTL for a cached response is determined in this order:
+
+1. Per-route `TTL` (if configured)
+2. Upstream `Cache-Control: max-age` header
+3. Global `DefaultTTL`
+
+## Per-Route Cache Policies
+
+Individual routes can override or disable caching:
+
+```go
+bastion.WithRoute(bastion.RouteConfig{
+    Path: "/api/products/*",
+    Cache: &bastion.RouteCacheConfig{
+        Enabled: true,
+        TTL:     10 * time.Minute,
+        Methods: []string{"GET"},
+        VaryBy:  []string{"Accept", "X-Region"},
+    },
+    Targets: []bastion.TargetConfig{
+        {URL: "http://products-svc:8080"},
+    },
+})
+```
+
+### RouteCacheConfig Fields
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `Enabled` | `bool` | Enable caching for this route |
+| `TTL` | `time.Duration` | Cache TTL (overrides global default and `max-age`) |
+| `Methods` | `[]string` | Cacheable methods (overrides global methods) |
+| `VaryBy` | `[]string` | Headers to vary the cache key by (overrides global) |
+
+### Disabling Cache for a Route
+
+```go
+bastion.WithRoute(bastion.RouteConfig{
+    Path: "/api/auth/*",
+    Cache: &bastion.RouteCacheConfig{
+        Enabled: false,
+    },
+    Targets: []bastion.TargetConfig{
+        {URL: "http://auth-svc:8080"},
+    },
+})
+```
+
+## Cache Key Generation
+
+Cache keys are generated from a SHA-256 hash of:
+
+1. HTTP method
+2. Request path
+3. Query string
+4. Values of `VaryBy` headers (sorted for determinism)
+
+The resulting key format is `gw:cache:<hash>`. This ensures that requests with different query parameters or vary-by header values produce distinct cache entries.
+
+## Response Headers
+
+Cached responses include headers indicating cache status:
+
+| Header | Value | Description |
+|--------|-------|-------------|
+| `X-Cache` | `HIT` | Response was served from cache |
+| `X-Cache-Age` | `<seconds>` | How many seconds since the response was cached |
+
+## Cacheable Responses
+
+Only responses meeting these criteria are cached:
+
+- Status code is in the 200-399 range.
+- HTTP method is in the configured `Methods` list.
+- The upstream response does not include `Cache-Control: no-store` or `Cache-Control: private`.
+
+## Cache Store Interface
+
+The caching subsystem accepts any backend that implements the `CacheStore` interface:
+
+```go
+type CacheStore interface {
+    Get(ctx context.Context, key string) ([]byte, error)
+    Set(ctx context.Context, key string, value []byte, ttl time.Duration) error
+    Delete(ctx context.Context, key string) error
+}
+```
+
+### In-Memory Store (Default)
+
+When no external store is provided, Bastion uses an in-memory LRU cache bounded by `MaxSize`. Entries are evicted in FIFO order when the cache is full. Expired entries are cleaned up lazily on access and periodically via background cleanup.
+
+### Custom Store
+
+Provide a custom store for distributed caching (e.g., Redis):
+
+```go
+gateway.SetCacheStore(myRedisStore)
+```
+
+## Cache Invalidation
+
+### Admin API
+
+The admin API exposes an endpoint to invalidate cached entries:
+
+```
+DELETE /gateway/api/cache
+```
+
+This clears the entire cache.
+
+### Programmatic Invalidation
+
+```go
+cache.Invalidate(ctx, "GET", "/api/products/123")
+```
+
+## Cache Metrics
+
+The gateway tracks cache hits and misses:
+
+| Metric | Description |
+|--------|-------------|
+| `gateway.cache_hits_total` | Total cache hits |
+| `gateway.cache_misses_total` | Total cache misses |
+
+These are also available in `GatewayStats.CacheHits` and `GatewayStats.CacheMisses` via the admin API and dashboard.

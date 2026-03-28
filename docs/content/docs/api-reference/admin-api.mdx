@@ -1,0 +1,656 @@
+---
+title: Admin REST API
+description: Full CRUD API for routes, upstreams, stats, and configuration.
+---
+
+Bastion exposes a comprehensive REST API for managing routes, inspecting upstreams, viewing statistics, controlling discovery, and streaming real-time events. All endpoints are mounted under the dashboard base path (default: `/gateway`).
+
+## Endpoint Summary
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/gateway/api/routes` | List all routes |
+| GET | `/gateway/api/routes/:id` | Get route details |
+| POST | `/gateway/api/routes` | Create manual route |
+| PUT | `/gateway/api/routes/:id` | Update route |
+| DELETE | `/gateway/api/routes/:id` | Delete manual route |
+| POST | `/gateway/api/routes/:id/enable` | Enable route |
+| POST | `/gateway/api/routes/:id/disable` | Disable route |
+| GET | `/gateway/api/upstreams` | List all targets |
+| GET | `/gateway/api/stats` | Gateway statistics |
+| GET | `/gateway/api/stats/routes` | Per-route statistics |
+| GET | `/gateway/api/config` | Current configuration |
+| GET | `/gateway/api/discovery/services` | Discovered services |
+| POST | `/gateway/api/discovery/refresh` | Force FARP re-scan |
+| POST | `/gateway/api/discovery/register` | Push-register a service |
+| DELETE | `/gateway/api/discovery/services/:name` | Deregister a service |
+| GET | `/gateway/openapi.json` | Aggregated OpenAPI spec |
+| GET | `/gateway/swagger` | Swagger UI |
+| GET | `/gateway/api/openapi/services` | OpenAPI service listing |
+| GET | `/gateway/api/openapi/services/:service` | Per-service OpenAPI spec |
+| POST | `/gateway/api/openapi/refresh` | Force OpenAPI re-fetch |
+| WS | `/gateway/ws` | Real-time event stream |
+
+## Route Management
+
+### List All Routes
+
+```
+GET /gateway/api/routes
+```
+
+Returns all registered routes (manual, FARP-discovered, and persisted). Supports optional query parameters for filtering.
+
+**Query Parameters:**
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `source` | `string` | Filter by source: `manual`, `farp`, `discovery` |
+| `protocol` | `string` | Filter by protocol: `http`, `websocket`, `sse`, `grpc`, `graphql` |
+
+**Example Request:**
+
+```bash
+curl http://localhost:8080/gateway/api/routes
+```
+
+**Example Response:**
+
+```json
+[
+  {
+    "id": "manual-/users",
+    "path": "/api/users",
+    "methods": [],
+    "targets": [
+      {
+        "id": "target-/users-http://user-service:8080",
+        "url": "http://user-service:8080",
+        "weight": 1,
+        "healthy": true,
+        "activeConns": 3,
+        "totalRequests": 1250,
+        "totalErrors": 2,
+        "avgLatencyMs": 12.5
+      }
+    ],
+    "stripPrefix": true,
+    "protocol": "http",
+    "source": "manual",
+    "serviceName": "user-service",
+    "priority": 100,
+    "enabled": true,
+    "createdAt": "2025-01-15T10:00:00Z",
+    "updatedAt": "2025-01-15T10:00:00Z"
+  }
+]
+```
+
+**Filter by source:**
+
+```bash
+curl "http://localhost:8080/gateway/api/routes?source=farp"
+```
+
+### Get Route Details
+
+```
+GET /gateway/api/routes/:id
+```
+
+Returns a single route with full target statistics.
+
+**Example Request:**
+
+```bash
+curl http://localhost:8080/gateway/api/routes/manual-/users
+```
+
+**Example Response:**
+
+```json
+{
+  "id": "manual-/users",
+  "path": "/api/users",
+  "targets": [
+    {
+      "id": "target-/users-http://user-service:8080",
+      "url": "http://user-service:8080",
+      "weight": 1,
+      "healthy": true,
+      "activeConns": 3,
+      "circuitState": "closed",
+      "totalRequests": 1250,
+      "totalErrors": 2,
+      "avgLatencyMs": 12.5,
+      "p99LatencyMs": 45.2
+    }
+  ],
+  "stripPrefix": true,
+  "protocol": "http",
+  "source": "manual",
+  "priority": 100,
+  "enabled": true
+}
+```
+
+**Error Response (404):**
+
+```json
+{"error": "route not found"}
+```
+
+### Create Route
+
+```
+POST /gateway/api/routes
+```
+
+Creates a new manual route. The route is immediately active and targets are registered with the health monitor.
+
+**Request Body:**
+
+```json
+{
+  "path": "/products",
+  "targets": [
+    {"url": "http://product-service:8080", "weight": 1}
+  ],
+  "stripPrefix": true,
+  "protocol": "http",
+  "priority": 0,
+  "enabled": true,
+  "methods": ["GET", "POST"],
+  "headers": {
+    "add": {"X-Source": "gateway"},
+    "remove": ["X-Internal"]
+  },
+  "retry": {
+    "enabled": true,
+    "maxAttempts": 3
+  },
+  "rateLimit": {
+    "enabled": true,
+    "requestsPerSec": 100,
+    "burst": 20
+  }
+}
+```
+
+**Example Request:**
+
+```bash
+curl -X POST http://localhost:8080/gateway/api/routes \
+  -H "Content-Type: application/json" \
+  -d '{
+    "path": "/products",
+    "targets": [{"url": "http://product-service:8080", "weight": 1}],
+    "stripPrefix": true,
+    "enabled": true,
+    "protocol": "http"
+  }'
+```
+
+**Success Response (201):**
+
+```json
+{
+  "id": "manual-/products",
+  "path": "/api/products",
+  "targets": [...],
+  "source": "manual",
+  "enabled": true
+}
+```
+
+**Error Response (409):**
+
+```json
+{"error": "route already exists"}
+```
+
+### Update Route
+
+```
+PUT /gateway/api/routes/:id
+```
+
+Updates an existing manual route. Only routes with `source: "manual"` can be updated. FARP-discovered routes are managed automatically.
+
+**Example Request:**
+
+```bash
+curl -X PUT http://localhost:8080/gateway/api/routes/manual-/products \
+  -H "Content-Type: application/json" \
+  -d '{
+    "path": "/products",
+    "targets": [
+      {"url": "http://product-v2:8080", "weight": 3},
+      {"url": "http://product-v1:8080", "weight": 1}
+    ],
+    "stripPrefix": true,
+    "enabled": true,
+    "protocol": "http"
+  }'
+```
+
+**Error Response (400):**
+
+```json
+{"error": "cannot update auto-discovered routes"}
+```
+
+### Delete Route
+
+```
+DELETE /gateway/api/routes/:id
+```
+
+Deletes a manual route. FARP-discovered routes cannot be deleted (they are managed by the discovery system).
+
+**Example Request:**
+
+```bash
+curl -X DELETE http://localhost:8080/gateway/api/routes/manual-/products
+```
+
+**Success Response (200):**
+
+```json
+{"status": "deleted"}
+```
+
+### Enable / Disable Route
+
+```
+POST /gateway/api/routes/:id/enable
+POST /gateway/api/routes/:id/disable
+```
+
+Toggle a route's enabled status without deleting it. Disabled routes stop receiving traffic but remain in the route table.
+
+**Example Request:**
+
+```bash
+curl -X POST http://localhost:8080/gateway/api/routes/manual-/products/disable
+```
+
+**Success Response (200):**
+
+```json
+{"status": "disabled"}
+```
+
+## Upstreams
+
+### List All Targets
+
+```
+GET /gateway/api/upstreams
+```
+
+Returns all upstream targets across all routes, with health status and performance statistics.
+
+**Example Request:**
+
+```bash
+curl http://localhost:8080/gateway/api/upstreams
+```
+
+**Example Response:**
+
+```json
+[
+  {
+    "id": "target-/users-http://user-service:8080",
+    "url": "http://user-service:8080",
+    "weight": 1,
+    "healthy": true,
+    "activeConns": 3,
+    "circuitState": "closed",
+    "totalRequests": 1250,
+    "totalErrors": 2,
+    "avgLatencyMs": 12.5,
+    "p99LatencyMs": 45.2,
+    "routeId": "manual-/users",
+    "routePath": "/api/users"
+  }
+]
+```
+
+## Statistics
+
+### Gateway Statistics
+
+```
+GET /gateway/api/stats
+```
+
+Returns aggregated gateway-wide traffic statistics.
+
+**Example Request:**
+
+```bash
+curl http://localhost:8080/gateway/api/stats
+```
+
+**Example Response:**
+
+```json
+{
+  "totalRequests": 50000,
+  "totalErrors": 150,
+  "activeConns": 42,
+  "activeWsConns": 3,
+  "activeSseConns": 1,
+  "avgLatencyMs": 15.3,
+  "p99LatencyMs": 120.5,
+  "requestsPerSec": 245.7,
+  "cacheHits": 12000,
+  "cacheMisses": 38000,
+  "rateLimited": 85,
+  "circuitBreaks": 12,
+  "retryAttempts": 340,
+  "totalRoutes": 8,
+  "healthyUpstreams": 12,
+  "totalUpstreams": 14,
+  "uptime": 86400,
+  "startedAt": "2025-01-14T10:00:00Z"
+}
+```
+
+### Per-Route Statistics
+
+```
+GET /gateway/api/stats/routes
+```
+
+Returns per-route traffic breakdowns.
+
+**Example Response:**
+
+```json
+{
+  "manual-/users": {
+    "routeId": "manual-/users",
+    "path": "/api/users",
+    "totalRequests": 25000,
+    "totalErrors": 50,
+    "avgLatencyMs": 12.5,
+    "p99LatencyMs": 45.2,
+    "cacheHits": 8000,
+    "cacheMisses": 17000,
+    "rateLimited": 20
+  }
+}
+```
+
+## Configuration
+
+### Get Current Configuration
+
+```
+GET /gateway/api/config
+```
+
+Returns the current gateway configuration. Sensitive fields (TLS keys) are redacted.
+
+**Example Request:**
+
+```bash
+curl http://localhost:8080/gateway/api/config
+```
+
+## Discovery
+
+### List Discovered Services
+
+```
+GET /gateway/api/discovery/services
+```
+
+Returns all services discovered via FARP, including their capabilities, protocols, and metadata.
+
+**Example Request:**
+
+```bash
+curl http://localhost:8080/gateway/api/discovery/services
+```
+
+**Example Response:**
+
+```json
+[
+  {
+    "name": "user-service",
+    "version": "1.2.0",
+    "address": "192.168.1.10",
+    "port": 8080,
+    "protocols": ["http"],
+    "schemaTypes": ["rest"],
+    "capabilities": ["health", "metrics", "openapi"],
+    "healthy": true,
+    "metadata": {
+      "farp.enabled": "true",
+      "openapi": "http://192.168.1.10:8080/openapi.json"
+    },
+    "routeCount": 3,
+    "discoveredAt": "2025-01-15T10:05:00Z"
+  }
+]
+```
+
+### Force Discovery Refresh
+
+```
+POST /gateway/api/discovery/refresh
+```
+
+Forces an immediate FARP re-scan of all services.
+
+**Example Request:**
+
+```bash
+curl -X POST http://localhost:8080/gateway/api/discovery/refresh
+```
+
+**Success Response (200):**
+
+```json
+{"status": "refreshed"}
+```
+
+### Push-Register a Service
+
+```
+POST /gateway/api/discovery/register
+```
+
+Allows a service to push-register itself with the gateway. This is an alternative to FARP auto-discovery for environments where mDNS is not available.
+
+**Request Body:**
+
+```json
+{
+  "service_id": "user-svc-01",
+  "service_name": "user-service",
+  "service_version": "1.2.0",
+  "address": "192.168.1.10",
+  "port": 8080,
+  "tags": ["production", "v1"],
+  "metadata": {
+    "openapi": "http://192.168.1.10:8080/openapi.json"
+  },
+  "farp_enabled": true
+}
+```
+
+**Success Response (200):**
+
+```json
+{"status": "registered", "service": "user-service"}
+```
+
+### Deregister a Service
+
+```
+DELETE /gateway/api/discovery/services/:name
+```
+
+Removes a push-registered service and its associated routes.
+
+**Example Request:**
+
+```bash
+curl -X DELETE http://localhost:8080/gateway/api/discovery/services/user-service
+```
+
+**Success Response (200):**
+
+```json
+{"status": "deregistered", "service": "user-service"}
+```
+
+## OpenAPI Aggregation
+
+### Aggregated Spec
+
+```
+GET /gateway/openapi.json
+```
+
+Returns the merged OpenAPI 3.1.0 spec from all upstream services.
+
+### Swagger UI
+
+```
+GET /gateway/swagger
+```
+
+Serves the interactive Swagger UI pointing to the aggregated spec.
+
+### Service Listing
+
+```
+GET /gateway/api/openapi/services
+```
+
+Returns a list of services that have OpenAPI specs registered.
+
+### Per-Service Spec
+
+```
+GET /gateway/api/openapi/services/:service
+```
+
+Returns the OpenAPI spec for a specific upstream service (before merging).
+
+**Example Request:**
+
+```bash
+curl http://localhost:8080/gateway/api/openapi/services/user-service
+```
+
+### Force OpenAPI Refresh
+
+```
+POST /gateway/api/openapi/refresh
+```
+
+Forces an immediate re-fetch of all upstream OpenAPI specs.
+
+```bash
+curl -X POST http://localhost:8080/gateway/api/openapi/refresh
+```
+
+## Real-Time Event Stream
+
+### WebSocket Connection
+
+```
+WS /gateway/ws
+```
+
+Opens a WebSocket connection for real-time gateway events. The server pushes JSON messages every 2 seconds with current statistics and route data.
+
+**Connecting:**
+
+```javascript
+const ws = new WebSocket("ws://localhost:8080/gateway/ws");
+
+ws.onmessage = (event) => {
+  const msg = JSON.parse(event.data);
+  switch (msg.type) {
+    case "stats":
+      updateDashboard(msg.data);
+      break;
+    case "routes":
+      updateRouteTable(msg.data);
+      break;
+  }
+};
+```
+
+**Message Types:**
+
+| Type | Payload | Description |
+|------|---------|-------------|
+| `stats` | `GatewayStats` | Aggregated gateway statistics (every 2s) |
+| `routes` | `[]*Route` | Full route table with target stats (every 2s) |
+
+**Stats Message Example:**
+
+```json
+{
+  "type": "stats",
+  "data": {
+    "totalRequests": 50000,
+    "totalErrors": 150,
+    "activeConns": 42,
+    "avgLatencyMs": 15.3,
+    "requestsPerSec": 245.7,
+    "totalRoutes": 8,
+    "healthyUpstreams": 12,
+    "totalUpstreams": 14
+  }
+}
+```
+
+**Routes Message Example:**
+
+```json
+{
+  "type": "routes",
+  "data": [
+    {
+      "id": "manual-/users",
+      "path": "/api/users",
+      "targets": [...],
+      "enabled": true,
+      "source": "manual"
+    }
+  ]
+}
+```
+
+The WebSocket connection is only available when the dashboard is enabled with `realtime: true` (the default).
+
+## Error Responses
+
+All error responses follow a consistent JSON format:
+
+```json
+{"error": "description of what went wrong"}
+```
+
+Common HTTP status codes:
+
+| Code | Meaning |
+|------|---------|
+| `200` | Success |
+| `201` | Resource created |
+| `400` | Bad request (invalid body, cannot modify auto-discovered route) |
+| `404` | Resource not found |
+| `409` | Conflict (route already exists) |
+| `500` | Internal server error |
+| `503` | Service unavailable (gateway draining, realtime not enabled) |

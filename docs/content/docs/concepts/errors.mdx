@@ -1,185 +1,254 @@
 ---
 title: Error Handling
-description: Sentinel errors and error patterns used across Herald.
+description: Gateway error types, error hooks, custom error pages, and upstream failure handling.
 ---
 
-Herald defines sentinel errors in the root `herald` package and the `driver` package. Use `errors.Is` to check for specific error conditions in your application code.
+Bastion defines error types for each stage of the request pipeline. Errors can be intercepted and customized through the hook system, and upstream failures are handled automatically by the circuit breaker and retry mechanisms.
 
-## Using errors.Is
+## Gateway error types
 
-```go
-import (
-    "errors"
-    "github.com/xraph/herald"
-)
+Errors in Bastion fall into several categories based on where they occur in the pipeline.
 
-result, err := h.Send(ctx, req)
-if errors.Is(err, herald.ErrTemplateNotFound) {
-    // template does not exist for this app + channel
-}
-```
+### Routing errors
 
-All Herald services and store backends return these sentinel errors. Store implementations wrap them so that `errors.Is` works regardless of which backend (PostgreSQL, SQLite, MongoDB, or in-memory) is in use.
+| Error | HTTP status | Description |
+|-------|-------------|-------------|
+| Route not found | `404 Not Found` | No route matches the request path |
+| Route disabled | `404 Not Found` | The matching route has `Enabled: false` |
 
-## Sentinel errors by category
+### Rate limiting errors
 
-### Store and lifecycle errors
+| Error | HTTP status | Description |
+|-------|-------------|-------------|
+| Global rate limit exceeded | `429 Too Many Requests` | The global token bucket is exhausted |
+| Route rate limit exceeded | `429 Too Many Requests` | The per-route token bucket is exhausted |
+| Client rate limit exceeded | `429 Too Many Requests` | The per-client token bucket is exhausted |
 
-| Error | Value | Description |
-|-------|-------|-------------|
-| `herald.ErrNoStore` | `"herald: store is required"` | No store backend was provided to `herald.New`. |
-| `herald.ErrStoreClosed` | `"herald: store is closed"` | A store operation was attempted after the store was closed. |
-| `herald.ErrMigrationFailed` | `"herald: migration failed"` | A database schema migration failed. |
+Rate limit responses include a `Retry-After` header indicating how many seconds the client should wait before retrying.
 
-### Provider errors
+### Authentication errors
 
-| Error | Value | Description |
-|-------|-------|-------------|
-| `herald.ErrProviderNotFound` | `"herald: provider not found"` | No provider with the given ID exists. |
-| `herald.ErrProviderDisabled` | `"herald: provider is disabled"` | The resolved provider has `Enabled: false`. |
-| `herald.ErrNoProviderConfigured` | `"herald: no provider configured for channel"` | No enabled provider exists for the requested channel after scope resolution. |
-| `herald.ErrDriverNotFound` | `"herald: driver not found"` | The driver named by the provider is not registered. |
+| Error | HTTP status | Description |
+|-------|-------------|-------------|
+| Missing credentials | `401 Unauthorized` | No API key, Bearer token, or auth header provided |
+| Invalid credentials | `401 Unauthorized` | The provided credentials do not match |
+| Forward-auth rejected | `401 Unauthorized` or `403 Forbidden` | The forward-auth service rejected the request |
 
-The `driver` package also defines its own not-found error:
+### Upstream errors
 
-```go
-driver.ErrDriverNotFound // "herald: driver not found"
-```
+| Error | HTTP status | Description |
+|-------|-------------|-------------|
+| No healthy targets | `503 Service Unavailable` | All targets for the route are unhealthy |
+| Circuit breaker open | `503 Service Unavailable` | The circuit breaker for the selected target is open |
+| Upstream timeout | `504 Gateway Timeout` | The upstream did not respond within the configured timeout |
+| Upstream connection refused | `502 Bad Gateway` | The upstream refused the TCP connection |
+| Upstream TLS error | `502 Bad Gateway` | TLS handshake with the upstream failed |
 
-### Template errors
+### IP filtering errors
 
-| Error | Value | Description |
-|-------|-------|-------------|
-| `herald.ErrTemplateNotFound` | `"herald: template not found"` | No template with the given slug + channel exists for this app. |
-| `herald.ErrTemplateDisabled` | `"herald: template is disabled"` | The template has `Enabled: false`. |
-| `herald.ErrNoVersionForLocale` | `"herald: no template version for locale"` | No active template version matches the requested locale. |
-| `herald.ErrTemplateRenderFailed` | `"herald: template rendering failed"` | Template rendering failed (syntax error, execution error). |
-| `herald.ErrMissingRequiredVariable` | `"herald: missing required template variable"` | A required template variable was not provided in the `Data` map. |
-| `herald.ErrDuplicateSlug` | `"herald: duplicate template slug"` | A template with the same slug + channel + app already exists. |
-| `herald.ErrDuplicateLocale` | `"herald: duplicate locale version"` | A template version for the same locale already exists on this template. |
+| Error | HTTP status | Description |
+|-------|-------------|-------------|
+| IP denied | `403 Forbidden` | The client IP is on the deny list or not on the allow list |
 
-### Message and delivery errors
+## Error hooks
 
-| Error | Value | Description |
-|-------|-------|-------------|
-| `herald.ErrMessageNotFound` | `"herald: message not found"` | No message with the given ID exists. |
-| `herald.ErrSendFailed` | `"herald: send failed"` | Notification delivery failed at the driver level. |
-| `herald.ErrInvalidChannel` | `"herald: invalid channel type"` | An unsupported channel type was specified. |
-
-### Inbox errors
-
-| Error | Value | Description |
-|-------|-------|-------------|
-| `herald.ErrInboxNotFound` | `"herald: in-app notification not found"` | No inbox notification with the given ID exists. |
-
-### Preference errors
-
-| Error | Value | Description |
-|-------|-------|-------------|
-| `herald.ErrPreferenceNotFound` | `"herald: user preference not found"` | No preference record exists for the given app + user. |
-| `herald.ErrOptedOut` | `"herald: user opted out"` | The user has opted out of this notification type on the requested channel. |
-
-### Scoped config errors
-
-| Error | Value | Description |
-|-------|-------|-------------|
-| `herald.ErrScopedConfigNotFound` | `"herald: scoped config not found"` | No scoped configuration exists for the given app + scope type + scope ID. |
-
-## Error handling patterns
-
-### Check for specific errors
+The `OnError` hook lets you intercept errors and customize the response. It is called whenever an error occurs during request processing after route matching.
 
 ```go
-result, err := h.Send(ctx, &herald.SendRequest{
-    AppID:    "myapp",
-    Channel:  "email",
-    Template: "auth.welcome",
-    To:       []string{"user@example.com"},
-    Data:     map[string]any{"name": "Alice"},
+gw.Hooks().OnError(func(err error, route *bastion.Route, w http.ResponseWriter) {
+    log.Printf("Gateway error on route %s: %v", route.Path, err)
 })
+```
 
-switch {
-case errors.Is(err, herald.ErrTemplateNotFound):
-    // template does not exist -- check slug and channel
-case errors.Is(err, herald.ErrNoProviderConfigured):
-    // no email provider configured for this app
-case errors.Is(err, herald.ErrDriverNotFound):
-    // the provider's driver is not registered
-case err != nil:
-    // unexpected error
-default:
-    // success -- check result.Status
+### Checking error types
+
+Use `errors.Is` to check for specific gateway error types:
+
+```go
+gw.Hooks().OnError(func(err error, route *bastion.Route, w http.ResponseWriter) {
+    switch {
+    case errors.Is(err, bastion.ErrCircuitOpen):
+        // Circuit breaker is open for the selected target
+        metrics.IncrCounter("circuit_breaker.rejections", 1)
+
+    case errors.Is(err, bastion.ErrUpstreamTimeout):
+        // Upstream did not respond in time
+        metrics.IncrCounter("upstream.timeouts", 1)
+
+    case errors.Is(err, bastion.ErrNoHealthyTargets):
+        // All targets are unhealthy
+        alerting.Critical("No healthy targets for route %s", route.Path)
+
+    case errors.Is(err, bastion.ErrRateLimitExceeded):
+        // Rate limit hit
+        metrics.IncrCounter("rate_limit.exceeded", 1)
+    }
+})
+```
+
+### Sentinel errors
+
+| Error constant | Description |
+|----------------|-------------|
+| `bastion.ErrCircuitOpen` | Circuit breaker is in the open state |
+| `bastion.ErrUpstreamTimeout` | Upstream request timed out |
+| `bastion.ErrUpstreamConnectionRefused` | TCP connection to upstream was refused |
+| `bastion.ErrNoHealthyTargets` | No healthy upstream targets available |
+| `bastion.ErrRateLimitExceeded` | Token bucket is exhausted |
+| `bastion.ErrAuthFailed` | Authentication check failed |
+| `bastion.ErrIPDenied` | Client IP is not allowed |
+| `bastion.ErrTLSHandshakeFailed` | TLS handshake with upstream failed |
+
+## Custom error pages
+
+By default, Bastion returns plain text error responses. You can customize error responses using the `OnError` hook:
+
+```go
+gw.Hooks().OnError(func(err error, route *bastion.Route, w http.ResponseWriter) {
+    w.Header().Set("Content-Type", "application/json")
+
+    switch {
+    case errors.Is(err, bastion.ErrRateLimitExceeded):
+        w.WriteHeader(http.StatusTooManyRequests)
+        json.NewEncoder(w).Encode(map[string]string{
+            "error":   "rate_limit_exceeded",
+            "message": "Too many requests. Please retry later.",
+        })
+
+    case errors.Is(err, bastion.ErrCircuitOpen):
+        w.WriteHeader(http.StatusServiceUnavailable)
+        json.NewEncoder(w).Encode(map[string]string{
+            "error":   "service_unavailable",
+            "message": "The upstream service is temporarily unavailable.",
+        })
+
+    case errors.Is(err, bastion.ErrUpstreamTimeout):
+        w.WriteHeader(http.StatusGatewayTimeout)
+        json.NewEncoder(w).Encode(map[string]string{
+            "error":   "gateway_timeout",
+            "message": "The upstream service did not respond in time.",
+        })
+
+    default:
+        w.WriteHeader(http.StatusBadGateway)
+        json.NewEncoder(w).Encode(map[string]string{
+            "error":   "bad_gateway",
+            "message": "An unexpected error occurred.",
+        })
+    }
+})
+```
+
+## Upstream timeout handling
+
+Bastion enforces timeouts at multiple levels:
+
+### Request timeout
+
+The per-request timeout controls how long Bastion waits for a complete response from the upstream:
+
+```go
+bastion.WithTimeout(30 * time.Second) // global default
+```
+
+Per-route override:
+
+```go
+bastion.RouteConfig{
+    Path:    "/reports/*",
+    Timeout: 60 * time.Second, // longer timeout for slow endpoints
 }
 ```
 
-### Template resolution failures
+### Connection timeout
 
-When sending with a template, Herald resolves the template by slug and channel, then renders the appropriate locale version. Multiple errors can occur in this chain:
+The HTTP transport uses a separate dial timeout for establishing the TCP connection. This is shorter than the request timeout and prevents slow connection establishment from consuming the full request budget.
 
-```go
-result, err := h.Send(ctx, req)
+### Timeout behavior
 
-switch {
-case errors.Is(err, herald.ErrTemplateNotFound):
-    // slug + channel combination not found for this app
-case errors.Is(err, herald.ErrTemplateDisabled):
-    // template exists but is disabled
-case errors.Is(err, herald.ErrNoVersionForLocale):
-    // no active version for the requested locale
-case errors.Is(err, herald.ErrMissingRequiredVariable):
-    // a required variable was not provided in Data
-case errors.Is(err, herald.ErrTemplateRenderFailed):
-    // Go template execution error
-}
+When a timeout occurs:
+
+1. The upstream connection is closed
+2. The failure is recorded for circuit breaker and passive health tracking
+3. If a retry policy is configured, the request is retried with the next target
+4. If all retries are exhausted, `504 Gateway Timeout` is returned to the client
+5. The `OnError` hook is called with `bastion.ErrUpstreamTimeout`
+
+## Circuit breaker errors
+
+Circuit breakers protect the gateway from repeatedly sending requests to failing upstreams.
+
+### Three-state model
+
+```
+         success
+    ┌──────────────┐
+    │              │
+    ▼              │
+┌────────┐  failure count   ┌──────┐  resetTimeout  ┌───────────┐
+│ Closed │ ───────────────▶ │ Open │ ──────────────▶ │ Half-Open │
+└────────┘  >= threshold    └──────┘    expires      └───────────┘
+    ▲                                                     │   │
+    │               probe succeeds                        │   │
+    └─────────────────────────────────────────────────────┘   │
+                                                              │
+              probe fails ──────────────────────▶ Open ◀──────┘
 ```
 
-### Provider resolution failures
+### Behavior per state
 
-The scope resolver walks the chain (user -> org -> app -> fallback) looking for an enabled provider. If none is found:
+| State | Request handling |
+|-------|----------------|
+| **Closed** | Requests are forwarded normally. Failures increment the counter. |
+| **Open** | Requests are rejected immediately with `503 Service Unavailable`. No traffic reaches the upstream. |
+| **Half-Open** | A single probe request is allowed through. If it succeeds, the circuit closes. If it fails, the circuit re-opens. |
 
-```go
-if errors.Is(err, herald.ErrNoProviderConfigured) {
-    // No enabled provider for this channel.
-    // Either create a provider or configure a scoped config.
-}
-```
+### Circuit breaker scope
 
-### Preference opt-out handling
+Circuit breakers are **per-target**, not per-route. If a target appears in multiple routes, the circuit breaker state is shared. This prevents a failing server from receiving traffic on any route.
 
-Herald checks user preferences automatically during `Send`. If the user has opted out, the send returns a result (not an error) with the opt-out reason:
-
-```go
-result, err := h.Send(ctx, req)
-if err == nil && result.Error == "user opted out" {
-    // User opted out of this notification type on this channel.
-    // result.Status is StatusSent (silent skip).
-}
-```
-
-### Store error mapping
-
-All store backends map database-level errors to Herald sentinel errors. For example, a PostgreSQL unique constraint violation on the template slug is mapped to `ErrDuplicateSlug`, and a "no rows" result is mapped to the appropriate `Err*NotFound` error.
+### Configuration
 
 ```go
-err := store.CreateTemplate(ctx, tmpl)
-if errors.Is(err, herald.ErrDuplicateSlug) {
-    // A template with this slug + channel already exists for this app.
-}
+bastion.WithCircuitBreaker(bastion.CircuitBreakerConfig{
+    Enabled:          true,
+    FailureThreshold: 5,      // 5 consecutive failures to open
+    ResetTimeout:     30 * time.Second, // wait 30s before half-open
+})
 ```
 
-## Wrapped errors
+## Retry behavior on errors
 
-Service methods may wrap sentinel errors with additional context using `fmt.Errorf` and `%w`. Always use `errors.Is` rather than string comparison:
+When a retry policy is configured, Bastion automatically retries failed requests:
 
 ```go
-// Works correctly even when the error is wrapped with context.
-if errors.Is(err, herald.ErrTemplateNotFound) {
-    // ...
-}
+bastion.WithRetry(bastion.RetryConfig{
+    MaxRetries: 3,
+    Strategy:   bastion.RetryExponential,
+    BaseDelay:  100 * time.Millisecond,
+    MaxDelay:   5 * time.Second,
+    Jitter:     true,
+})
 ```
 
-For example, the `Send` method wraps template errors:
+### Retryable errors
 
-```go
-// Internally: fmt.Errorf("%w: %v", ErrTemplateNotFound, storeErr)
-```
+| Error type | Retried? |
+|-----------|----------|
+| Upstream connection refused | Yes |
+| Upstream timeout | Yes |
+| Circuit breaker open (target-level) | Yes (selects a different target) |
+| 5xx upstream response | Yes |
+| 4xx upstream response | No |
+| Rate limit exceeded | No |
+| Authentication failure | No |
+
+### Backoff strategies
+
+| Strategy | Delay pattern |
+|----------|--------------|
+| `RetryExponential` | `baseDelay * 2^attempt` (capped at `maxDelay`) |
+| `RetryLinear` | `baseDelay * attempt` (capped at `maxDelay`) |
+| `RetryFixed` | `baseDelay` (constant delay) |
+
+When `Jitter` is enabled, a random value between 0 and the computed delay is added to prevent retry storms across multiple clients.
