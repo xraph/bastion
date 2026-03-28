@@ -1,0 +1,253 @@
+---
+title: OpenAPI Aggregation
+description: Unified OpenAPI specification from all upstream services via FARP.
+---
+
+Bastion can aggregate OpenAPI specifications from all upstream services into a single, unified OpenAPI 3.1.0 document. This gives API consumers a single endpoint for discovering every route behind the gateway, complete with Swagger UI for interactive exploration.
+
+## How It Works
+
+1. **Services register OpenAPI specs via FARP metadata.** When a Forge service publishes its FARP schema, it includes an `openapi` metadata key pointing to its spec URL (e.g., `http://user-service:8080/openapi.json`).
+
+2. **Manual routes can also declare specs.** Routes configured with `WithServiceRoute()` or with the `openapi_spec` YAML field have their specs fetched too.
+
+3. **The gateway periodically fetches and merges specs.** On a configurable interval, Bastion fetches each upstream spec, prefixes paths with the route prefix (in `prefix` merge strategy), and merges them into a single OpenAPI 3.1.0 document.
+
+4. **The merged spec is served at a well-known endpoint.** Consumers access the aggregated spec and Swagger UI from the gateway.
+
+## Endpoints
+
+| Path | Description |
+|------|-------------|
+| `/gateway/openapi.json` | Aggregated OpenAPI spec from all upstream services |
+| `/gateway/swagger` | Swagger UI for the aggregated spec |
+| `/gateway/api/openapi/services` | List of services with OpenAPI specs |
+| `/gateway/api/openapi/services/:service` | OpenAPI spec for a specific service |
+| `/gateway/api/openapi/refresh` | Force re-fetch of all upstream specs |
+| `/docs` | Root-level Swagger UI (when `enable_root_docs` is true) |
+| `/openapi.json` | Root-level aggregated spec (when `enable_root_docs` is true) |
+
+The base path (`/gateway`) matches the configured dashboard base path and is customizable.
+
+## Configuration
+
+### Programmatic
+
+```go
+import (
+    "time"
+    "github.com/xraph/bastion"
+)
+
+bastion.WithOpenAPI(bastion.OpenAPIConfig{
+    Enabled:            true,
+    Path:               "/openapi.json",
+    UIPath:             "/swagger",
+    Title:              "My API Gateway",
+    Description:        "All services behind the gateway",
+    Version:            "1.0.0",
+    RefreshInterval:    30 * time.Second,
+    FetchTimeout:       10 * time.Second,
+    MergeStrategy:      "prefix",
+    EnableRootDocs:     true,
+    EnableGatewayDocs:  false,
+    ExcludeServices:    []string{"internal-admin"},
+})
+```
+
+### YAML
+
+```yaml
+bastion:
+  openapi:
+    enabled: true
+    path: /openapi.json
+    ui_path: /swagger
+    title: "My API Gateway"
+    description: "All services behind the gateway"
+    version: "1.0.0"
+    refresh_interval: 30s
+    fetch_timeout: 10s
+    merge_strategy: prefix
+    enable_root_docs: true
+    enable_gateway_docs: false
+    exclude_services:
+      - internal-admin
+```
+
+### Configuration Fields
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `Enabled` | `bool` | `true` | Enable OpenAPI aggregation |
+| `Path` | `string` | `"/openapi.json"` | Path for the merged spec (relative to dashboard base) |
+| `UIPath` | `string` | `"/swagger"` | Path for Swagger UI (relative to dashboard base) |
+| `Title` | `string` | `"Forge Gateway"` | Title in the aggregated spec |
+| `Description` | `string` | `""` | Description in the aggregated spec |
+| `Version` | `string` | `"1.0.0"` | Version in the aggregated spec |
+| `RefreshInterval` | `duration` | `30s` | How often to re-fetch upstream specs |
+| `FetchTimeout` | `duration` | `10s` | Timeout for fetching individual specs |
+| `MergeStrategy` | `string` | `"prefix"` | How to merge paths: `prefix` or `flat` |
+| `EnableRootDocs` | `bool` | `false` | Serve aggregated spec at root (`/openapi.json`, `/docs`) |
+| `EnableGatewayDocs` | `bool` | `false` | Serve the gateway's own admin API spec |
+| `ExcludeServices` | `[]string` | `[]` | Services to exclude from aggregation |
+
+## Merge Strategies
+
+### Prefix Strategy (default)
+
+The `prefix` strategy prepends each service's route prefix to all paths in its OpenAPI spec. This prevents path collisions and makes it clear which service owns each endpoint.
+
+For example, a `user-service` mounted at `/users` with a path `/profile` becomes `/users/profile` in the merged spec.
+
+```
+user-service paths:
+  /profile     -> /users/profile
+  /settings    -> /users/settings
+
+order-service paths:
+  /             -> /orders/
+  /:id          -> /orders/:id
+```
+
+### Flat Strategy
+
+The `flat` strategy includes paths as-is from each upstream spec without prefixing. Use this when your services already use globally unique paths or when you want the raw upstream paths exposed.
+
+**Warning:** The flat strategy can produce path collisions if multiple services define the same path.
+
+## Registering OpenAPI Specs
+
+### Via FARP Discovery
+
+When services are discovered via FARP, the gateway checks their metadata for an `openapi` key. Forge services that use the built-in schema registration automatically include this:
+
+```go
+// In the upstream service
+app.Schema().SetMetadata("openapi", "http://localhost:8080/openapi.json")
+```
+
+The gateway fetches the spec from the declared URL during discovery.
+
+### Via Manual Routes
+
+For statically configured routes, use `WithServiceRoute()` to associate a service name and OpenAPI spec URL:
+
+```go
+bastion.WithServiceRoute(
+    "user-service",                               // Service name
+    "/users",                                     // Route path
+    "http://user-service:8080",                   // Target URL
+    "http://user-service:8080/openapi.json",      // OpenAPI spec URL
+)
+```
+
+Or in the route config directly:
+
+```go
+bastion.WithRoute(bastion.RouteConfig{
+    Path:        "/users",
+    ServiceName: "user-service",
+    OpenAPISpec: "http://user-service:8080/openapi.json",
+    Targets: []bastion.TargetConfig{
+        {URL: "http://user-service:8080", Weight: 1},
+    },
+    StripPrefix: true,
+    Enabled:     true,
+})
+```
+
+### Via YAML
+
+```yaml
+bastion:
+  routes:
+    - path: /users
+      service_name: user-service
+      openapi_spec: http://user-service:8080/openapi.json
+      targets:
+        - url: http://user-service:8080
+          weight: 1
+      strip_prefix: true
+      enabled: true
+```
+
+## Excluding Services
+
+Some internal services should not appear in the public API documentation. Use `ExcludeServices` to filter them out:
+
+```go
+bastion.WithOpenAPI(bastion.OpenAPIConfig{
+    Enabled:         true,
+    ExcludeServices: []string{"internal-admin", "health-checker", "metrics-collector"},
+})
+```
+
+Or in YAML:
+
+```yaml
+bastion:
+  openapi:
+    enabled: true
+    exclude_services:
+      - internal-admin
+      - health-checker
+      - metrics-collector
+```
+
+Excluded services are skipped during spec aggregation but their routes still function normally for proxying.
+
+## Root-Level Documentation
+
+By default, the aggregated spec is served under the dashboard base path (e.g., `/gateway/openapi.json`). Enable `EnableRootDocs` to also serve it at the root level:
+
+```go
+bastion.WithOpenAPIRootDocs(true)
+```
+
+This mounts:
+- `/openapi.json` -- The aggregated spec
+- `/docs` -- Swagger UI pointing to the root spec
+
+This is useful when you want consumers to access API documentation directly at the gateway root without knowing the dashboard path.
+
+## Gateway Admin API Docs
+
+The gateway's own admin API (route management, stats, discovery) can also be documented with OpenAPI. This is disabled by default to keep the aggregated spec focused on upstream services:
+
+```go
+bastion.WithOpenAPIGatewayDocs(true)
+```
+
+When enabled, the gateway admin spec is served at `/gateway/admin/openapi.json` with Swagger UI at `/gateway/swagger`.
+
+## Extension Path Filtering
+
+Bastion can filter out framework-specific extension paths from the OpenAPI spec. For example, if an upstream service exposes internal Forge extension routes, you can exclude them:
+
+```go
+bastion.WithExtensionFilter(bastion.ExtensionPathFilter{
+    ServiceName:       "user-service",
+    KnownExtensions:   []string{"/_/health", "/_/metrics", "/_farp"},
+    AllowedExtensions: []string{},
+    BlockAtProxy:      false,
+})
+```
+
+## Forcing a Refresh
+
+The gateway automatically refreshes specs on the configured interval. To force an immediate refresh, use the admin API:
+
+```bash
+curl -X POST http://localhost:8080/gateway/api/openapi/refresh
+```
+
+Or access the per-service spec:
+
+```bash
+# List all services with OpenAPI specs
+curl http://localhost:8080/gateway/api/openapi/services
+
+# Get a specific service's spec
+curl http://localhost:8080/gateway/api/openapi/services/user-service
+```

@@ -1,0 +1,219 @@
+---
+title: Authentication
+description: Request authentication via API keys, Bearer tokens, and forward auth.
+---
+
+Bastion provides gateway-level authentication that validates incoming requests before they reach upstream services. It supports multiple authentication strategies, per-route overrides, and integration with the Forge auth extension.
+
+## Configuration
+
+```go
+bastion.WithAuth(bastion.AuthConfig{
+    Enabled:        true,
+    DefaultPolicy:  "deny",
+    Providers:      []string{"api-keys", "jwt-tokens"},
+    ForwardHeaders: true,
+})
+```
+
+### Configuration Fields
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `Enabled` | `bool` | `false` | Enable or disable gateway authentication |
+| `DefaultPolicy` | `string` | `""` | Default policy when no providers are configured (`"allow"` or `"deny"`) |
+| `Providers` | `[]string` | `[]` | Ordered list of provider names to try (OR logic) |
+| `ForwardHeaders` | `bool` | `true` | Forward authenticated identity to upstream via headers |
+
+## Authentication Flow
+
+When a request arrives and auth is enabled:
+
+1. Check if the route has a per-route auth override. If `SkipAuth` is true, the request passes through.
+2. Determine which providers to use (per-route providers override global providers).
+3. Try each provider in order. If any provider returns a valid `AuthContext`, the request is authenticated.
+4. If all providers fail, return 401 Unauthorized.
+5. If the route requires specific scopes, verify the `AuthContext` has all required scopes. Return 403 Forbidden if not.
+6. If `ForwardHeaders` is enabled, inject identity headers for the upstream.
+
+## Built-in Providers
+
+### API Key Authentication
+
+Validates requests using API keys sent in a header or query parameter:
+
+```go
+apiKeyProvider := bastion.NewAPIKeyAuthProvider(
+    "api-keys",       // Provider name
+    "X-API-Key",      // Header to check (default: "X-API-Key")
+    "api_key",        // Query param to check (optional)
+    []*bastion.APIKeyEntry{
+        {
+            Key:     "sk_live_abc123",
+            Subject: "service-a",
+            Scopes:  []string{"read", "write"},
+        },
+        {
+            Key:     "sk_live_def456",
+            Subject: "service-b",
+            Scopes:  []string{"read"},
+        },
+    },
+)
+```
+
+The provider checks the header first, then falls back to the query parameter. Each key maps to a subject (identity) and optional scopes.
+
+### Bearer Token Authentication
+
+Validates Bearer tokens in the Authorization header using a custom validation function:
+
+```go
+bearerProvider := bastion.NewBearerTokenAuthProvider(
+    "jwt-tokens",
+    func(ctx context.Context, token string) (*bastion.GatewayAuthContext, error) {
+        // Validate the token (e.g., verify JWT signature, check expiry)
+        claims, err := validateJWT(token)
+        if err != nil {
+            return nil, err
+        }
+        return &bastion.GatewayAuthContext{
+            Subject: claims.Subject,
+            Scopes:  claims.Scopes,
+            Claims:  map[string]any{"role": claims.Role},
+        }, nil
+    },
+)
+```
+
+The provider extracts the token from the `Authorization: Bearer <token>` header and passes it to the validation function.
+
+### Forward Auth
+
+Delegates authentication to an external auth service. The gateway forwards selected headers to the auth endpoint and interprets the response:
+
+```go
+forwardAuthProvider := bastion.NewForwardAuthProvider(
+    "external-auth",
+    "https://auth.example.com/verify",
+    []string{"Authorization", "Cookie", "X-Forwarded-For"},
+)
+```
+
+Forward auth behavior:
+
+1. The gateway sends a `GET` request to the auth endpoint.
+2. Configured headers from the original request are forwarded.
+3. `X-Original-URI` and `X-Original-Method` headers are added for context.
+4. A `200` response means authenticated. The auth service returns identity info in response headers.
+5. Any non-200 response means unauthenticated. The status code is forwarded to the client.
+
+Response headers from the auth service that populate the `AuthContext`:
+
+| Header | Maps To |
+|--------|---------|
+| `X-Auth-Subject` | `AuthContext.Subject` |
+| `X-Auth-Role` | `AuthContext.Claims["role"]` |
+| `X-Auth-Scopes` | `AuthContext.Scopes` (comma-separated) |
+
+## Registering Providers
+
+Register auth providers on the gateway:
+
+```go
+gateway.RegisterAuthProvider(apiKeyProvider)
+gateway.RegisterAuthProvider(bearerProvider)
+gateway.RegisterAuthProvider(forwardAuthProvider)
+```
+
+## Per-Route Auth
+
+Individual routes can override authentication settings:
+
+```go
+bastion.WithRoute(bastion.RouteConfig{
+    Path: "/api/admin/*",
+    Auth: &bastion.RouteAuthConfig{
+        Enabled:   true,
+        Providers: []string{"jwt-tokens"},
+        Scopes:    []string{"admin"},
+    },
+    Targets: []bastion.TargetConfig{
+        {URL: "http://admin-svc:8080"},
+    },
+})
+```
+
+### RouteAuthConfig Fields
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `Enabled` | `bool` | Enable auth for this route |
+| `Providers` | `[]string` | Providers to use (overrides global list) |
+| `Scopes` | `[]string` | Required scopes (all must be present) |
+| `SkipAuth` | `bool` | Skip authentication entirely for this route |
+| `ForwardAuth` | `bool` | Forward auth headers to upstream |
+
+### Skipping Auth for Public Routes
+
+```go
+bastion.WithRoute(bastion.RouteConfig{
+    Path: "/public/*",
+    Auth: &bastion.RouteAuthConfig{
+        SkipAuth: true,
+    },
+    Targets: []bastion.TargetConfig{
+        {URL: "http://public-svc:8080"},
+    },
+})
+```
+
+## Auth Context
+
+A successful authentication returns an `AuthContext`:
+
+```go
+type AuthContext struct {
+    Subject      string         // Authenticated entity (user ID, service ID)
+    Claims       map[string]any // Additional claims (role, email, etc.)
+    Scopes       []string       // OAuth2 scopes or permissions
+    ProviderName string         // Which provider authenticated this request
+}
+```
+
+The `AuthContext` can be checked for scopes:
+
+```go
+authCtx.HasScope("admin")           // Check a single scope
+authCtx.HasScopes("read", "write")  // Check all scopes (AND logic)
+```
+
+## Forwarded Headers
+
+When `ForwardHeaders` is true and authentication succeeds, the gateway injects the following headers into the upstream request:
+
+| Header | Value |
+|--------|-------|
+| `X-Auth-Subject` | The authenticated subject |
+| `X-Auth-Provider` | The provider that authenticated the request |
+| `X-Auth-Scopes` | Comma-separated scopes |
+| `X-Auth-Role` | The `role` claim (if present) |
+| `X-Auth-Email` | The `email` claim (if present) |
+
+This allows upstream services to trust the gateway's authentication and extract identity information without re-validating credentials.
+
+## Integration with Forge Auth Extension
+
+Bastion can integrate with the Forge auth extension's provider registry. When the Forge auth extension is loaded alongside Bastion, any providers registered in the Forge auth registry become available to the gateway:
+
+```go
+// Forge auth providers are automatically available
+// e.g., if Forge auth has a "jwt" provider registered,
+// the gateway can reference it by name
+bastion.WithAuth(bastion.AuthConfig{
+    Enabled:   true,
+    Providers: []string{"jwt"}, // References Forge auth provider
+})
+```
+
+The gateway checks its own local providers first, then falls back to the Forge auth registry.
