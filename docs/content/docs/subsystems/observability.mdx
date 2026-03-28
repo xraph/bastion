@@ -1,247 +1,295 @@
 ---
 title: Observability
-description: Monitor Herald with structured logging via slog, the message delivery log, and the event hook system.
+description: Prometheus metrics, structured access logging, and OpenTelemetry trace propagation.
 ---
 
-Herald provides observability through three mechanisms: structured logging using Go's `log/slog`, a persistent message delivery log stored in the database, and event hooks that fire on key lifecycle events.
+Bastion provides comprehensive observability through three pillars: Prometheus-compatible metrics, structured access logging, and OpenTelemetry trace propagation. Together they give full visibility into gateway traffic, upstream health, and request flows.
 
-## Structured Logging with slog
+## Prometheus Metrics
 
-Herald uses Go's standard `log/slog` package for all internal logging. Log messages are structured with key-value pairs, making them easy to filter, search, and aggregate in log management systems.
-
-### Configuring the Logger
-
-When using Herald directly, pass a logger with the `WithLogger` option:
+### Configuration
 
 ```go
-logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
-    Level: slog.LevelDebug,
-}))
-
-h, err := herald.New(
-    herald.WithStore(myStore),
-    herald.WithLogger(logger),
-    // ... drivers
-)
+bastion.WithMetrics(bastion.MetricsConfig{
+    Enabled: true,
+    Prefix:  "gateway",
+})
 ```
 
-If no logger is provided, Herald defaults to `slog.Default()`.
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `Enabled` | `bool` | `true` | Enable or disable metrics collection |
+| `Prefix` | `string` | `"gateway"` | Prefix for all metric names |
 
-### Log Messages
+### Exported Metrics
 
-Herald emits structured log messages at key points in the delivery pipeline:
+The gateway exports the following metrics through the Forge metrics system:
 
-**Debug level** -- Provider resolution and delivery details:
+#### Request Metrics
+
+| Metric | Type | Description |
+|--------|------|-------------|
+| `gateway.requests_total` | Counter | Total number of proxied requests |
+| `gateway.request_duration_seconds` | Histogram | Request latency distribution |
+| `gateway.active_connections.<protocol>` | Gauge | Active connections by protocol (http, websocket, sse) |
+
+#### Resilience Metrics
+
+| Metric | Type | Description |
+|--------|------|-------------|
+| `gateway.retry_total` | Counter | Total retry attempts |
+| `gateway.rate_limited_total` | Counter | Total rate-limited requests |
+| `gateway.circuit_breaker_state.<targetID>` | Gauge | Circuit breaker state (0=closed, 1=half-open, 2=open) |
+
+#### Upstream Metrics
+
+| Metric | Type | Description |
+|--------|------|-------------|
+| `gateway.upstream_health.<targetID>` | Gauge | Target health (1.0=healthy, 0.0=unhealthy) |
+| `gateway.discovery_routes.<source>` | Gauge | Number of routes by source (manual, farp, discovery) |
+
+#### Cache Metrics
+
+| Metric | Type | Description |
+|--------|------|-------------|
+| `gateway.cache_hits_total` | Counter | Total cache hits |
+| `gateway.cache_misses_total` | Counter | Total cache misses |
+
+### Custom Prefix
+
+Change the metric prefix to avoid collisions when running multiple gateways:
 
 ```go
-h.logger.Debug("herald: resolved provider via fallback",
-    "provider", p.Name,
-    "channel", channel,
-    "app_id", appID,
-)
-
-h.logger.Debug("herald: user opted out",
-    "user_id", req.UserID,
-    "template", req.Template,
-    "channel", channel,
-)
+bastion.WithMetrics(bastion.MetricsConfig{
+    Enabled: true,
+    Prefix:  "api_gateway",
+})
+// Metrics: api_gateway.requests_total, api_gateway.request_duration_seconds, etc.
 ```
 
-**Warn level** -- Non-fatal issues during delivery:
+## Structured Access Logging
+
+### Configuration
 
 ```go
-h.logger.Warn("herald: notify channel failed",
-    "channel", ch,
-    "template", req.Template,
-    "error", err,
-)
-
-h.logger.Warn("herald: failed to seed template",
-    "slug", tmpl.Slug,
-    "channel", tmpl.Channel,
-    "error", err,
-)
-
-h.logger.Warn("herald: invalid provider ID in scoped config",
-    "provider_id", pidStr,
-    "scope", scopeType,
-    "scope_id", scopeID,
-)
+bastion.WithAccessLog(bastion.AccessLogConfig{
+    Enabled:        true,
+    RedactHeaders:  []string{"Authorization", "Cookie", "Set-Cookie"},
+    IncludeBody:    false,
+    MaxBodyLogSize: 4096,
+})
 ```
 
-These structured fields make it easy to build queries in your logging platform:
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `Enabled` | `bool` | `true` | Enable or disable access logging |
+| `RedactHeaders` | `[]string` | `["Authorization", "Cookie", "Set-Cookie"]` | Headers to redact in logs |
+| `IncludeBody` | `bool` | `false` | Include request/response body in logs |
+| `MaxBodyLogSize` | `int` | `4096` | Maximum body bytes to log |
 
-- Filter by `channel` to see all email delivery events
-- Filter by `template` to track a specific notification type
-- Filter by `app_id` to isolate a single application
-- Filter by `error` to find all delivery failures
+### Log Fields
 
-## Message Delivery Log
+Every proxied request produces a structured log entry with these fields:
 
-Every notification delivery attempt is persisted in the messages table. This provides a complete audit trail of all notifications sent through Herald.
+#### Request Fields
 
-### Message Entity
+| Field | Description |
+|-------|-------------|
+| `method` | HTTP method (GET, POST, etc.) |
+| `path` | Request path |
+| `status` | HTTP response status code |
+| `latency_ms` | Total request latency in milliseconds |
+| `client_ip` | Client IP address (from X-Forwarded-For, X-Real-IP, or RemoteAddr) |
+| `user_agent` | Client User-Agent header |
+| `request_id` | Value of X-Request-ID header (if present) |
+| `query` | Query string (truncated to 200 chars) |
 
-```go
-type Message struct {
-    ID          id.MessageID      `json:"id"`
-    AppID       string            `json:"app_id"`
-    EnvID       string            `json:"env_id,omitempty"`
-    TemplateID  string            `json:"template_id,omitempty"`
-    ProviderID  string            `json:"provider_id,omitempty"`
-    Channel     string            `json:"channel"`
-    Recipient   string            `json:"recipient"`
-    Subject     string            `json:"subject,omitempty"`
-    Body        string            `json:"body,omitempty"`
-    Status      Status            `json:"status"`
-    Error       string            `json:"error,omitempty"`
-    Metadata    map[string]string `json:"metadata,omitempty"`
-    Async       bool              `json:"async"`
-    Attempts    int               `json:"attempts"`
-    SentAt      *time.Time        `json:"sent_at,omitempty"`
-    DeliveredAt *time.Time        `json:"delivered_at,omitempty"`
-    CreatedAt   time.Time         `json:"created_at"`
+#### Route Fields
+
+| Field | Description |
+|-------|-------------|
+| `route_id` | Matched route ID |
+| `route_path` | Route pattern |
+| `route_protocol` | Route protocol (http, websocket, sse, grpc) |
+| `route_source` | Route source (manual, farp, discovery) |
+
+#### Upstream Fields
+
+| Field | Description |
+|-------|-------------|
+| `upstream_url` | Selected target URL |
+| `upstream_id` | Selected target ID |
+
+#### Safe Headers
+
+These headers are always included when present:
+
+- `Accept`, `Content-Type`, `Content-Length`, `Referer`, `Origin`
+
+Sensitive headers listed in `RedactHeaders` are logged as `[REDACTED]`.
+
+### Log Levels
+
+The access logger uses different log levels based on the response status code:
+
+| Status Range | Log Level |
+|-------------|-----------|
+| 200-399 | `Info` |
+| 400-499 | `Warn` |
+| 500+ | `Error` |
+
+### Admin Action Logging
+
+Administrative actions (route creation, config changes, cache invalidation) are logged separately:
+
+```json
+{
+    "msg": "gateway admin action",
+    "action": "route_created",
+    "resource": "route-abc123",
+    "result": "success",
+    "client_ip": "10.0.0.1",
+    "user_agent": "curl/7.88.0"
 }
 ```
 
-### What Gets Logged
+## OpenTelemetry Trace Propagation
 
-For every recipient of every `Send` call, Herald creates a message record capturing:
+### Configuration
 
-- **Who**: `Recipient`, `AppID`, `EnvID`
-- **What**: `Channel`, `TemplateID`, `Subject`, `Body` (truncated)
-- **How**: `ProviderID`, `Attempts`
-- **Result**: `Status`, `Error`, `SentAt`, `DeliveredAt`
-- **Context**: `Metadata` (application-specific key-value pairs)
+```go
+bastion.WithTracing(bastion.TracingConfig{
+    Enabled:         true,
+    PropagateFormat: "w3c",
+    SampleRate:      1.0,
+})
+```
 
-The `Body` field is truncated to `TruncateBodyAt` characters (default: 4096) to keep the delivery log compact while retaining enough content for debugging.
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `Enabled` | `bool` | `true` | Enable or disable trace propagation |
+| `PropagateFormat` | `string` | `"w3c"` | Trace context format to propagate |
+| `SampleRate` | `float64` | `1.0` | Sampling rate (0.0 to 1.0) |
 
-### Status Tracking
+### Trace Context Propagation
 
-Messages progress through a lifecycle of states:
+When tracing is enabled, the gateway propagates trace context headers between the client and upstream:
 
-| Status | Description |
+- **W3C Trace Context** (`"w3c"`): Propagates `traceparent` and `tracestate` headers.
+
+The gateway acts as a pass-through for trace context -- it does not create new spans but ensures that distributed tracing works end-to-end across the gateway boundary.
+
+### Sample Rate
+
+The `SampleRate` controls what fraction of requests participate in tracing:
+
+| Value | Behavior |
+|-------|----------|
+| `1.0` | All requests are traced |
+| `0.5` | 50% of requests are traced |
+| `0.1` | 10% of requests are traced |
+| `0.0` | Tracing is effectively disabled |
+
+## Gateway Stats
+
+The proxy engine maintains an aggregated stats structure available via the admin API:
+
+```go
+type GatewayStats struct {
+    TotalRequests    int64
+    TotalErrors      int64
+    ActiveConns      int64
+    ActiveWSConns    int64
+    ActiveSSEConns   int64
+    AvgLatencyMs     float64
+    P99LatencyMs     float64
+    RequestsPerSec   float64
+    CacheHits        int64
+    CacheMisses      int64
+    RateLimited      int64
+    CircuitBreaks    int64
+    RetryAttempts    int64
+    TotalRoutes      int
+    HealthyUpstreams int
+    TotalUpstreams   int
+    Uptime           int64
+    StartedAt        time.Time
+}
+```
+
+Access via the admin API:
+
+```
+GET /gateway/api/stats
+```
+
+### Per-Route Stats
+
+Each route tracks its own metrics:
+
+```go
+type RouteStats struct {
+    RouteID       string
+    Path          string
+    TotalRequests int64
+    TotalErrors   int64
+    AvgLatencyMs  float64
+    P99LatencyMs  float64
+    CacheHits     int64
+    CacheMisses   int64
+    RateLimited   int64
+}
+```
+
+Per-route stats are included in `GatewayStats.RouteStats` keyed by route ID.
+
+## Dashboard Integration
+
+When the dashboard is enabled, all observability data feeds the real-time admin UI:
+
+```go
+bastion.WithDashboard(bastion.DashboardConfig{
+    Enabled:  true,
+    BasePath: "/gateway",
+    Realtime: true,
+})
+```
+
+The dashboard displays:
+
+- Live request throughput and error rates
+- Latency percentiles (p50, p95, p99)
+- Active connections by protocol
+- Upstream health status per target
+- Circuit breaker states
+- Cache hit/miss ratios
+- Route-level traffic breakdown
+
+## Audit Logging
+
+Administrative actions are recorded as audit events:
+
+```go
+type AuditEvent struct {
+    Action    AuditAction
+    Resource  string
+    Actor     string
+    Timestamp time.Time
+    Details   map[string]any
+}
+```
+
+Supported audit actions:
+
+| Action | Description |
 |--------|-------------|
-| `queued` | Message created, pending delivery (async mode) |
-| `sending` | Delivery attempt in progress |
-| `sent` | Driver accepted the message |
-| `delivered` | Delivery confirmed by the provider |
-| `failed` | Delivery failed |
-| `bounced` | Recipient address bounced |
+| `AuditRouteCreated` | A route was created |
+| `AuditRouteUpdated` | A route was updated |
+| `AuditRouteDeleted` | A route was deleted |
+| `AuditRouteToggled` | A route was enabled/disabled |
+| `AuditConfigChanged` | Gateway configuration was changed |
+| `AuditDiscoveryForced` | Discovery refresh was manually triggered |
+| `AuditCircuitReset` | A circuit breaker was manually reset |
+| `AuditCacheCleared` | Cache was cleared |
 
-The status is updated via `UpdateMessageStatus` as the delivery progresses:
-
-```go
-// Before sending
-msg.Status = message.StatusSending
-_ = h.store.CreateMessage(ctx, msg)
-
-// After driver returns
-if sendErr != nil {
-    _ = h.store.UpdateMessageStatus(ctx, msg.ID, message.StatusFailed, sendErr.Error())
-} else {
-    _ = h.store.UpdateMessageStatus(ctx, msg.ID, message.StatusSent, "")
-}
-```
-
-### Querying the Delivery Log
-
-Messages can be queried through the store or API with filtering and pagination:
-
-```go
-messages, err := store.ListMessages(ctx, appID, message.ListOptions{
-    Channel: "email",
-    Status:  message.StatusFailed,
-    Limit:   50,
-    Offset:  0,
-})
-```
-
-#### API Endpoints
-
-| Method | Path | Operation |
-|--------|------|-----------|
-| `GET` | `/messages` | List messages (query: `app_id`, `channel`, `status`, `limit`, `offset`) |
-| `GET` | `/messages/:id` | Get a single message by ID |
-
-Example: list all failed email deliveries:
-
-```
-GET /herald/messages?app_id=app_01abc...&channel=email&status=failed&limit=20
-```
-
-### Store Interface
-
-```go
-type Store interface {
-    CreateMessage(ctx context.Context, m *Message) error
-    GetMessage(ctx context.Context, messageID id.MessageID) (*Message, error)
-    UpdateMessageStatus(ctx context.Context, messageID id.MessageID, status Status, errMsg string) error
-    ListMessages(ctx context.Context, appID string, opts ListOptions) ([]*Message, error)
-}
-```
-
-## Monitoring Patterns
-
-### Failed Delivery Alerting
-
-Query the messages table periodically for failed deliveries to trigger alerts:
-
-```go
-failed, err := store.ListMessages(ctx, appID, message.ListOptions{
-    Status: message.StatusFailed,
-    Limit:  100,
-})
-
-if len(failed) > threshold {
-    // Trigger alert
-}
-```
-
-### Delivery Rate Tracking
-
-Use the `CreatedAt` and `SentAt` timestamps to measure delivery latency:
-
-```go
-for _, msg := range messages {
-    if msg.SentAt != nil {
-        latency := msg.SentAt.Sub(msg.CreatedAt)
-        // Record latency metric
-    }
-}
-```
-
-### Per-Channel Health
-
-List messages filtered by channel and status to monitor the health of individual channels:
-
-```go
-// Check email delivery success rate
-allEmail, _ := store.ListMessages(ctx, appID, message.ListOptions{Channel: "email", Limit: 1000})
-failedEmail, _ := store.ListMessages(ctx, appID, message.ListOptions{Channel: "email", Status: message.StatusFailed, Limit: 1000})
-
-successRate := 1.0 - float64(len(failedEmail)) / float64(len(allEmail))
-```
-
-### Per-Provider Tracking
-
-Each message records the `ProviderID` that was used for delivery. This allows you to track provider-level reliability:
-
-```go
-msg, _ := store.GetMessage(ctx, messageID)
-// msg.ProviderID tells you which provider handled this delivery
-// msg.Error tells you what went wrong (if failed)
-```
-
-## Health Check
-
-Herald exposes a `Health` method that pings the underlying store to verify database connectivity:
-
-```go
-err := h.Health(ctx)
-if err != nil {
-    // Store is unreachable
-}
-```
-
-When running as a Forge extension, this is integrated into the Forge health check system automatically.
+Audit events can be consumed via the `AuditSink` interface for forwarding to external audit systems.

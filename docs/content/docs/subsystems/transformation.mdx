@@ -1,0 +1,215 @@
+---
+title: Request Transformation
+description: Path rewriting, header manipulation, and prefix stripping.
+---
+
+Bastion transforms requests and responses as they pass through the proxy. Transformation rules are configured per-route and allow path rewriting, header manipulation, prefix stripping, and host header control.
+
+## Path Rewriting
+
+Three path manipulation modes are available, applied during request forwarding.
+
+### Strip Prefix
+
+Remove the matched route prefix before forwarding to the upstream:
+
+```go
+bastion.WithRoute(bastion.RouteConfig{
+    Path:        "/api/v1/users/*",
+    StripPrefix: true,
+    Targets:     []bastion.TargetConfig{{URL: "http://users-svc:8080"}},
+})
+// Client:   GET /api/v1/users/123
+// Upstream: GET /123
+```
+
+This is the most common transformation. When `StripPrefix` is true, the gateway removes the route's `Path` prefix from the request URL before forwarding.
+
+### Add Prefix
+
+Prepend a path segment to the request after stripping:
+
+```go
+bastion.WithRoute(bastion.RouteConfig{
+    Path:        "/legacy/*",
+    StripPrefix: true,
+    AddPrefix:   "/api/v2",
+    Targets:     []bastion.TargetConfig{{URL: "http://backend:8080"}},
+})
+// Client:   GET /legacy/items/42
+// Upstream: GET /api/v2/items/42
+```
+
+`AddPrefix` is applied after `StripPrefix`, allowing you to remap path namespaces.
+
+### Rewrite Path
+
+Apply a regex-based path rewrite using capture groups:
+
+```go
+bastion.WithRoute(bastion.RouteConfig{
+    Path:        "/old-api/*",
+    RewritePath: "/new-api/$1",
+    Targets:     []bastion.TargetConfig{{URL: "http://backend:8080"}},
+})
+// Client:   GET /old-api/users/123
+// Upstream: GET /new-api/users/123
+```
+
+When `RewritePath` is set, it takes precedence over `StripPrefix` and `AddPrefix`. The `$1` placeholder refers to the wildcard capture from the route path.
+
+## Header Manipulation
+
+### Route-Level Headers
+
+Each route carries a `HeaderPolicy` with three operations applied to the upstream request:
+
+```go
+bastion.WithRoute(bastion.RouteConfig{
+    Path: "/api/*",
+    Headers: bastion.HeaderPolicy{
+        Add:    map[string]string{"X-Gateway": "bastion", "X-Request-Start": "{{.Timestamp}}"},
+        Set:    map[string]string{"Host": "internal.api.example.com"},
+        Remove: []string{"X-Debug", "X-Internal-Token"},
+    },
+    Targets: []bastion.TargetConfig{{URL: "http://backend:8080"}},
+})
+```
+
+| Operation | Behavior |
+|-----------|----------|
+| `Add` | Appends headers. Does not overwrite existing values. |
+| `Set` | Sets headers. Overwrites any existing value. |
+| `Remove` | Deletes headers from the request. |
+
+Operations are applied in order: Add, Set, Remove.
+
+### Transform Config
+
+For more control, routes support a `TransformConfig` that allows separate header policies for requests and responses:
+
+```go
+bastion.WithRoute(bastion.RouteConfig{
+    Path: "/api/*",
+    Transform: &bastion.TransformConfig{
+        RequestHeaders: bastion.HeaderPolicy{
+            Set:    map[string]string{"X-Forwarded-Proto": "https"},
+            Remove: []string{"Cookie"},
+        },
+        ResponseHeaders: bastion.HeaderPolicy{
+            Add:    map[string]string{"X-Served-By": "bastion"},
+            Remove: []string{"Server", "X-Powered-By"},
+        },
+    },
+    Targets: []bastion.TargetConfig{{URL: "http://backend:8080"}},
+})
+```
+
+- **RequestHeaders** -- applied to the request before forwarding to the upstream.
+- **ResponseHeaders** -- applied to the upstream response before sending to the client.
+
+## Host Header Rewriting
+
+By default, the proxy forwards the original `Host` header from the client. To override the Host header sent to the upstream:
+
+```go
+bastion.WithRoute(bastion.RouteConfig{
+    Path: "/api/*",
+    Headers: bastion.HeaderPolicy{
+        Set: map[string]string{
+            "Host": "backend.internal.svc",
+        },
+    },
+    Targets: []bastion.TargetConfig{{URL: "http://backend:8080"}},
+})
+```
+
+This is necessary when the upstream validates the Host header or uses virtual host routing.
+
+## Prefix Stripping with Discovery
+
+When service discovery generates routes with auto-prefixes (e.g., `/users/*`), the `StripPrefix` setting in the discovery configuration controls whether the prefix is stripped:
+
+```go
+bastion.WithDiscovery(bastion.DiscoveryConfig{
+    AutoPrefix:     true,
+    PrefixTemplate: "/{{.ServiceName}}",
+    StripPrefix:    true, // Strip the auto-prefix before forwarding
+})
+// Discovered route: /users/profile -> Upstream: /profile
+```
+
+When `StripPrefix` is false, the auto-prefix is preserved in the upstream request.
+
+## Common Transformation Patterns
+
+### API Versioning
+
+Route multiple API versions to different backends:
+
+```go
+bastion.WithRoute(bastion.RouteConfig{
+    Path:        "/api/v1/*",
+    StripPrefix: true,
+    AddPrefix:   "/api",
+    Targets:     []bastion.TargetConfig{{URL: "http://api-v1:8080"}},
+})
+
+bastion.WithRoute(bastion.RouteConfig{
+    Path:        "/api/v2/*",
+    StripPrefix: true,
+    AddPrefix:   "/api",
+    Targets:     []bastion.TargetConfig{{URL: "http://api-v2:8080"}},
+})
+```
+
+### Security Header Injection
+
+Add security headers to all responses:
+
+```go
+bastion.WithRoute(bastion.RouteConfig{
+    Path: "/*",
+    Transform: &bastion.TransformConfig{
+        ResponseHeaders: bastion.HeaderPolicy{
+            Set: map[string]string{
+                "X-Content-Type-Options": "nosniff",
+                "X-Frame-Options":        "DENY",
+                "Strict-Transport-Security": "max-age=31536000; includeSubDomains",
+            },
+        },
+    },
+    Targets: []bastion.TargetConfig{{URL: "http://backend:8080"}},
+})
+```
+
+### Removing Upstream Headers
+
+Strip internal headers from upstream responses before they reach clients:
+
+```go
+Transform: &bastion.TransformConfig{
+    ResponseHeaders: bastion.HeaderPolicy{
+        Remove: []string{
+            "Server",
+            "X-Powered-By",
+            "X-AspNet-Version",
+            "X-Debug-Info",
+        },
+    },
+}
+```
+
+### Forwarding Client Identity
+
+When authentication is enabled and `ForwardHeaders` is true, the gateway automatically adds identity headers:
+
+| Header | Source |
+|--------|--------|
+| `X-Auth-Subject` | Authenticated subject |
+| `X-Auth-Provider` | Provider name |
+| `X-Auth-Scopes` | Comma-separated scopes |
+| `X-Auth-Role` | Role claim |
+| `X-Auth-Email` | Email claim |
+
+These are set automatically by the auth subsystem and do not need to be configured in the header policy.

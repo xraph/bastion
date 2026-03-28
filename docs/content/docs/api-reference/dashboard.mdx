@@ -1,0 +1,286 @@
+---
+title: Admin Dashboard
+description: Real-time ForgeUI-based gateway dashboard.
+---
+
+Bastion includes a built-in admin dashboard that provides real-time visibility into gateway operations. The dashboard is rendered server-side using ForgeUI (templ + Alpine.js + Tailwind CSS) and integrates into Forge's dashboard extension system as a contributor.
+
+## Overview
+
+The dashboard provides a comprehensive view of your API gateway:
+
+- **Real-time statistics** updated via WebSocket every 2 seconds
+- **Route management** with filtering, sorting, and enable/disable controls
+- **Upstream health matrix** showing target status and performance
+- **Service discovery** view for FARP-discovered services
+- **Traffic analysis** with request rates, latency, and error breakdowns
+- **Circuit breaker** status for all upstream targets
+- **API Explorer** with embedded Swagger UI
+- **Configuration viewer** for current gateway settings
+
+## Enabling the Dashboard
+
+The dashboard is enabled by default. Configure it via programmatic options or YAML:
+
+### Programmatic
+
+```go
+import "github.com/xraph/bastion"
+
+bastion.WithDashboard(bastion.DashboardConfig{
+    Enabled:  true,
+    BasePath: "/gateway",
+    Title:    "API Gateway Dashboard",
+    Realtime: true,
+})
+```
+
+### YAML
+
+```yaml
+bastion:
+  dashboard:
+    enabled: true
+    base_path: /gateway
+    title: "API Gateway Dashboard"
+    realtime: true
+```
+
+### Configuration Fields
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `Enabled` | `bool` | `true` | Enable/disable the dashboard |
+| `BasePath` | `string` | `"/gateway"` | URL prefix for all dashboard and admin API routes |
+| `Title` | `string` | `"Forge Gateway"` | Title shown in the dashboard topbar |
+| `Realtime` | `bool` | `true` | Enable WebSocket-based real-time updates |
+
+## Dashboard Pages
+
+The dashboard consists of nine navigable pages, organized into logical groups:
+
+### Overview
+
+**Path:** `/` (dashboard root)
+
+The landing page provides a high-level summary of gateway health:
+
+- Total requests, error rate, and average latency
+- Active connections (HTTP, WebSocket, SSE)
+- Healthy vs total upstream count
+- Cache hit/miss ratio
+- Rate limiting and circuit breaker activity
+- Quick-access route list with status indicators
+
+### Routes
+
+**Path:** `/routes`
+
+A sortable, filterable table of all registered routes:
+
+- Route ID, path, protocol, and source (manual/FARP/discovery)
+- Target count and health summary per route
+- Enable/disable toggle
+- Per-route statistics (requests, errors, latency)
+- Filter by source type and protocol
+
+### Upstreams
+
+**Path:** `/upstreams`
+
+A health matrix showing all upstream targets:
+
+- Target URL, weight, and health status
+- Active connection count
+- Circuit breaker state (closed/open/half-open)
+- Request count, error count, and average latency
+- Associated route path
+
+### Services
+
+**Path:** `/services`
+
+Displays all services discovered via FARP:
+
+- Service name, version, and address
+- Supported protocols and schema types
+- Capabilities (health, metrics, OpenAPI)
+- Route count generated from the service
+- Discovery timestamp
+- Metadata key-value pairs
+
+### Traffic
+
+**Path:** `/traffic`
+
+Traffic analysis dashboard:
+
+- Requests per second over time
+- Error rate percentage
+- Latency distribution (average, P99)
+- Cache efficiency metrics
+- Rate limiting statistics
+
+### Health
+
+**Path:** `/health`
+
+Detailed health check status:
+
+- Per-target health status and history
+- Failure/success threshold progress
+- Active vs passive health check results
+- Last check timestamp and response time
+
+### Circuits
+
+**Path:** `/circuits`
+
+Circuit breaker monitoring:
+
+- Per-target circuit state (closed, open, half-open)
+- Failure count and threshold
+- Last state transition time
+- Half-open probe results
+
+### API Explorer
+
+**Path:** `/api-explorer`
+
+Embedded Swagger UI for interactive API exploration:
+
+- Aggregated OpenAPI spec from all upstream services
+- Try-it-out functionality for testing endpoints
+- Schema visualization and model definitions
+
+### Config
+
+**Path:** `/config`
+
+Current gateway configuration viewer:
+
+- All configuration sections displayed in a structured format
+- Sensitive values (TLS keys) are redacted
+- Read-only view of the running configuration
+
+## Dashboard Widgets
+
+The dashboard contributes three widgets that can appear on Forge's main dashboard:
+
+| Widget ID | Title | Size | Refresh | Description |
+|-----------|-------|------|---------|-------------|
+| `bastion-stats` | Gateway Stats | Medium | 15s | Total requests, error rate, average latency |
+| `bastion-health` | Route Health | Small | 30s | Healthy vs total upstream targets |
+| `bastion-errors` | Error Rate | Small | 15s | Error percentage and open circuit count |
+
+These widgets auto-refresh on the specified interval and provide at-a-glance gateway health.
+
+## Settings Panel
+
+The dashboard registers a settings panel:
+
+| Setting ID | Title | Description |
+|------------|-------|-------------|
+| `bastion-config` | Gateway Configuration | View current gateway settings |
+
+## Real-Time Updates
+
+When `Realtime` is enabled (the default), the dashboard establishes a WebSocket connection to `/gateway/ws`. The server pushes updates every 2 seconds:
+
+- **Stats updates** -- Total requests, error rate, latency, connections
+- **Route updates** -- Full route table with target health and statistics
+
+The dashboard UI automatically refreshes without page reloads, providing a live view of gateway operations.
+
+## Technology Stack
+
+The dashboard is built on ForgeUI, Forge's server-side UI framework:
+
+| Component | Technology | Purpose |
+|-----------|-----------|---------|
+| Templates | [templ](https://templ.guide) | Type-safe Go HTML templates |
+| Interactivity | [Alpine.js](https://alpinejs.dev) | Lightweight client-side reactivity |
+| Styling | [Tailwind CSS](https://tailwindcss.com) | Utility-first CSS framework |
+| Real-time | WebSocket | Server-push for live updates |
+| Icons | Lucide | Consistent iconography |
+
+All rendering happens server-side. Alpine.js handles client-side interactions (sorting, filtering, WebSocket message processing) without a JavaScript build step.
+
+## Mounting into Forge Dashboard
+
+Bastion implements the `dashboard.DashboardAware` interface, which means it automatically registers as a dashboard contributor when the Forge dashboard extension is present:
+
+```go
+import (
+    "github.com/xraph/forge"
+    "github.com/xraph/bastion"
+    "github.com/xraph/bastion/extension"
+    dashext "github.com/xraph/forge/extensions/dashboard"
+)
+
+app := forge.New()
+
+// Register the Forge dashboard
+app.Register(dashext.New())
+
+// Bastion auto-registers as a contributor
+app.Register(extension.New(
+    bastion.WithDashboardEnabled(true),
+))
+
+app.Run()
+```
+
+The Bastion contributor registers:
+
+- A sidebar navigation with 9 pages grouped by category
+- A topbar with the gateway title, shield icon, and indigo accent color
+- Three dashboard widgets for the Forge main dashboard
+- A settings panel for configuration viewing
+
+### Navigation Structure
+
+| Group | Pages |
+|-------|-------|
+| Gateway | Overview |
+| Routing | Routes, Upstreams, Services |
+| Traffic | Traffic |
+| Resilience | Health, Circuits |
+| API | API Explorer |
+| Settings | Config |
+
+## Customization
+
+### Custom Base Path
+
+Change where the dashboard is mounted:
+
+```go
+bastion.WithDashboard(bastion.DashboardConfig{
+    Enabled:  true,
+    BasePath: "/admin/gateway",
+})
+```
+
+All admin API endpoints, the WebSocket connection, and OpenAPI paths will be prefixed with `/admin/gateway` instead of the default `/gateway`.
+
+### Disabling Real-Time
+
+For environments where WebSocket connections are not available (some reverse proxies, serverless):
+
+```go
+bastion.WithDashboard(bastion.DashboardConfig{
+    Enabled:  true,
+    Realtime: false,
+})
+```
+
+The dashboard will still function but will require manual page refreshes to see updated data. Widgets will still auto-refresh on their configured intervals via HTTP polling.
+
+### Disabling the Dashboard Entirely
+
+```go
+bastion.WithDashboardEnabled(false)
+```
+
+This disables all dashboard pages, admin API endpoints, and the WebSocket hub. The gateway proxy continues to function normally.
