@@ -1,8 +1,9 @@
 package bastion
 
 import (
-	"github.com/xraph/bastion/health"
 	"github.com/xraph/forge"
+
+	"github.com/xraph/bastion/health"
 )
 
 // HealthMonitor is a backward-compatible alias for health.Monitor.

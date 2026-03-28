@@ -93,13 +93,7 @@ function MiniGatewayDiagram() {
           <FlowLine length={24} color="indigo" delay={3} />
           <FlowNode label="Balance" color="blue" size="sm" delay={1.0} />
           <FlowLine length={24} color="indigo" delay={4} />
-          <FlowNode
-            label="Proxy"
-            color="indigo"
-            size="sm"
-            pulse
-            delay={1.15}
-          />
+          <FlowNode label="Proxy" color="indigo" size="sm" pulse delay={1.15} />
         </div>
 
         {/* Row 3: Operation events */}
@@ -113,7 +107,12 @@ function MiniGatewayDiagram() {
               className="flex items-center gap-0"
             >
               <FlowLine length={28} color="green" delay={3} />
-              <FlowNode label="route.matched" color="gray" size="sm" delay={1.1} />
+              <FlowNode
+                label="route.matched"
+                color="gray"
+                size="sm"
+                delay={1.1}
+              />
               <FlowLine length={24} color="green" delay={4} />
               <StatusBadge status="delivered" label="delivered" />
             </motion.div>
@@ -126,7 +125,12 @@ function MiniGatewayDiagram() {
               className="flex items-center gap-0"
             >
               <FlowLine length={28} color="green" delay={5} />
-              <FlowNode label="request.proxied" color="gray" size="sm" delay={1.3} />
+              <FlowNode
+                label="request.proxied"
+                color="gray"
+                size="sm"
+                delay={1.3}
+              />
               <FlowLine length={24} color="green" delay={6} />
               <StatusBadge status="delivered" label="delivered" />
             </motion.div>
@@ -139,7 +143,12 @@ function MiniGatewayDiagram() {
               className="flex items-center gap-0"
             >
               <FlowLine length={28} color="green" delay={7} />
-              <FlowNode label="health.checked" color="gray" size="sm" delay={1.5} />
+              <FlowNode
+                label="health.checked"
+                color="gray"
+                size="sm"
+                delay={1.5}
+              />
               <FlowLine length={24} color="green" delay={8} />
               <StatusBadge status="delivered" label="delivered" />
             </motion.div>

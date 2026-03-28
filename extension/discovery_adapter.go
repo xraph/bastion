@@ -5,10 +5,11 @@ import (
 	"strings"
 
 	"github.com/google/uuid"
-	"github.com/xraph/bastion"
 	"github.com/xraph/forge/extensions/discovery"
 	"github.com/xraph/forge/extensions/discovery/backends"
 	farpgw "github.com/xraph/forge/farp/gateway"
+
+	"github.com/xraph/bastion"
 )
 
 // discoveryAdapter wraps the discovery extension's Service to satisfy

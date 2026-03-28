@@ -8,8 +8,9 @@ import (
 	"context"
 	"net/http"
 
-	"github.com/xraph/bastion/middleware"
 	"github.com/xraph/forge"
+
+	"github.com/xraph/bastion/middleware"
 )
 
 // --- Compression ---

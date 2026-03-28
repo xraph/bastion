@@ -8,8 +8,9 @@ import (
 	"strings"
 	"time"
 
-	bastion "github.com/xraph/bastion"
 	"github.com/xraph/forge"
+
+	bastion "github.com/xraph/bastion"
 )
 
 // ProxySSE proxies a Server-Sent Events connection to an upstream target.

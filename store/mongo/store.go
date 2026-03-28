@@ -13,10 +13,11 @@ import (
 	"go.mongodb.org/mongo-driver/v2/mongo"
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
 
-	"github.com/xraph/bastion"
-	"github.com/xraph/bastion/store"
 	"github.com/xraph/grove"
 	"github.com/xraph/grove/drivers/mongodriver"
+
+	"github.com/xraph/bastion"
+	"github.com/xraph/bastion/store"
 )
 
 // Collection name constants.

@@ -8,8 +8,9 @@ import (
 
 	"github.com/a-h/templ"
 
-	"github.com/xraph/bastion"
 	"github.com/xraph/forge/extensions/dashboard/contributor"
+
+	"github.com/xraph/bastion"
 )
 
 // Contributor implements the LocalContributor interface for Bastion.

@@ -1,8 +1,9 @@
 package bastion
 
 import (
-	disc "github.com/xraph/bastion/discovery"
 	"github.com/xraph/forge"
+
+	disc "github.com/xraph/bastion/discovery"
 )
 
 // ServiceDiscovery is a backward-compatible alias for discovery.Manager.

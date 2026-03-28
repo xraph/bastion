@@ -10,8 +10,9 @@ import (
 	"strings"
 	"time"
 
-	bastion "github.com/xraph/bastion"
 	"github.com/xraph/forge"
+
+	bastion "github.com/xraph/bastion"
 )
 
 // GRPCProxy handles gRPC reverse proxying for both unary and streaming RPCs.

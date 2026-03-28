@@ -1,8 +1,9 @@
 package bastion
 
 import (
-	"github.com/xraph/bastion/observability"
 	"github.com/xraph/forge"
+
+	"github.com/xraph/bastion/observability"
 )
 
 // Backward-compatibility aliases for types that moved to the observability

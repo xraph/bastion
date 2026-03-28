@@ -10,11 +10,12 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/xraph/bastion"
-	"github.com/xraph/bastion/store"
 	"github.com/xraph/grove"
 	"github.com/xraph/grove/drivers/pgdriver"
 	"github.com/xraph/grove/migrate"
+
+	"github.com/xraph/bastion"
+	"github.com/xraph/bastion/store"
 )
 
 // Compile-time interface check.

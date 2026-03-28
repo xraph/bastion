@@ -11,9 +11,10 @@ import (
 	"sync"
 	"time"
 
+	"github.com/xraph/forge"
+
 	bastion "github.com/xraph/bastion"
 	"github.com/xraph/bastion/health"
-	"github.com/xraph/forge"
 )
 
 // Engine handles HTTP reverse proxying to upstream targets.

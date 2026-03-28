@@ -6,10 +6,11 @@ import (
 	"strings"
 
 	"github.com/gorilla/websocket"
+	"github.com/xraph/forge"
+
 	bastion "github.com/xraph/bastion"
 	"github.com/xraph/bastion/health"
 	"github.com/xraph/bastion/observability"
-	"github.com/xraph/forge"
 )
 
 // Gateway provides the admin API with access to gateway components.

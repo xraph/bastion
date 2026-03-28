@@ -10,8 +10,9 @@ import (
 
 	"github.com/gobwas/ws"
 	"github.com/gobwas/ws/wsutil"
-	bastion "github.com/xraph/bastion"
 	"github.com/xraph/forge"
+
+	bastion "github.com/xraph/bastion"
 )
 
 // ProxyWebSocket proxies a WebSocket connection to an upstream target.

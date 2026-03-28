@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+
 	bastion "github.com/xraph/bastion"
 )
 

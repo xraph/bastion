@@ -8,8 +8,9 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/xraph/bastion/health"
 	"github.com/xraph/forge"
+
+	"github.com/xraph/bastion/health"
 )
 
 // Gateway implements the Bastion API gateway.

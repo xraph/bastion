@@ -9,8 +9,9 @@ import (
 	"context"
 	"net/http"
 
-	"github.com/xraph/bastion/security"
 	"github.com/xraph/forge"
+
+	"github.com/xraph/bastion/security"
 )
 
 // --- Auth (was GatewayAuth) ---

@@ -4,6 +4,13 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/xraph/forge"
+	"github.com/xraph/forge/extensions/dashboard"
+	"github.com/xraph/forge/extensions/dashboard/contributor"
+	"github.com/xraph/forge/extensions/discovery"
+	"github.com/xraph/grove"
+	"github.com/xraph/vessel"
+
 	"github.com/xraph/bastion"
 	"github.com/xraph/bastion/api"
 	bastionDash "github.com/xraph/bastion/dashboard"
@@ -14,12 +21,6 @@ import (
 	mongostore "github.com/xraph/bastion/store/mongo"
 	pgstore "github.com/xraph/bastion/store/postgres"
 	sqlitestore "github.com/xraph/bastion/store/sqlite"
-	"github.com/xraph/forge"
-	"github.com/xraph/forge/extensions/dashboard"
-	"github.com/xraph/forge/extensions/dashboard/contributor"
-	"github.com/xraph/forge/extensions/discovery"
-	"github.com/xraph/grove"
-	"github.com/xraph/vessel"
 )
 
 // Ensure Extension implements forge.Extension and dashboard.DashboardAware.

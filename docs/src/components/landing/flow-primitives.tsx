@@ -238,7 +238,15 @@ export function FlowLine({
 interface FlowParticleStreamProps {
   direction?: "horizontal" | "vertical";
   length?: number;
-  color?: "teal" | "amber" | "orange" | "green" | "red" | "blue" | "indigo" | "violet";
+  color?:
+    | "teal"
+    | "amber"
+    | "orange"
+    | "green"
+    | "red"
+    | "blue"
+    | "indigo"
+    | "violet";
   count?: number;
   className?: string;
 }
