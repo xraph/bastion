@@ -31,12 +31,12 @@ type Gateway struct {
 	hub WSBroadcaster
 
 	// Concrete components (kept as-is — not duplicated in subpackages)
-	healthMon  *health.Monitor
+	healthMon   *health.Monitor
 	rateLimiter *RateLimiter
-	hooks      *HookEngine
-	accessLog  *AccessLogger
-	gwMetrics  *GatewayMetrics
-	disc       *ServiceDiscovery
+	hooks       *HookEngine
+	accessLog   *AccessLogger
+	gwMetrics   *GatewayMetrics
+	disc        *ServiceDiscovery
 
 	// Security / caching / TLS / OpenAPI
 	gwAuth     *GatewayAuth
@@ -48,10 +48,10 @@ type Gateway struct {
 	adminHandlerSetup func(gw *Gateway, router forge.Router)
 
 	// Persistent store (optional — nil means pure in-memory)
-	routeStore RouteStore
-	cbStore    CircuitBreakerStore
+	routeStore  RouteStore
+	cbStore     CircuitBreakerStore
 	healthStore HealthStore
-	auditSink  AuditSink
+	auditSink   AuditSink
 
 	// Lifecycle
 	draining         atomic.Bool

@@ -300,7 +300,6 @@ type TargetTLSConfig = security.TargetTLSConfig
 // Canonical definition: security.RouteAuthConfig
 type RouteAuthConfig = security.RouteAuthConfig
 
-
 // RouteCacheConfig defines per-route caching policy.
 //
 // Canonical definition: middleware.RouteCacheConfig

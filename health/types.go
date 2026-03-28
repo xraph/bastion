@@ -26,12 +26,12 @@ type CheckResult struct {
 
 // Summary provides a summary of health check history for a target.
 type Summary struct {
-	TargetID      string       `json:"targetId"`
-	TotalChecks   int          `json:"totalChecks"`
-	HealthyChecks int          `json:"healthyChecks"`
-	UptimePercent float64      `json:"uptimePercent"`
+	TargetID      string        `json:"targetId"`
+	TotalChecks   int           `json:"totalChecks"`
+	HealthyChecks int           `json:"healthyChecks"`
+	UptimePercent float64       `json:"uptimePercent"`
 	AvgLatency    time.Duration `json:"avgLatency"`
-	LastCheck     *CheckResult `json:"lastCheck,omitempty"`
+	LastCheck     *CheckResult  `json:"lastCheck,omitempty"`
 }
 
 // Event represents an upstream health change.

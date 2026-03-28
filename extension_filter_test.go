@@ -73,9 +73,9 @@ func TestIsExtensionPathExcluded(t *testing.T) {
 			excluded: false,
 		},
 		{
-			name:   "empty known extensions",
-			path:   "/cortex/agents",
-			filter: &ExtensionPathFilter{KnownExtensions: nil},
+			name:     "empty known extensions",
+			path:     "/cortex/agents",
+			filter:   &ExtensionPathFilter{KnownExtensions: nil},
 			excluded: false,
 		},
 		{

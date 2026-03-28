@@ -156,10 +156,10 @@ func (sd *Manager) DeregisterService(ctx context.Context, serviceName string) {
 
 // DiscoveryDebugInfo contains diagnostic data from a discovery probe.
 type DiscoveryDebugInfo struct {
-	ServiceNames []string                       `json:"service_names"`
+	ServiceNames []string                          `json:"service_names"`
 	Instances    map[string][]*ServiceInstanceInfo `json:"instances"`
-	Config       DiscoveryConfig                `json:"config"`
-	Error        string                         `json:"error,omitempty"`
+	Config       DiscoveryConfig                   `json:"config"`
+	Error        string                            `json:"error,omitempty"`
 }
 
 // DebugDiscovery performs a one-shot discovery probe and returns raw results

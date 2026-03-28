@@ -21,12 +21,12 @@ import (
 
 // Collection name constants.
 const (
-	colRoutes         = "bastion_routes"
-	colCBStates       = "bastion_cb_states"
-	colHealthChecks   = "bastion_health_checks"
-	colAuditEvents    = "bastion_audit_events"
-	colCacheEntries   = "bastion_cache"
-	colRateLimits     = "bastion_rate_limits"
+	colRoutes       = "bastion_routes"
+	colCBStates     = "bastion_cb_states"
+	colHealthChecks = "bastion_health_checks"
+	colAuditEvents  = "bastion_audit_events"
+	colCacheEntries = "bastion_cache"
+	colRateLimits   = "bastion_rate_limits"
 )
 
 // Compile-time interface check.
@@ -497,13 +497,13 @@ func (d routeDoc) toRoute() *bastion.Route {
 }
 
 type cbDoc struct {
-	TargetID        string              `bson:"_id"`
-	State           string              `bson:"state"`
-	FailureCount    int                 `bson:"failure_count"`
-	SuccessCount    int                 `bson:"success_count"`
-	LastFailure     time.Time           `bson:"last_failure"`
-	LastStateChange time.Time           `bson:"last_state_change"`
-	UpdatedAt       time.Time           `bson:"updated_at"`
+	TargetID        string    `bson:"_id"`
+	State           string    `bson:"state"`
+	FailureCount    int       `bson:"failure_count"`
+	SuccessCount    int       `bson:"success_count"`
+	LastFailure     time.Time `bson:"last_failure"`
+	LastStateChange time.Time `bson:"last_state_change"`
+	UpdatedAt       time.Time `bson:"updated_at"`
 }
 
 func newCBDoc(snap *bastion.CircuitBreakerSnapshot) cbDoc {

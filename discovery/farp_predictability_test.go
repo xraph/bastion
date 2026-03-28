@@ -1088,11 +1088,11 @@ func TestFARP_NoRouteGap_FARPFallbackFlap(t *testing.T) {
 	// Simulate FARP metadata disappearing (service restarts without
 	// farp.enabled or farp.openapi — falls back to discovery catch-all).
 	mock.instances["my-svc"] = []*ServiceInstanceInfo{{
-		ID:      "inst-1",
-		Name:    "my-svc",
-		Address: "10.0.0.1",
-		Port:    8080,
-		Healthy: true,
+		ID:       "inst-1",
+		Name:     "my-svc",
+		Address:  "10.0.0.1",
+		Port:     8080,
+		Healthy:  true,
 		Metadata: map[string]string{}, // no FARP metadata
 	}}
 

@@ -122,6 +122,6 @@ func TestBasePlugin_NoOps(t *testing.T) {
 		t.Errorf("expected nil error, got %v", err)
 	}
 
-	bp.OnResponse(nil, nil) // should not panic
+	bp.OnResponse(nil, nil)   // should not panic
 	bp.OnError(nil, nil, nil) // should not panic
 }

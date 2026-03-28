@@ -447,4 +447,3 @@ func dtoToRoute(dto bastion.RouteDTO, basePath string) *bastion.Route {
 		Metadata:       dto.Metadata,
 	}
 }
-

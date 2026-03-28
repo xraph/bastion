@@ -118,10 +118,10 @@ func TestManager_FilterInstances(t *testing.T) {
 	}
 
 	tests := []struct {
-		name     string
-		filters  []ServiceFilter
-		wantIDs  []string
-		wantLen  int
+		name    string
+		filters []ServiceFilter
+		wantIDs []string
+		wantLen int
 	}{
 		{
 			name:    "no filters",
