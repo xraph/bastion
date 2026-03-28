@@ -1,0 +1,206 @@
+---
+title: Upstreams
+description: Upstream target configuration, health states, weights, and connection pooling.
+---
+
+An upstream target is a backend service instance that receives proxied traffic from the gateway. Each route defines one or more targets, and the load balancer selects which target handles each request.
+
+## TargetConfig
+
+The `TargetConfig` struct defines a single upstream target:
+
+```go
+type TargetConfig struct {
+    // URL is the base URL of the upstream service (e.g., "http://user-service:8080").
+    URL string
+
+    // Weight determines how much traffic this target receives relative to other
+    // targets in the same route. Higher weight means more traffic. Only meaningful
+    // with weighted load balancing strategies.
+    Weight int
+
+    // TLS configures TLS settings for connections to this specific target.
+    TLS *TargetTLSConfig
+
+    // Metadata is a free-form map for custom target annotations.
+    Metadata map[string]string
+}
+```
+
+### Defining targets
+
+Targets are defined inline within a `RouteConfig`:
+
+```go
+bastion.WithRoute(bastion.RouteConfig{
+    Path: "/users/*",
+    Targets: []bastion.TargetConfig{
+        {URL: "http://user-service-1:8080", Weight: 3},
+        {URL: "http://user-service-2:8080", Weight: 2},
+        {URL: "http://user-service-3:8080", Weight: 1},
+    },
+    StripPrefix: true,
+    Protocol:    bastion.ProtocolHTTP,
+    Enabled:     true,
+})
+```
+
+In YAML:
+
+```yaml
+bastion:
+  routes:
+    - path: "/users/*"
+      targets:
+        - url: "http://user-service-1:8080"
+          weight: 3
+        - url: "http://user-service-2:8080"
+          weight: 2
+        - url: "http://user-service-3:8080"
+          weight: 1
+```
+
+## Weights
+
+Weights control traffic distribution when using weighted load balancing strategies (`LoadBalancerWeightedRoundRobin`). The weight is a relative value -- a target with weight 3 receives three times the traffic of a target with weight 1.
+
+| Target | Weight | Traffic share |
+|--------|--------|---------------|
+| `user-service-1` | 3 | 50% |
+| `user-service-2` | 2 | 33% |
+| `user-service-3` | 1 | 17% |
+
+For non-weighted strategies (round-robin, random, least-connections, consistent-hash), the weight field is ignored and all targets receive equal consideration.
+
+### Canary deployments
+
+Weights are the mechanism for canary and blue-green deployments:
+
+```go
+bastion.WithRoute(bastion.RouteConfig{
+    Path: "/users/*",
+    Targets: []bastion.TargetConfig{
+        {URL: "http://user-service-v1:8080", Weight: 90},  // stable
+        {URL: "http://user-service-v2:8080", Weight: 10},  // canary
+    },
+    LoadBalancer: bastion.LoadBalancerWeightedRoundRobin,
+})
+```
+
+Adjust weights at runtime through the admin API to gradually shift traffic from the stable version to the canary.
+
+## Health states
+
+Each target is tracked by the health monitoring system with one of three states:
+
+| State | Description | Load balancer behavior |
+|-------|-------------|----------------------|
+| **Healthy** | Target is passing health checks and responding successfully | Included in the pool, receives traffic normally |
+| **Unhealthy** | Target has failed health checks or exceeded the failure threshold | Excluded from the pool, receives no traffic |
+| **Unknown** | Target has not yet been health-checked (initial state) | Included in the pool (optimistic) |
+
+### State transitions
+
+```
+                  health check passes
+    ┌──────────────────────────────────────┐
+    │                                      │
+    ▼                                      │
+┌────────┐   health check fails    ┌───────────┐
+│Healthy │ ──────────────────────▶ │ Unhealthy │
+└────────┘                         └───────────┘
+    ▲                                      ▲
+    │                                      │
+    │    first health check runs           │
+    │    (passes)                           │
+    │                                      │
+┌────────┐    first health check runs      │
+│Unknown │    (fails)──────────────────────┘
+└────────┘
+```
+
+Health state transitions trigger the `OnUpstreamHealth` hook, which you can use for alerting or logging:
+
+```go
+gw.Hooks().OnUpstreamHealth(func(target *bastion.Target, healthy bool) {
+    if !healthy {
+        alerting.Notify("Target %s is unhealthy", target.URL)
+    }
+})
+```
+
+### Active health probes
+
+When health checking is enabled, Bastion sends periodic HTTP GET requests to each target:
+
+```go
+bastion.WithHealthCheck(bastion.HealthCheckConfig{
+    Enabled:  true,
+    Interval: 10 * time.Second,
+    Path:     "/health",
+    Timeout:  5 * time.Second,
+})
+```
+
+A target is marked unhealthy when the health check returns a non-2xx status code, times out, or the connection is refused.
+
+### Passive failure tracking
+
+In addition to active probes, Bastion tracks proxy failures passively. When a request to a target fails (connection refused, timeout, 5xx response), the failure counter increments. This feeds into the circuit breaker, which opens when the failure threshold is reached.
+
+## Connection pooling
+
+Bastion maintains an HTTP connection pool for each upstream target. Connections are reused across requests to reduce latency and resource consumption.
+
+The connection pool is managed by Go's `http.Transport` with these defaults:
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `MaxIdleConns` | 100 | Maximum idle connections across all targets |
+| `MaxIdleConnsPerHost` | 10 | Maximum idle connections per target |
+| `IdleConnTimeout` | 90s | Time before idle connections are closed |
+
+Connection pooling is transparent -- you do not need to configure it explicitly. The pool is shared across all routes that target the same host.
+
+## TLS per-target
+
+Individual targets can be configured with TLS settings for upstream connections:
+
+```go
+bastion.TargetConfig{
+    URL:    "https://secure-service:443",
+    Weight: 1,
+    TLS: &bastion.TargetTLSConfig{
+        // Skip certificate verification (development only).
+        InsecureSkipVerify: false,
+
+        // Path to CA certificate for verifying the upstream.
+        CACertFile: "/etc/certs/ca.pem",
+
+        // Client certificate and key for mTLS.
+        CertFile: "/etc/certs/client.pem",
+        KeyFile:  "/etc/certs/client-key.pem",
+    },
+}
+```
+
+When `CertFile` and `KeyFile` are provided, Bastion presents a client certificate to the upstream (mutual TLS). The gateway monitors certificate files for changes and reloads them automatically.
+
+## Listing upstreams
+
+The admin API provides a view of all upstream targets across all routes:
+
+```
+GET /bastion/api/upstreams
+```
+
+The response includes each target's URL, weight, health state, active connection count, and the route it belongs to.
+
+## Discovered upstreams
+
+When FARP service discovery is enabled, upstream targets are managed automatically. As services register and deregister, targets are added to and removed from the appropriate routes. Discovered targets carry metadata indicating their discovery source:
+
+```go
+target.Metadata["source"]  // "farp"
+target.Metadata["service"] // "user-service"
+```

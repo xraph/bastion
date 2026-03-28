@@ -8,8 +8,8 @@ export function CTA() {
   return (
     <section className="relative w-full py-20 sm:py-28 overflow-hidden">
       {/* Background gradients */}
-      <div className="absolute inset-0 bg-gradient-to-b from-transparent via-amber-500/[0.03] to-transparent" />
-      <div className="absolute bottom-0 left-1/2 -translate-x-1/2 w-[600px] h-[300px] bg-gradient-to-t from-amber-500/8 to-transparent rounded-full blur-3xl" />
+      <div className="absolute inset-0 bg-gradient-to-b from-transparent via-blue-500/[0.03] to-transparent" />
+      <div className="absolute bottom-0 left-1/2 -translate-x-1/2 w-[600px] h-[300px] bg-gradient-to-t from-blue-500/8 to-transparent rounded-full blur-3xl" />
 
       <div className="relative container max-w-(--fd-layout-width) mx-auto px-4 sm:px-6">
         <motion.div
@@ -20,12 +20,12 @@ export function CTA() {
           className="max-w-2xl mx-auto text-center"
         >
           <h2 className="text-3xl font-bold tracking-tight text-fd-foreground sm:text-4xl">
-            Start building with Vault
+            Start building with Bastion
           </h2>
           <p className="mt-4 text-lg text-fd-muted-foreground leading-relaxed">
-            Add encrypted secrets, feature flags, and runtime configuration to
-            your Go service in minutes. Vault handles encryption, tenant
-            isolation, and audit trails out of the box.
+            Add production-grade API gateway capabilities to your Go service in
+            minutes. Bastion handles routing, load balancing, circuit breaking,
+            and observability out of the box.
           </p>
 
           {/* Install command */}
@@ -38,7 +38,7 @@ export function CTA() {
           >
             <span className="text-fd-muted-foreground select-none">$</span>
             <code className="text-fd-foreground">
-              go get github.com/xraph/vault
+              go get github.com/xraph/bastion
             </code>
           </motion.div>
 
@@ -54,8 +54,8 @@ export function CTA() {
               href="/docs"
               className={cn(
                 "inline-flex items-center justify-center rounded-lg px-6 py-2.5 text-sm font-medium transition-colors",
-                "bg-amber-500 text-white hover:bg-amber-600",
-                "shadow-sm shadow-amber-500/20",
+                "bg-blue-500 text-white hover:bg-blue-600",
+                "shadow-sm shadow-blue-500/20",
               )}
             >
               Get Started

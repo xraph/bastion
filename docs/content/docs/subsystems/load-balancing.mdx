@@ -1,0 +1,135 @@
+---
+title: Load Balancing
+description: Traffic distribution strategies across upstream targets.
+---
+
+Bastion distributes traffic across upstream targets using configurable load balancing strategies. Each route can have multiple targets, and the load balancer selects a healthy target for every request. Five strategies are available out of the box.
+
+## Configuration
+
+Set the global load balancing strategy:
+
+```go
+bastion.WithLoadBalancing(bastion.LoadBalancingConfig{
+    Strategy: bastion.LBWeightedRoundRobin,
+})
+```
+
+### Configuration Fields
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `Strategy` | `LoadBalanceStrategy` | `roundRobin` | The load balancing algorithm |
+| `ConsistentKey` | `string` | `""` | Request attribute used as the hash key for consistent hashing |
+
+## Strategies
+
+### Round Robin
+
+```go
+bastion.WithLoadBalancing(bastion.LoadBalancingConfig{
+    Strategy: bastion.LBRoundRobin,
+})
+```
+
+Selects targets in sequential order. Each target receives an equal share of requests regardless of weight. This is the default strategy and works well when all targets have similar capacity.
+
+### Weighted Round Robin
+
+```go
+bastion.WithLoadBalancing(bastion.LoadBalancingConfig{
+    Strategy: bastion.LBWeightedRoundRobin,
+})
+```
+
+Uses a smooth weighted round-robin algorithm. Targets receive traffic proportional to their configured weight. A target with weight 3 receives roughly three times as many requests as a target with weight 1.
+
+Configure weights per target:
+
+```go
+bastion.WithRoute(bastion.RouteConfig{
+    Path: "/api/*",
+    Targets: []bastion.TargetConfig{
+        {URL: "http://primary:8080", Weight: 3},
+        {URL: "http://secondary:8080", Weight: 1},
+    },
+})
+```
+
+If all targets have equal weights (or weight 0), this strategy falls back to simple round robin.
+
+### Random
+
+```go
+bastion.WithLoadBalancing(bastion.LoadBalancingConfig{
+    Strategy: bastion.LBRandom,
+})
+```
+
+Selects a random healthy target for each request. Provides natural distribution without any shared state, making it suitable for high-concurrency scenarios where round-robin counters might become a bottleneck.
+
+### Least Connections
+
+```go
+bastion.WithLoadBalancing(bastion.LoadBalancingConfig{
+    Strategy: bastion.LBLeastConnections,
+})
+```
+
+Selects the target with the fewest active connections. This strategy adapts to heterogeneous backend performance -- slower targets naturally accumulate more connections and receive fewer new requests.
+
+Active connections are tracked per target using atomic counters. The count increments when a request is forwarded and decrements when the response completes.
+
+### Consistent Hash
+
+```go
+bastion.WithLoadBalancing(bastion.LoadBalancingConfig{
+    Strategy:      bastion.LBConsistentHash,
+    ConsistentKey: "header:X-User-ID",
+})
+```
+
+Uses FNV hashing to deterministically route requests with the same key to the same target. This provides session affinity without server-side session state.
+
+The `ConsistentKey` determines which request attribute is hashed. When a target is added or removed, only a fraction of keys are remapped.
+
+## Health Filtering
+
+Before the load balancer selects a target, unhealthy and unavailable targets are filtered out. A target is excluded if:
+
+- Its `Healthy` flag is `false` (failed health checks).
+- Its circuit breaker is in the `Open` state.
+- It is in the `Draining` state (graceful shutdown).
+
+If all targets are unhealthy, the load balancer returns `nil` and the proxy engine responds with 503 Service Unavailable.
+
+## Per-Route Strategy
+
+The global load balancing strategy applies to all routes. Routes inherit the global strategy automatically. To use different strategies for different routes, configure multiple gateway instances or use traffic splitting policies for fine-grained control.
+
+## Target Weights
+
+Weights are integers where higher values mean more traffic. Weights only affect the `LBWeightedRoundRobin` strategy. Targets with weight 0 or unset are treated as weight 1.
+
+```go
+bastion.WithRoute(bastion.RouteConfig{
+    Path: "/api/*",
+    Targets: []bastion.TargetConfig{
+        {URL: "http://large-instance:8080", Weight: 5},
+        {URL: "http://medium-instance:8080", Weight: 3},
+        {URL: "http://small-instance:8080", Weight: 1},
+    },
+})
+```
+
+In this configuration, the large instance receives approximately 55% of traffic, the medium instance 33%, and the small instance 11%.
+
+## Strategy Constants
+
+| Constant | Value | Description |
+|----------|-------|-------------|
+| `bastion.LBRoundRobin` | `"roundRobin"` | Sequential target selection |
+| `bastion.LBWeightedRoundRobin` | `"weightedRoundRobin"` | Weight-proportional selection |
+| `bastion.LBRandom` | `"random"` | Random target selection |
+| `bastion.LBLeastConnections` | `"leastConnections"` | Fewest active connections |
+| `bastion.LBConsistentHash` | `"consistentHash"` | Deterministic hash-based routing |

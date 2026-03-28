@@ -1,478 +1,388 @@
 ---
 title: Full Example
-description: Complete working example covering store setup, provider creation, template rendering, and notification delivery.
+description: Complete gateway setup with routes, discovery, load balancing, circuit breakers, and dashboard.
 ---
 
-This guide demonstrates all key Herald features working together in a single, runnable Go program: store initialization, provider registration, template creation with locale-specific versions, notification delivery with scope resolution, user preferences, and in-app notifications. Both standalone and Forge extension usage patterns are shown.
+This guide demonstrates all key Bastion features working together in a single, runnable Go program: static routes, FARP auto-discovery, load balancing, circuit breakers, rate limiting, health checks, the admin dashboard, hooks, and OpenAPI aggregation.
 
-## Standalone Example
-
-```go
-package main
-
-import (
-    "context"
-    "fmt"
-    "log"
-    "time"
-
-    "github.com/xraph/herald"
-    "github.com/xraph/herald/driver/email"
-    "github.com/xraph/herald/driver/inapp"
-    "github.com/xraph/herald/id"
-    "github.com/xraph/herald/inbox"
-    "github.com/xraph/herald/message"
-    "github.com/xraph/herald/preference"
-    "github.com/xraph/herald/provider"
-    "github.com/xraph/herald/scope"
-    "github.com/xraph/herald/store/memory"
-    "github.com/xraph/herald/template"
-)
-
-func main() {
-    ctx := context.Background()
-
-    // ─── 1. Create the store and Herald instance ──────────
-    store := memory.New()
-    _ = store.Migrate(ctx) // no-op for memory store
-
-    h, err := herald.New(
-        herald.WithStore(store),
-        herald.WithDriver(&email.SMTPDriver{}),
-        herald.WithDriver(&inapp.Driver{}),
-        herald.WithDefaultLocale("en"),
-    )
-    if err != nil {
-        log.Fatal("herald:", err)
-    }
-
-    // ─── 2. Create an email provider ─────────────────────
-    now := time.Now().UTC()
-    emailProvider := &provider.Provider{
-        ID:      id.NewProviderID(),
-        AppID:   "myapp",
-        Name:    "SMTP Production",
-        Channel: "email",
-        Driver:  "smtp",
-        Credentials: map[string]string{
-            "host":     "smtp.example.com",
-            "port":     "587",
-            "username": "noreply@example.com",
-            "password": "secret",
-        },
-        Settings: map[string]string{
-            "from":      "noreply@example.com",
-            "from_name": "My App",
-        },
-        Priority:  0,
-        Enabled:   true,
-        CreatedAt: now,
-        UpdatedAt: now,
-    }
-    if err := store.CreateProvider(ctx, emailProvider); err != nil {
-        log.Fatal("create provider:", err)
-    }
-    fmt.Printf("[Provider] Created: %s (%s)\n", emailProvider.Name, emailProvider.ID)
-
-    // Create an in-app provider.
-    inappProvider := &provider.Provider{
-        ID:        id.NewProviderID(),
-        AppID:     "myapp",
-        Name:      "In-App",
-        Channel:   "inapp",
-        Driver:    "inapp",
-        Enabled:   true,
-        CreatedAt: now,
-        UpdatedAt: now,
-    }
-    if err := store.CreateProvider(ctx, inappProvider); err != nil {
-        log.Fatal("create inapp provider:", err)
-    }
-    fmt.Printf("[Provider] Created: %s (%s)\n", inappProvider.Name, inappProvider.ID)
-
-    // ─── 3. Set up app-level scoped configuration ────────
-    appConfig := &scope.Config{
-        ID:              id.NewScopedConfigID(),
-        AppID:           "myapp",
-        Scope:           scope.ScopeApp,
-        ScopeID:         "myapp",
-        EmailProviderID: emailProvider.ID.String(),
-        PushProviderID:  "",
-        FromEmail:       "noreply@example.com",
-        FromName:        "My App",
-        DefaultLocale:   "en",
-        CreatedAt:       now,
-        UpdatedAt:       now,
-    }
-    if err := store.SetScopedConfig(ctx, appConfig); err != nil {
-        log.Fatal("set app config:", err)
-    }
-    fmt.Println("[Config] App-level config set")
-
-    // ─── 4. Create a welcome email template ──────────────
-    tmpl := &template.Template{
-        ID:        id.NewTemplateID(),
-        AppID:     "myapp",
-        Slug:      "welcome",
-        Name:      "Welcome Email",
-        Channel:   "email",
-        Category:  "transactional",
-        Enabled:   true,
-        CreatedAt: now,
-        UpdatedAt: now,
-    }
-    if err := store.CreateTemplate(ctx, tmpl); err != nil {
-        log.Fatal("create template:", err)
-    }
-    fmt.Printf("[Template] Created: %s (%s)\n", tmpl.Name, tmpl.ID)
-
-    // ─── 5. Add locale-specific versions ─────────────────
-    enVersion := &template.Version{
-        ID:         id.NewTemplateVersionID(),
-        TemplateID: tmpl.ID,
-        Locale:     "en",
-        Subject:    "Welcome to {{.app_name}}, {{.name}}!",
-        HTML:       "<h1>Hello {{.name}}</h1><p>Welcome aboard!</p>",
-        Text:       "Hello {{.name}}, Welcome aboard!",
-        Active:     true,
-        CreatedAt:  now,
-        UpdatedAt:  now,
-    }
-    if err := store.CreateVersion(ctx, enVersion); err != nil {
-        log.Fatal("create en version:", err)
-    }
-
-    frVersion := &template.Version{
-        ID:         id.NewTemplateVersionID(),
-        TemplateID: tmpl.ID,
-        Locale:     "fr",
-        Subject:    "Bienvenue sur {{.app_name}}, {{.name}} !",
-        HTML:       "<h1>Bonjour {{.name}}</h1><p>Bienvenue !</p>",
-        Text:       "Bonjour {{.name}}, Bienvenue !",
-        Active:     true,
-        CreatedAt:  now,
-        UpdatedAt:  now,
-    }
-    if err := store.CreateVersion(ctx, frVersion); err != nil {
-        log.Fatal("create fr version:", err)
-    }
-    fmt.Println("[Template] Added 2 versions: en, fr")
-
-    // ─── 6. Send a notification ──────────────────────────
-    result, err := h.Send(ctx, &herald.SendRequest{
-        AppID:    "myapp",
-        Channel:  "email",
-        Template: "welcome",
-        Locale:   "en",
-        To:       []string{"alice@example.com"},
-        Data: map[string]any{
-            "name":     "Alice",
-            "app_name": "My App",
-        },
-        Metadata: map[string]string{
-            "source": "signup",
-        },
-    })
-    if err != nil {
-        log.Fatal("send:", err)
-    }
-    fmt.Printf("[Send] Result: status=%s message_id=%s\n", result.Status, result.MessageID)
-
-    // ─── 7. Check the delivery log ───────────────────────
-    msgs, _ := store.ListMessages(ctx, "myapp", message.ListOptions{Limit: 10})
-    fmt.Printf("[Messages] Total: %d\n", len(msgs))
-    for _, m := range msgs {
-        fmt.Printf("  - %s to=%s status=%s channel=%s\n",
-            m.ID, m.Recipient, m.Status, m.Channel)
-    }
-
-    // ─── 8. User preferences ────────────────────────────
-    pref := &preference.Preference{
-        ID:     id.NewPreferenceID(),
-        AppID:  "myapp",
-        UserID: "user-bob",
-        Overrides: map[string]preference.ChannelPreference{
-            "welcome": {
-                Email: boolPtr(false), // Opt out of welcome emails.
-                Push:  boolPtr(true),
-            },
-        },
-        CreatedAt: now,
-        UpdatedAt: now,
-    }
-    if err := store.SetPreference(ctx, pref); err != nil {
-        log.Fatal("set preference:", err)
-    }
-    fmt.Println("[Preferences] Bob opted out of welcome emails")
-
-    // Sending to Bob will be skipped for the welcome email.
-    bobResult, err := h.Send(ctx, &herald.SendRequest{
-        AppID:    "myapp",
-        UserID:   "user-bob",
-        Channel:  "email",
-        Template: "welcome",
-        To:       []string{"bob@example.com"},
-        Data:     map[string]any{"name": "Bob", "app_name": "My App"},
-    })
-    if err != nil {
-        log.Fatal("send to bob:", err)
-    }
-    fmt.Printf("[Send] Bob result: status=%s error=%q\n", bobResult.Status, bobResult.Error)
-
-    // ─── 9. In-app notification via inbox ────────────────
-    notification := &inbox.Notification{
-        ID:        id.NewInboxID(),
-        AppID:     "myapp",
-        UserID:    "user-alice",
-        Type:      "welcome",
-        Title:     "Welcome aboard!",
-        Body:      "Thanks for signing up.",
-        ActionURL: "/getting-started",
-        CreatedAt: now,
-    }
-    if err := store.CreateNotification(ctx, notification); err != nil {
-        log.Fatal("create notification:", err)
-    }
-
-    count, _ := store.UnreadCount(ctx, "myapp", "user-alice")
-    fmt.Printf("[Inbox] Alice unread count: %d\n", count)
-
-    _ = store.MarkRead(ctx, notification.ID)
-    count, _ = store.UnreadCount(ctx, "myapp", "user-alice")
-    fmt.Printf("[Inbox] After mark read: %d\n", count)
-
-    // ─── 10. Multi-channel notify ────────────────────────
-    results, err := h.Notify(ctx, &herald.NotifyRequest{
-        AppID:    "myapp",
-        Template: "welcome",
-        Locale:   "en",
-        To:       []string{"charlie@example.com"},
-        Channels: []string{"email", "inapp"},
-        UserID:   "user-charlie",
-        Data:     map[string]any{"name": "Charlie", "app_name": "My App"},
-    })
-    if err != nil {
-        log.Fatal("notify:", err)
-    }
-    fmt.Printf("[Notify] Sent across %d channels\n", len(results))
-    for _, r := range results {
-        fmt.Printf("  - status=%s provider=%s\n", r.Status, r.ProviderID)
-    }
-
-    fmt.Println("\nAll features demonstrated successfully.")
-
-    _ = h
-}
-
-func boolPtr(b bool) *bool { return &b }
-```
-
-## Expected Output
-
-```
-[Provider] Created: SMTP Production (hpvd_...)
-[Provider] Created: In-App (hpvd_...)
-[Config] App-level config set
-[Template] Created: Welcome Email (htpl_...)
-[Template] Added 2 versions: en, fr
-[Send] Result: status=sent message_id=hmsg_...
-[Messages] Total: 1
-  - hmsg_... to=alice@example.com status=sent channel=email
-[Preferences] Bob opted out of welcome emails
-[Send] Bob result: status=sent error="user opted out"
-[Inbox] Alice unread count: 1
-[Inbox] After mark read: 0
-[Notify] Sent across 2 channels
-  - status=sent provider=...
-  - status=sent provider=...
-
-All features demonstrated successfully.
-```
-
-## Forge Extension Example
-
-The same workflow using Herald as a Forge extension:
+## Complete Gateway
 
 ```go
 package main
 
 import (
-    "context"
     "fmt"
     "log"
+    "net/http"
     "time"
 
     "github.com/xraph/forge"
-    "github.com/xraph/grove"
-    groveext "github.com/xraph/grove/extension"
-    "github.com/xraph/grove/drivers/pgdriver"
+    "github.com/xraph/bastion"
+    "github.com/xraph/bastion/extension"
+    "github.com/xraph/forge/extensions/discovery"
+    dashext "github.com/xraph/forge/extensions/dashboard"
     "github.com/xraph/vessel"
-
-    "github.com/xraph/herald"
-    heraldext "github.com/xraph/herald/extension"
-    "github.com/xraph/herald/id"
-    "github.com/xraph/herald/provider"
-    "github.com/xraph/herald/scope"
-    "github.com/xraph/herald/template"
 )
 
 func main() {
     app := forge.New()
 
-    // Register Grove with PostgreSQL.
-    app.Register(groveext.New(
-        groveext.WithDriver(pgdriver.New(
-            pgdriver.WithDSN("postgres://localhost:5432/myapp?sslmode=disable"),
-        )),
+    // ─── 1. Register discovery for FARP auto-discovery ──────
+    app.Register(discovery.New())
+
+    // ─── 2. Register the Forge dashboard ────────────────────
+    app.Register(dashext.New())
+
+    // ─── 3. Register Bastion API gateway ────────────────────
+    app.Register(extension.New(
+        // Base path for all proxied routes
+        bastion.WithBasePath("/api"),
+
+        // Static routes for known services
+        bastion.WithRoute(bastion.RouteConfig{
+            Path:        "/users",
+            ServiceName: "user-service",
+            Targets: []bastion.TargetConfig{
+                {URL: "http://user-service-1:8080", Weight: 3},
+                {URL: "http://user-service-2:8080", Weight: 2},
+                {URL: "http://user-service-3:8080", Weight: 1},
+            },
+            StripPrefix: true,
+            Enabled:     true,
+            OpenAPISpec: "http://user-service-1:8080/openapi.json",
+        }),
+        bastion.WithRoute(bastion.RouteConfig{
+            Path:        "/orders",
+            ServiceName: "order-service",
+            Targets: []bastion.TargetConfig{
+                {URL: "http://order-service:8080", Weight: 1},
+            },
+            StripPrefix: true,
+            Enabled:     true,
+            OpenAPISpec: "http://order-service:8080/openapi.json",
+        }),
+
+        // FARP discovery -- auto-detect new services on the network
+        bastion.WithDiscoveryEnabled(true),
+        bastion.WithDiscoveryPollInterval(15 * time.Second),
+        bastion.WithDiscoveryWatchMode(true),
+        bastion.WithDiscoveryAutoPrefix(true),
+        bastion.WithDiscoveryPrefixTemplate("/{{.ServiceName}}"),
+        bastion.WithDiscoveryStripPrefix(true),
+
+        // Load balancing -- weighted round-robin across targets
+        bastion.WithLoadBalancing(bastion.LoadBalancingConfig{
+            Strategy: bastion.LBWeightedRoundRobin,
+        }),
+
+        // Circuit breakers -- fail fast on unhealthy upstreams
+        bastion.WithCircuitBreaker(bastion.CircuitBreakerConfig{
+            Enabled:          true,
+            FailureThreshold: 5,
+            FailureWindow:    60 * time.Second,
+            ResetTimeout:     30 * time.Second,
+            HalfOpenMax:      3,
+        }),
+
+        // Rate limiting -- global request throttling
+        bastion.WithRateLimiting(bastion.RateLimitConfig{
+            Enabled:        true,
+            RequestsPerSec: 1000,
+            Burst:          200,
+            PerClient:      true,
+        }),
+
+        // Health checks -- active probing of upstream targets
+        bastion.WithHealthCheck(bastion.HealthCheckConfig{
+            Enabled:              true,
+            Interval:             10 * time.Second,
+            Timeout:              5 * time.Second,
+            Path:                 "/_/health",
+            FailureThreshold:     3,
+            SuccessThreshold:     2,
+            EnablePassive:        true,
+            PassiveFailThreshold: 5,
+        }),
+
+        // Retry -- automatic retry for transient failures
+        bastion.WithRetry(bastion.RetryConfig{
+            Enabled:          true,
+            MaxAttempts:      3,
+            Backoff:          bastion.BackoffExponential,
+            InitialDelay:     100 * time.Millisecond,
+            MaxDelay:         5 * time.Second,
+            Multiplier:       2.0,
+            Jitter:           true,
+            RetryableStatus:  []int{502, 503, 504},
+            RetryableMethods: []string{"GET", "HEAD", "OPTIONS"},
+        }),
+
+        // OpenAPI aggregation -- merge specs from all upstreams
+        bastion.WithOpenAPI(bastion.OpenAPIConfig{
+            Enabled:         true,
+            Path:            "/openapi.json",
+            UIPath:          "/swagger",
+            Title:           "My API Gateway",
+            Description:     "Unified API documentation",
+            Version:         "1.0.0",
+            RefreshInterval: 30 * time.Second,
+            FetchTimeout:    10 * time.Second,
+            MergeStrategy:   "prefix",
+            EnableRootDocs:  true,
+        }),
+
+        // Admin dashboard
+        bastion.WithDashboard(bastion.DashboardConfig{
+            Enabled:  true,
+            BasePath: "/gateway",
+            Title:    "API Gateway Dashboard",
+            Realtime: true,
+        }),
+
+        // CORS
+        bastion.WithCORS(bastion.CORSConfig{
+            Enabled:      true,
+            AllowOrigins: []string{"https://app.example.com"},
+            AllowMethods: []string{"GET", "POST", "PUT", "DELETE", "PATCH"},
+            AllowHeaders: []string{"Authorization", "Content-Type"},
+            MaxAge:       86400,
+        }),
     ))
 
-    // Register Herald extension.
-    app.Register(heraldext.New(
-        heraldext.WithGroveDatabase(""),
-    ))
-
-    // After registration, resolve Herald from the DI container.
-    app.OnStart(func(ctx context.Context) error {
-        h, err := vessel.Inject[*herald.Herald](app.Container())
+    // ─── 4. Register hooks for logging and alerting ─────────
+    app.AfterStart(func() {
+        gw, err := vessel.Inject[*bastion.Gateway](app.Container())
         if err != nil {
-            return fmt.Errorf("resolve herald: %w", err)
+            log.Fatal("resolve bastion:", err)
         }
 
-        return seedData(ctx, h)
+        // Log every proxied request
+        gw.Hooks().OnRequest(func(r *http.Request, route *bastion.Route) error {
+            log.Printf("[REQ] %s %s -> route=%s service=%s",
+                r.Method, r.URL.Path, route.ID, route.ServiceName)
+            return nil
+        })
+
+        // Tag responses with gateway identity
+        gw.Hooks().OnResponse(func(resp *http.Response, route *bastion.Route) {
+            resp.Header.Set("X-Served-By", "bastion")
+            resp.Header.Set("X-Route-ID", route.ID)
+        })
+
+        // Log upstream errors
+        gw.Hooks().OnError(func(err error, route *bastion.Route, w http.ResponseWriter) {
+            log.Printf("[ERR] route=%s error=%v", route.Path, err)
+        })
+
+        // Alert on health changes
+        gw.Hooks().OnUpstreamHealth(func(event bastion.UpstreamHealthEvent) {
+            if !event.Healthy {
+                log.Printf("[ALERT] Upstream %s (%s) is DOWN", event.TargetID, event.TargetURL)
+            } else {
+                log.Printf("[INFO] Upstream %s (%s) recovered", event.TargetID, event.TargetURL)
+            }
+        })
+
+        // Log circuit breaker transitions
+        gw.Hooks().OnCircuitBreak(func(targetID string, from, to bastion.CircuitState) {
+            log.Printf("[CIRCUIT] %s: %s -> %s", targetID, from, to)
+        })
+
+        // Log route table changes (FARP discoveries, manual additions)
+        gw.Hooks().OnRouteChange(func(event bastion.RouteEvent) {
+            log.Printf("[ROUTE] %s: %s (source=%s)",
+                event.Type, event.Route.Path, event.Route.Source)
+        })
+
+        // Print summary
+        stats := gw.Snapshot()
+        fmt.Printf("\nGateway started with %d routes and %d upstreams\n",
+            stats.TotalRoutes, stats.TotalUpstreams)
+        fmt.Printf("Dashboard: http://localhost:8080/gateway\n")
+        fmt.Printf("API Docs:  http://localhost:8080/gateway/openapi.json\n")
+        fmt.Printf("Swagger:   http://localhost:8080/gateway/swagger\n\n")
     })
 
+    // ─── 5. Run the application ─────────────────────────────
     app.Run()
 }
-
-func seedData(ctx context.Context, h *herald.Herald) error {
-    store := h.Store()
-    now := time.Now().UTC()
-
-    // Create a provider.
-    p := &provider.Provider{
-        ID:      id.NewProviderID(),
-        AppID:   "myapp",
-        Name:    "SMTP",
-        Channel: "email",
-        Driver:  "smtp",
-        Credentials: map[string]string{
-            "host": "smtp.example.com",
-            "port": "587",
-        },
-        Enabled:   true,
-        CreatedAt: now,
-        UpdatedAt: now,
-    }
-    if err := store.CreateProvider(ctx, p); err != nil {
-        log.Printf("provider may already exist: %v", err)
-    }
-
-    // Set app-level config.
-    cfg := &scope.Config{
-        ID:              id.NewScopedConfigID(),
-        AppID:           "myapp",
-        Scope:           scope.ScopeApp,
-        ScopeID:         "myapp",
-        EmailProviderID: p.ID.String(),
-        FromEmail:       "noreply@example.com",
-        CreatedAt:       now,
-        UpdatedAt:       now,
-    }
-    _ = store.SetScopedConfig(ctx, cfg)
-
-    // Seed default templates.
-    if err := h.SeedDefaultTemplates(ctx, "myapp"); err != nil {
-        log.Printf("seed templates: %v", err)
-    }
-
-    // Create a custom template.
-    tmpl := &template.Template{
-        ID:        id.NewTemplateID(),
-        AppID:     "myapp",
-        Slug:      "order-confirmation",
-        Name:      "Order Confirmation",
-        Channel:   "email",
-        Category:  "transactional",
-        Enabled:   true,
-        CreatedAt: now,
-        UpdatedAt: now,
-    }
-    if err := store.CreateTemplate(ctx, tmpl); err != nil {
-        log.Printf("template may already exist: %v", err)
-    }
-
-    v := &template.Version{
-        ID:         id.NewTemplateVersionID(),
-        TemplateID: tmpl.ID,
-        Locale:     "en",
-        Subject:    "Order #{{.order_id}} confirmed",
-        HTML:       "<h1>Thank you, {{.name}}!</h1><p>Your order #{{.order_id}} has been confirmed.</p>",
-        Text:       "Thank you, {{.name}}! Your order #{{.order_id}} has been confirmed.",
-        Active:     true,
-        CreatedAt:  now,
-        UpdatedAt:  now,
-    }
-    if err := store.CreateVersion(ctx, v); err != nil {
-        log.Printf("version may already exist: %v", err)
-    }
-
-    return nil
-}
 ```
 
-## Sending via the HTTP API
+## YAML Config Equivalent
 
-Once the Forge extension is running, you can send notifications via the HTTP API:
+The same gateway configuration expressed as YAML:
+
+```yaml
+# config.yaml
+app:
+  name: api-gateway
+  port: 8080
+
+bastion:
+  enabled: true
+  base_path: "/api"
+
+  routes:
+    - path: /users
+      service_name: user-service
+      targets:
+        - url: http://user-service-1:8080
+          weight: 3
+        - url: http://user-service-2:8080
+          weight: 2
+        - url: http://user-service-3:8080
+          weight: 1
+      strip_prefix: true
+      enabled: true
+      openapi_spec: http://user-service-1:8080/openapi.json
+
+    - path: /orders
+      service_name: order-service
+      targets:
+        - url: http://order-service:8080
+          weight: 1
+      strip_prefix: true
+      enabled: true
+      openapi_spec: http://order-service:8080/openapi.json
+
+  discovery:
+    enabled: true
+    poll_interval: 15s
+    watch_mode: true
+    auto_prefix: true
+    prefix_template: "/{{.ServiceName}}"
+    strip_prefix: true
+
+  load_balancing:
+    strategy: weightedRoundRobin
+
+  circuit_breaker:
+    enabled: true
+    failure_threshold: 5
+    failure_window: 60s
+    reset_timeout: 30s
+    half_open_max: 3
+
+  rate_limiting:
+    enabled: true
+    requests_per_sec: 1000
+    burst: 200
+    per_client: true
+
+  health_check:
+    enabled: true
+    interval: 10s
+    timeout: 5s
+    path: "/_/health"
+    failure_threshold: 3
+    success_threshold: 2
+    enable_passive: true
+    passive_fail_threshold: 5
+
+  retry:
+    enabled: true
+    max_attempts: 3
+    backoff: exponential
+    initial_delay: 100ms
+    max_delay: 5s
+    multiplier: 2.0
+    jitter: true
+    retryable_status: [502, 503, 504]
+    retryable_methods: [GET, HEAD, OPTIONS]
+
+  openapi:
+    enabled: true
+    path: /openapi.json
+    ui_path: /swagger
+    title: "My API Gateway"
+    description: "Unified API documentation"
+    version: "1.0.0"
+    refresh_interval: 30s
+    fetch_timeout: 10s
+    merge_strategy: prefix
+    enable_root_docs: true
+
+  dashboard:
+    enabled: true
+    base_path: /gateway
+    title: "API Gateway Dashboard"
+    realtime: true
+
+  cors:
+    enabled: true
+    allow_origins: ["https://app.example.com"]
+    allow_methods: [GET, POST, PUT, DELETE, PATCH]
+    allow_headers: [Authorization, Content-Type]
+    max_age: 86400
+```
+
+## What This Example Demonstrates
+
+| Feature | What Is Configured |
+|---------|--------------------|
+| **Static Routes** | Two services (user-service, order-service) with explicit targets and weights |
+| **FARP Discovery** | Auto-detection of new services on the network with watch mode |
+| **Load Balancing** | Weighted round-robin distributes traffic by target weight |
+| **Circuit Breakers** | Auto-trip after 5 failures in 60s, half-open probe after 30s |
+| **Rate Limiting** | 1000 req/s global with per-client tracking and burst of 200 |
+| **Health Checks** | Active probing every 10s, passive failure detection |
+| **Retry** | Exponential backoff with jitter for 502/503/504 errors |
+| **OpenAPI Aggregation** | Merged spec from all upstream services at /openapi.json |
+| **Admin Dashboard** | Real-time dashboard at /gateway with WebSocket updates |
+| **CORS** | Cross-origin support for the frontend application |
+| **Hooks** | Request logging, response tagging, error alerting, health alerts |
+
+## Running the Gateway
 
 ```bash
-# Send a single notification
-curl -X POST http://localhost:8080/herald/send \
-  -H "Content-Type: application/json" \
-  -d '{
-    "app_id": "myapp",
-    "channel": "email",
-    "template": "order-confirmation",
-    "to": ["alice@example.com"],
-    "data": {
-      "name": "Alice",
-      "order_id": "ORD-12345"
-    }
-  }'
+# Build and run
+go run main.go
 
-# Multi-channel notify
-curl -X POST http://localhost:8080/herald/notify \
-  -H "Content-Type: application/json" \
-  -d '{
-    "app_id": "myapp",
-    "template": "order-confirmation",
-    "channels": ["email", "inapp"],
-    "user_id": "user-alice",
-    "to": ["alice@example.com"],
-    "data": {
-      "name": "Alice",
-      "order_id": "ORD-12345"
-    }
-  }'
+# Or with a custom config file
+CONFIG_FILE=config.yaml go run main.go
 ```
 
-## Feature Summary
+Once running:
 
-| Feature | What was demonstrated |
-|---------|----------------------|
-| **Store setup** | In-memory store for standalone, Grove/PostgreSQL for Forge |
-| **Providers** | SMTP email provider, in-app provider with credentials and settings |
-| **Scoped config** | App-level configuration linking provider to channel |
-| **Templates** | Template with i18n versions (en, fr) |
-| **Send** | Single-channel notification delivery with template rendering |
-| **Notify** | Multi-channel delivery across email and in-app |
-| **Messages** | Delivery log with status tracking |
-| **Preferences** | Per-user opt-out for specific templates and channels |
-| **Inbox** | In-app notifications with read/unread tracking |
-| **Scope resolution** | Automatic provider resolution via scope chain |
+- **Proxy endpoint**: `http://localhost:8080/api/*` -- routes to upstream services
+- **Dashboard**: `http://localhost:8080/gateway` -- real-time admin UI
+- **API docs**: `http://localhost:8080/gateway/openapi.json` -- aggregated OpenAPI spec
+- **Swagger UI**: `http://localhost:8080/gateway/swagger` -- interactive API explorer
+- **Admin API**: `http://localhost:8080/gateway/api/routes` -- route management
+- **Stats**: `http://localhost:8080/gateway/api/stats` -- gateway statistics
+- **WebSocket**: `ws://localhost:8080/gateway/ws` -- real-time event stream
+
+## Testing the Gateway
+
+```bash
+# List all routes
+curl http://localhost:8080/gateway/api/routes | jq
+
+# Proxy a request through the gateway
+curl http://localhost:8080/api/users
+
+# Check gateway statistics
+curl http://localhost:8080/gateway/api/stats | jq
+
+# View discovered services
+curl http://localhost:8080/gateway/api/discovery/services | jq
+
+# Create a route via the admin API
+curl -X POST http://localhost:8080/gateway/api/routes \
+  -H "Content-Type: application/json" \
+  -d '{
+    "path": "/products",
+    "targets": [{"url": "http://product-service:8080", "weight": 1}],
+    "stripPrefix": true,
+    "enabled": true,
+    "protocol": "http"
+  }'
+```
 
 ## Next Steps
 
-- [Custom Store](/docs/guides/custom-store) -- Implement your own store backend
-- [Multi-Tenant Patterns](/docs/guides/multi-tenant-patterns) -- Per-org providers, per-user locale, scope resolution
-- [Forge Extension](/docs/guides/forge-extension) -- Full Forge lifecycle integration
-- [HTTP API Reference](/docs/api-reference/http-api) -- Complete API endpoint documentation
+- [Forge Extension](/docs/guides/forge-extension) -- Extension lifecycle and DI integration
+- [Hook System](/docs/guides/hooks) -- Custom request/response processing
+- [OpenAPI Aggregation](/docs/guides/openapi-aggregation) -- Unified API documentation
+- [Admin REST API](/docs/api-reference/admin-api) -- Complete API endpoint reference
+- [Admin Dashboard](/docs/api-reference/dashboard) -- Real-time monitoring UI

@@ -1,13 +1,17 @@
 {
   "title": "Subsystems",
   "pages": [
-    "providers",
-    "templates",
-    "delivery",
-    "inbox",
-    "preferences",
-    "scoped-config",
-    "drivers",
+    "proxying",
+    "discovery",
+    "load-balancing",
+    "circuit-breakers",
+    "health-monitoring",
+    "rate-limiting",
+    "authentication",
+    "caching",
+    "traffic-splitting",
+    "tls",
+    "transformation",
     "observability"
   ]
 }

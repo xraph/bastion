@@ -5,10 +5,10 @@ import { useEffect, useState } from "react";
 import { cn } from "@/lib/cn";
 import { SectionHeader } from "./section-header";
 
-// ─── Cycling Vault Action ────────────────────────────────────
-const pipelineActions = ["secret.get", "flag.evaluate", "config.resolve"];
+// ─── Cycling Gateway Action ────────────────────────────────────
+const pipelineActions = ["route.match", "upstream.proxy", "response.cache"];
 
-function CyclingVaultAction() {
+function CyclingGatewayAction() {
   const [index, setIndex] = useState(0);
 
   useEffect(() => {
@@ -27,7 +27,7 @@ function CyclingVaultAction() {
           animate={{ y: 0, opacity: 1 }}
           exit={{ y: -12, opacity: 0 }}
           transition={{ duration: 0.3 }}
-          className="absolute inset-0 text-amber-500 dark:text-amber-400 font-mono text-xs font-medium"
+          className="absolute inset-0 text-blue-500 dark:text-blue-400 font-mono text-xs font-medium"
         >
           {pipelineActions[index]}
         </motion.span>
@@ -87,17 +87,17 @@ function Stage({
 
 // ─── Animated Connection ─────────────────────────────────────
 function Connection({
-  color = "amber",
+  color = "blue",
   delay = 0,
   horizontal = true,
 }: {
-  color?: "amber" | "orange" | "green" | "red";
+  color?: "blue" | "indigo" | "green" | "red";
   delay?: number;
   horizontal?: boolean;
 }) {
   const colorMap = {
-    amber: { line: "bg-amber-500/30", particle: "bg-amber-400" },
-    orange: { line: "bg-orange-500/30", particle: "bg-orange-400" },
+    blue: { line: "bg-blue-500/30", particle: "bg-blue-400" },
+    indigo: { line: "bg-indigo-500/30", particle: "bg-indigo-400" },
     green: { line: "bg-green-500/30", particle: "bg-green-400" },
     red: { line: "bg-red-500/30", particle: "bg-red-400" },
   };
@@ -142,10 +142,10 @@ function Connection({
         className="absolute right-0 border-l-[4px] border-y-[2.5px] border-y-transparent border-l-current opacity-30"
         style={{
           color:
-            color === "amber"
-              ? "#f59e0b"
-              : color === "orange"
-                ? "#f97316"
+            color === "blue"
+              ? "#3b82f6"
+              : color === "indigo"
+                ? "#6366f1"
                 : color === "green"
                   ? "#22c55e"
                   : "#ef4444",
@@ -166,14 +166,14 @@ function EventRow({
   action: string;
   status: "success" | "processing" | "indexed";
   statusLabel: string;
-  lineColor: "green" | "amber" | "orange" | "red";
+  lineColor: "green" | "blue" | "indigo" | "red";
   delay: number;
 }) {
   const statusColors = {
     success:
       "text-green-600 dark:text-green-400 bg-green-500/10 border-green-500/20",
     processing:
-      "text-amber-600 dark:text-amber-400 bg-amber-500/10 border-amber-500/20",
+      "text-blue-600 dark:text-blue-400 bg-blue-500/10 border-blue-500/20",
     indexed:
       "text-green-600 dark:text-green-400 bg-green-500/10 border-green-500/20",
   };
@@ -203,8 +203,8 @@ function EventRow({
   );
 }
 
-// ─── Vault Operations Diagram ────────────────────────────────
-function VaultOperationsDiagram() {
+// ─── Gateway Pipeline Diagram ────────────────────────────────
+function GatewayPipelineDiagram() {
   const [phase, setPhase] = useState(0);
 
   useEffect(() => {
@@ -223,7 +223,7 @@ function VaultOperationsDiagram() {
       className="relative"
     >
       {/* Background glow */}
-      <div className="absolute inset-0 -m-6 bg-gradient-to-br from-amber-500/5 via-transparent to-orange-500/5 rounded-3xl blur-xl" />
+      <div className="absolute inset-0 -m-6 bg-gradient-to-br from-blue-500/5 via-transparent to-indigo-500/5 rounded-3xl blur-xl" />
 
       <div className="relative p-3 sm:p-6 rounded-2xl border border-fd-border/50 bg-fd-card/30 backdrop-blur-sm">
         <div className="flex flex-col items-center gap-4">
@@ -231,56 +231,56 @@ function VaultOperationsDiagram() {
           <div className="flex items-center gap-0 flex-wrap justify-center">
             <Stage
               label="Request"
-              sublabel={<CyclingVaultAction />}
-              color="text-amber-600 dark:text-amber-400"
-              borderColor="border-amber-500/30"
-              bgColor="bg-amber-500/5"
+              sublabel={<CyclingGatewayAction />}
+              color="text-blue-600 dark:text-blue-400"
+              borderColor="border-blue-500/30"
+              bgColor="bg-blue-500/5"
               delay={0.1}
             />
-            <Connection color="amber" delay={0} />
+            <Connection color="blue" delay={0} />
             <Stage
-              label="Scope"
-              sublabel="tenant"
-              color="text-orange-600 dark:text-orange-400"
-              borderColor="border-orange-500/30"
-              bgColor="bg-orange-500/5"
+              label="Route"
+              sublabel="match"
+              color="text-indigo-600 dark:text-indigo-400"
+              borderColor="border-indigo-500/30"
+              bgColor="bg-indigo-500/5"
               delay={0.2}
             />
-            <Connection color="amber" delay={0.5} />
+            <Connection color="blue" delay={0.5} />
             <Stage
-              label="Resolve"
-              sublabel="decrypt"
-              color="text-amber-600 dark:text-amber-400"
-              borderColor="border-amber-500/30"
-              bgColor="bg-amber-500/8"
+              label="Proxy"
+              sublabel="upstream"
+              color="text-blue-600 dark:text-blue-400"
+              borderColor="border-blue-500/30"
+              bgColor="bg-blue-500/8"
               pulse
               delay={0.3}
             />
           </div>
 
           {/* Vertical connection to events */}
-          <Connection color="amber" horizontal={false} delay={1} />
+          <Connection color="blue" horizontal={false} delay={1} />
 
           {/* Event rows with outcomes */}
           <div className="flex flex-col items-start gap-2.5">
             <EventRow
-              action="scope.applied"
+              action="route.matched"
               status="success"
-              statusLabel="✓ Scoped"
+              statusLabel="✓ Matched"
               lineColor="green"
               delay={0.5}
             />
             <EventRow
-              action="secret.decrypted"
+              action="upstream.proxied"
               status={phase === 1 ? "indexed" : "processing"}
-              statusLabel={phase === 1 ? "✓ Decrypted" : "⟳ Resolving"}
-              lineColor={phase === 1 ? "green" : "amber"}
+              statusLabel={phase === 1 ? "✓ Proxied" : "⟳ Routing"}
+              lineColor={phase === 1 ? "green" : "blue"}
               delay={0.6}
             />
             <EventRow
-              action="audit.recorded"
+              action="response.cached"
               status="indexed"
-              statusLabel="✓ Logged"
+              statusLabel="✓ Cached"
               lineColor="green"
               delay={0.7}
             />
@@ -293,12 +293,12 @@ function VaultOperationsDiagram() {
               <span>Ready</span>
             </div>
             <div className="flex items-center gap-1.5">
-              <div className="size-2 rounded-full bg-amber-500" />
+              <div className="size-2 rounded-full bg-blue-500" />
               <span>Processing</span>
             </div>
             <div className="flex items-center gap-1.5">
-              <div className="size-2 rounded-full bg-orange-400" />
-              <span>Resolving</span>
+              <div className="size-2 rounded-full bg-indigo-400" />
+              <span>Routing</span>
             </div>
             <div className="flex items-center gap-1.5">
               <div className="size-2 rounded-full bg-red-500" />
@@ -329,9 +329,9 @@ function FeatureBullet({
       transition={{ duration: 0.4, delay }}
       className="flex items-start gap-3"
     >
-      <div className="mt-1 flex items-center justify-center size-5 rounded-md bg-amber-500/10 shrink-0">
+      <div className="mt-1 flex items-center justify-center size-5 rounded-md bg-blue-500/10 shrink-0">
         <svg
-          className="size-3 text-amber-500"
+          className="size-3 text-blue-500"
           viewBox="0 0 12 12"
           fill="none"
           aria-hidden="true"
@@ -355,38 +355,38 @@ function FeatureBullet({
   );
 }
 
-// ─── Vault Operations Pipeline Section ───────────────────────
+// ─── Gateway Pipeline Section ────────────────────────────────
 export function DeliveryFlowSection() {
   return (
     <section className="relative w-full py-20 sm:py-28 overflow-hidden">
       {/* Background */}
-      <div className="absolute inset-0 bg-gradient-to-b from-transparent via-amber-500/[0.02] to-transparent" />
+      <div className="absolute inset-0 bg-gradient-to-b from-transparent via-blue-500/[0.02] to-transparent" />
 
       <div className="container max-w-(--fd-layout-width) mx-auto px-4 sm:px-6">
         <div className="grid gap-12 lg:grid-cols-2 lg:gap-16 items-center">
           {/* Left: Text content */}
           <div className="flex flex-col">
             <SectionHeader
-              badge="Vault Operations Pipeline"
-              title="From request to secure response."
-              description="Vault orchestrates the entire operation lifecycle — tenant scoping, secret decryption, flag evaluation, and audit recording."
+              badge="Gateway Pipeline"
+              title="From request to upstream response."
+              description="Bastion orchestrates the entire request lifecycle — route matching, authentication, load balancing, circuit breaking, and response caching."
               align="left"
             />
 
             <div className="mt-8 space-y-5">
               <FeatureBullet
-                title="Automatic Tenant Scoping"
-                description="Every secret, flag, and config operation is stamped with TenantID and AppID from context. Isolation is enforced at the store layer — no tenant can access another's data."
+                title="Multi-Protocol Support"
+                description="Route HTTP, WebSocket, SSE, and gRPC traffic through protocol-specific handlers. Each protocol gets optimized connection management and graceful shutdown."
                 delay={0.2}
               />
               <FeatureBullet
-                title="AES-256-GCM Encryption"
-                description="Secrets are encrypted with AES-256-GCM using unique nonces. Ciphertext is stored as nonce‖encrypted bytes. Key rotation and crypto-shredding are built in."
+                title="Resilience Layer"
+                description="Per-target circuit breakers prevent cascade failures. Automatic retries with exponential backoff, jitter, and retry budgets protect upstream services."
                 delay={0.3}
               />
               <FeatureBullet
-                title="Append-Only Audit Trail"
-                description="Every access, mutation, and failure is logged with actor, resource, action, severity, and outcome. Wire in custom recorders via the audit hook extension."
+                title="Full Observability"
+                description="Prometheus metrics, structured access logging, and OpenTelemetry trace propagation. Monitor latency, error rates, and upstream health in real time."
                 delay={0.4}
               />
             </div>
@@ -400,7 +400,7 @@ export function DeliveryFlowSection() {
             >
               <a
                 href="/docs/architecture"
-                className="inline-flex items-center gap-1 text-sm font-medium text-amber-600 dark:text-amber-400 hover:text-amber-500 transition-colors"
+                className="inline-flex items-center gap-1 text-sm font-medium text-blue-600 dark:text-blue-400 hover:text-blue-500 transition-colors"
               >
                 Learn about the architecture
                 <svg
@@ -421,9 +421,9 @@ export function DeliveryFlowSection() {
             </motion.div>
           </div>
 
-          {/* Right: Operations diagram */}
+          {/* Right: Pipeline diagram */}
           <div className="relative">
-            <VaultOperationsDiagram />
+            <GatewayPipelineDiagram />
           </div>
         </div>
       </div>

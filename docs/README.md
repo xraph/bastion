@@ -1,6 +1,6 @@
-# Dispatch Documentation
+# Bastion Documentation
 
-Documentation site for [Dispatch](https://github.com/xraph/dispatch) — a composable webhook delivery engine for Go.
+Documentation site for [Bastion](https://github.com/xraph/bastion) — a production-grade API gateway extension for Forge.
 
 Built with [Fumadocs](https://fumadocs.dev) and Next.js.
 

@@ -11,37 +11,37 @@ const footerLinks = {
     { label: "Configuration", href: "/docs/concepts/configuration" },
   ],
   Subsystems: [
-    { label: "Secrets", href: "/docs/subsystems/secrets" },
-    { label: "Feature Flags", href: "/docs/subsystems/feature-flags" },
-    { label: "Runtime Config", href: "/docs/subsystems/runtime-config" },
-    { label: "Encryption", href: "/docs/subsystems/encryption" },
-    { label: "Plugins", href: "/docs/subsystems/plugins" },
+    { label: "Proxying", href: "/docs/subsystems/proxying" },
+    { label: "Discovery", href: "/docs/subsystems/discovery" },
+    { label: "Load Balancing", href: "/docs/subsystems/load-balancing" },
+    { label: "Circuit Breakers", href: "/docs/subsystems/circuit-breakers" },
+    { label: "Rate Limiting", href: "/docs/subsystems/rate-limiting" },
   ],
-  Stores: [
-    { label: "Memory", href: "/docs/stores/memory" },
-    { label: "PostgreSQL", href: "/docs/stores/postgres" },
-    { label: "Bun ORM", href: "/docs/stores/bun" },
-    { label: "Custom Store", href: "/docs/guides/custom-store" },
+  Guides: [
+    { label: "Forge Extension", href: "/docs/guides/forge-extension" },
+    { label: "Hook System", href: "/docs/guides/hooks" },
+    { label: "Full Example", href: "/docs/guides/full-example" },
+    { label: "OpenAPI Aggregation", href: "/docs/guides/openapi-aggregation" },
   ],
   Community: [
     {
       label: "GitHub",
-      href: "https://github.com/xraph/vault",
+      href: "https://github.com/xraph/bastion",
       external: true,
     },
     {
       label: "Issues",
-      href: "https://github.com/xraph/vault/issues",
+      href: "https://github.com/xraph/bastion/issues",
       external: true,
     },
     {
       label: "Discussions",
-      href: "https://github.com/xraph/vault/discussions",
+      href: "https://github.com/xraph/bastion/discussions",
       external: true,
     },
     {
       label: "Contributing",
-      href: "https://github.com/xraph/vault/blob/main/CONTRIBUTING.md",
+      href: "https://github.com/xraph/bastion/blob/main/CONTRIBUTING.md",
       external: true,
     },
   ],
@@ -57,16 +57,16 @@ export function Footer() {
           <div className="col-span-2 md:col-span-1">
             <Link href="/" className="inline-flex items-center gap-2 mb-4">
               <ThemedLogo />
-              <span className="font-bold text-lg">Vault</span>
+              <span className="font-bold text-lg">Bastion</span>
             </Link>
             <p className="text-sm text-fd-muted-foreground leading-relaxed max-w-xs">
-              Composable secrets management, feature flags, and runtime
-              configuration for Go. Encrypt, version, and isolate at scale.
+              Production-grade API gateway for Go. Multi-protocol proxying,
+              auto-discovery, load balancing, and observability at scale.
             </p>
             {/* Social links */}
             <div className="flex items-center gap-3 mt-6">
               <a
-                href="https://github.com/xraph/vault"
+                href="https://github.com/xraph/bastion"
                 target="_blank"
                 rel="noreferrer"
                 className="text-fd-muted-foreground hover:text-fd-foreground transition-colors"

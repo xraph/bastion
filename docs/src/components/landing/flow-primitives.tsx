@@ -14,6 +14,7 @@ interface FlowNodeProps {
     | "green"
     | "red"
     | "blue"
+    | "indigo"
     | "gray"
     | "purple"
     | "violet";
@@ -34,6 +35,8 @@ const colorMap = {
     "border-green-500/30 bg-green-500/10 text-green-700 dark:text-green-300",
   red: "border-red-500/30 bg-red-500/10 text-red-700 dark:text-red-300",
   blue: "border-blue-500/30 bg-blue-500/10 text-blue-700 dark:text-blue-300",
+  indigo:
+    "border-indigo-500/30 bg-indigo-500/10 text-indigo-700 dark:text-indigo-300",
   gray: "border-fd-border bg-fd-muted/50 text-fd-muted-foreground",
   purple:
     "border-purple-500/30 bg-purple-500/10 text-purple-700 dark:text-purple-300",
@@ -48,6 +51,7 @@ const pulseColorMap = {
   green: "shadow-green-500/20",
   red: "shadow-red-500/20",
   blue: "shadow-blue-500/20",
+  indigo: "shadow-indigo-500/20",
   gray: "shadow-fd-border/20",
   purple: "shadow-purple-500/20",
   violet: "shadow-violet-500/20",
@@ -106,6 +110,8 @@ interface FlowLineProps {
     | "orange"
     | "green"
     | "red"
+    | "blue"
+    | "indigo"
     | "gray"
     | "violet"
     | "purple";
@@ -120,6 +126,8 @@ const lineColorMap = {
   orange: "bg-orange-500/40",
   green: "bg-green-500/40",
   red: "bg-red-500/40",
+  blue: "bg-blue-500/40",
+  indigo: "bg-indigo-500/40",
   gray: "bg-fd-border",
   violet: "bg-violet-500/40",
   purple: "bg-purple-500/40",
@@ -131,6 +139,8 @@ const particleColorMap = {
   orange: "bg-orange-400",
   green: "bg-green-400",
   red: "bg-red-400",
+  blue: "bg-blue-400",
+  indigo: "bg-indigo-400",
   gray: "bg-fd-muted-foreground",
   violet: "bg-violet-400",
   purple: "bg-purple-400",
@@ -139,7 +149,7 @@ const particleColorMap = {
 export function FlowLine({
   direction = "horizontal",
   length = 40,
-  color = "amber",
+  color = "blue",
   animated = true,
   className,
   delay = 0,
@@ -206,6 +216,10 @@ export function FlowLine({
               (isH ? "border-l-green-500/50" : "border-t-green-500/50"),
             color === "red" &&
               (isH ? "border-l-red-500/50" : "border-t-red-500/50"),
+            color === "blue" &&
+              (isH ? "border-l-blue-500/50" : "border-t-blue-500/50"),
+            color === "indigo" &&
+              (isH ? "border-l-indigo-500/50" : "border-t-indigo-500/50"),
             color === "gray" &&
               (isH ? "border-l-fd-border" : "border-t-fd-border"),
             color === "violet" &&
@@ -224,7 +238,7 @@ export function FlowLine({
 interface FlowParticleStreamProps {
   direction?: "horizontal" | "vertical";
   length?: number;
-  color?: "teal" | "amber" | "orange" | "green" | "red" | "violet";
+  color?: "teal" | "amber" | "orange" | "green" | "red" | "blue" | "indigo" | "violet";
   count?: number;
   className?: string;
 }
@@ -232,7 +246,7 @@ interface FlowParticleStreamProps {
 export function FlowParticleStream({
   direction = "horizontal",
   length = 60,
-  color = "amber",
+  color = "blue",
   count = 3,
   className,
 }: FlowParticleStreamProps) {

@@ -3,7 +3,7 @@
 import { motion } from "framer-motion";
 import { cn } from "@/lib/cn";
 
-const words = ["Vault", " your", " secrets"];
+const words = ["Guard", " your", " APIs"];
 
 const charVariants = {
   hidden: {
@@ -48,7 +48,7 @@ export function AnimatedTagline({ className }: { className?: string }) {
                 className={cn(
                   "inline-block",
                   wordIdx === 0 &&
-                    "bg-gradient-to-r from-amber-400 via-orange-500 to-amber-600 bg-clip-text text-transparent",
+                    "bg-gradient-to-r from-blue-400 via-indigo-500 to-blue-600 bg-clip-text text-transparent",
                   wordIdx !== 0 && "text-fd-foreground",
                   char === " " && "w-[0.25em]",
                 )}

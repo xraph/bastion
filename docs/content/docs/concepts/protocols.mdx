@@ -1,0 +1,222 @@
+---
+title: Protocols
+description: HTTP, WebSocket, SSE, and gRPC proxying in Bastion.
+---
+
+Bastion proxies traffic over four protocols, each with dedicated handling for connection management, streaming, and error recovery. The protocol is configured per-route and determines how the gateway forwards requests to upstream targets.
+
+## Protocol constants
+
+```go
+const (
+    ProtocolHTTP      Protocol = "http"
+    ProtocolWebSocket Protocol = "websocket"
+    ProtocolSSE       Protocol = "sse"
+    ProtocolGRPC      Protocol = "grpc"
+)
+```
+
+## HTTP proxying
+
+HTTP is the default and most common protocol. Bastion uses a customized reverse proxy based on Go's `httputil.ReverseProxy` with support for:
+
+- HTTP/1.1 and HTTP/2 upstream connections
+- Request and response header manipulation
+- Path rewriting and prefix stripping
+- Connection pooling and keep-alive
+- Configurable timeouts
+- Response buffering
+
+### Configuration
+
+```go
+bastion.WithRoute(bastion.RouteConfig{
+    Path:     "/api/*",
+    Protocol: bastion.ProtocolHTTP,
+    Targets: []bastion.TargetConfig{
+        {URL: "http://api-service:8080", Weight: 1},
+    },
+    StripPrefix: true,
+    Enabled:     true,
+})
+```
+
+### Request flow
+
+1. Match incoming request to route
+2. Select upstream target via load balancer
+3. Rewrite path (strip prefix if configured)
+4. Copy request headers, add `X-Forwarded-For`, `X-Forwarded-Host`, `X-Forwarded-Proto`
+5. Forward request to upstream
+6. Copy response headers and body back to client
+
+### Automatic WebSocket upgrade
+
+HTTP routes automatically detect WebSocket upgrade requests (via the `Upgrade: websocket` header) and switch to WebSocket proxying for that connection. You do not need a separate WebSocket route for services that use both HTTP and WebSocket on the same path prefix.
+
+## WebSocket proxying
+
+WebSocket routes handle bidirectional, full-duplex communication between clients and upstream services.
+
+### Configuration
+
+```go
+bastion.WithRoute(bastion.RouteConfig{
+    Path:     "/ws/*",
+    Protocol: bastion.ProtocolWebSocket,
+    Targets: []bastion.TargetConfig{
+        {URL: "http://ws-service:8080", Weight: 1},
+    },
+    StripPrefix: true,
+    Enabled:     true,
+})
+```
+
+### Connection lifecycle
+
+1. Client sends HTTP request with `Upgrade: websocket` header
+2. Bastion establishes a WebSocket connection to the upstream target
+3. Bastion completes the WebSocket handshake with the client
+4. Frames are copied bidirectionally between client and upstream
+5. When either side sends a close frame, the other connection is closed
+
+### Behavior details
+
+- **Binary and text frames** are forwarded transparently without inspection
+- **Ping/pong frames** are forwarded to keep connections alive
+- **Close frames** trigger graceful shutdown of both connections
+- **Connection errors** on either side close the other connection immediately
+- **Load balancing** happens at connection time -- once established, a WebSocket connection stays pinned to its target
+
+### WebSocket-specific considerations
+
+WebSocket connections are long-lived. Unlike HTTP requests, a single WebSocket connection can persist for hours or days. This affects:
+
+- **Circuit breakers** -- Only checked at connection establishment, not per-frame
+- **Health checks** -- An unhealthy target does not terminate existing WebSocket connections, only prevents new ones
+- **Load balancing** -- Connection-time only; least-connections strategy is recommended for WebSocket routes
+
+## SSE (Server-Sent Events) proxying
+
+SSE routes handle one-way streaming from the server to the client over a long-lived HTTP connection.
+
+### Configuration
+
+```go
+bastion.WithRoute(bastion.RouteConfig{
+    Path:     "/events/*",
+    Protocol: bastion.ProtocolSSE,
+    Targets: []bastion.TargetConfig{
+        {URL: "http://event-service:8080", Weight: 1},
+    },
+    StripPrefix: true,
+    Enabled:     true,
+})
+```
+
+### Streaming behavior
+
+1. Client sends a standard HTTP GET request
+2. Bastion forwards the request to the upstream target
+3. The upstream responds with `Content-Type: text/event-stream`
+4. Bastion streams the response body back to the client with chunked transfer encoding
+5. Response buffering is disabled to ensure events are delivered immediately
+6. The connection remains open until the client disconnects or the upstream closes it
+
+### SSE-specific settings
+
+Bastion sets the following headers on SSE responses:
+
+| Header | Value | Purpose |
+|--------|-------|---------|
+| `Content-Type` | `text/event-stream` | Identifies the stream as SSE |
+| `Cache-Control` | `no-cache` | Prevents caching of the event stream |
+| `Connection` | `keep-alive` | Maintains the long-lived connection |
+
+Response caching is automatically disabled for SSE routes regardless of route-level cache configuration.
+
+## gRPC proxying
+
+gRPC routes proxy HTTP/2 traffic including gRPC-specific trailers and metadata.
+
+### Configuration
+
+```go
+bastion.WithRoute(bastion.RouteConfig{
+    Path:     "/grpc/*",
+    Protocol: bastion.ProtocolGRPC,
+    Targets: []bastion.TargetConfig{
+        {URL: "http://grpc-service:50051", Weight: 1},
+    },
+    StripPrefix: false,
+    Enabled:     true,
+})
+```
+
+### Supported RPC types
+
+| RPC type | Description |
+|----------|-------------|
+| **Unary** | Single request, single response |
+| **Server streaming** | Single request, stream of responses |
+| **Client streaming** | Stream of requests, single response |
+| **Bidirectional streaming** | Stream of requests and responses simultaneously |
+
+### gRPC behavior
+
+- Bastion forwards HTTP/2 frames without interpreting the protobuf payload
+- gRPC trailers (`grpc-status`, `grpc-message`) are forwarded transparently
+- gRPC metadata (custom headers) is passed through in both directions
+- `StripPrefix` is typically `false` for gRPC routes because gRPC clients address services by their full package and service name
+
+### TLS with gRPC
+
+Most production gRPC deployments use TLS. Configure TLS on the target:
+
+```go
+bastion.TargetConfig{
+    URL:    "https://grpc-service:50051",
+    Weight: 1,
+    TLS: &bastion.TargetTLSConfig{
+        CACertFile: "/etc/certs/ca.pem",
+    },
+}
+```
+
+For insecure gRPC (development only), use an `http://` URL.
+
+## Protocol detection summary
+
+| Signal | Protocol used |
+|--------|--------------|
+| Route `Protocol` is `http` and no `Upgrade` header | HTTP reverse proxy |
+| Route `Protocol` is `http` and `Upgrade: websocket` header present | WebSocket proxy (auto-detected) |
+| Route `Protocol` is `websocket` | WebSocket proxy |
+| Route `Protocol` is `sse` | SSE streaming proxy |
+| Route `Protocol` is `grpc` | gRPC HTTP/2 proxy |
+
+## YAML protocol configuration
+
+```yaml
+bastion:
+  routes:
+    - path: "/api/*"
+      protocol: http
+      targets:
+        - url: "http://api-service:8080"
+
+    - path: "/ws/*"
+      protocol: websocket
+      targets:
+        - url: "http://ws-service:8080"
+
+    - path: "/events/*"
+      protocol: sse
+      targets:
+        - url: "http://event-service:8080"
+
+    - path: "/grpc/*"
+      protocol: grpc
+      targets:
+        - url: "http://grpc-service:50051"
+```

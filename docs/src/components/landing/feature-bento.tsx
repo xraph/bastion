@@ -16,9 +16,9 @@ interface FeatureCard {
 
 const features: FeatureCard[] = [
   {
-    title: "Secrets Management",
+    title: "Multi-Protocol Proxying",
     description:
-      "AES-256-GCM encrypted, versioned secrets with automatic nonce generation. Store, retrieve, and rotate secrets with full audit trails.",
+      "Route HTTP, WebSocket, SSE, and gRPC traffic through a unified proxy engine. Each protocol gets its own optimized handler with connection pooling and graceful shutdown.",
     icon: (
       <svg
         className="size-5"
@@ -30,28 +30,24 @@ const features: FeatureCard[] = [
         strokeLinejoin="round"
         aria-hidden="true"
       >
-        <rect x="3" y="11" width="18" height="11" rx="2" ry="2" />
-        <path d="M7 11V7a5 5 0 0110 0v4" />
-        <circle cx="12" cy="16" r="1" />
+        <path d="M22 12h-4l-3 9L9 3l-3 9H2" />
       </svg>
     ),
-    code: `svc := secret.NewService(store, encryptor)
-
-err := svc.Set(ctx, "db-password",
-  []byte("s3cret!"),
-  secret.WithMetadata(map[string]string{
-    "env": "production",
-  }),
-)
-
-val, _ := svc.Get(ctx, "db-password")
-// val = []byte("s3cret!")`,
-    filename: "secrets.go",
+    code: `gateway.WithRoute(gateway.RouteConfig{
+    Path:     "/api/users/*",
+    Targets:  []gateway.TargetConfig{
+        {URL: "http://user-svc:8080", Weight: 1},
+    },
+    Protocol:    gateway.ProtocolHTTP,
+    StripPrefix: true,
+    Enabled:     true,
+})`,
+    filename: "routes.go",
   },
   {
-    title: "Feature Flags",
+    title: "Service Discovery",
     description:
-      "Type-safe flag evaluation with targeting rules, tenant overrides, percentage rollouts, and schedule-based activation.",
+      "FARP-based schema-driven route generation from OpenAPI, AsyncAPI, and GraphQL descriptors. Services register once and the gateway auto-configures routes.",
     icon: (
       <svg
         className="size-5"
@@ -63,22 +59,24 @@ val, _ := svc.Get(ctx, "db-password")
         strokeLinejoin="round"
         aria-hidden="true"
       >
-        <path d="M4 2v20M4 4h12l-3 4 3 4H4" />
+        <circle cx="11" cy="11" r="8" />
+        <path d="M21 21l-4.35-4.35" />
       </svg>
     ),
-    code: `engine := flag.NewEngine(store)
-svc := flag.NewService(engine, store)
-
-dark, _ := svc.Bool(ctx, "dark-mode", false)
-limit, _ := svc.Int(ctx, "rate-limit", 100)
-model, _ := svc.String(ctx, "ai-model", "gpt-4o")
-// dark=true, limit=250, model="gpt-4o"`,
-    filename: "flags.go",
+    code: `gateway.NewExtension(
+    gateway.WithDiscoveryEnabled(true),
+    gateway.WithDiscoveryConfig(gateway.DiscoveryConfig{
+        WatchMode:  true,
+        AutoPrefix: true,
+        PrefixTemplate: "/{{.ServiceName}}",
+    }),
+)`,
+    filename: "discovery.go",
   },
   {
-    title: "Runtime Config",
+    title: "Load Balancing",
     description:
-      "Type-safe configuration with Duration, JSON, and Watch support. Override resolution chains config sources with per-tenant overrides.",
+      "Five strategies out of the box: round-robin, weighted round-robin, random, least-connections, and consistent hash. Per-route strategy configuration.",
     icon: (
       <svg
         className="size-5"
@@ -90,25 +88,26 @@ model, _ := svc.String(ctx, "ai-model", "gpt-4o")
         strokeLinejoin="round"
         aria-hidden="true"
       >
-        <circle cx="12" cy="12" r="3" />
-        <path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42" />
+        <path d="M12 3v18" />
+        <path d="M3 12h18" />
+        <path d="M6 6l4 6-4 6" />
+        <path d="M18 6l-4 6 4 6" />
       </svg>
     ),
-    code: `svc := config.NewService(store)
-
-ttl, _ := svc.Duration(ctx,
-  "cache-ttl", 5*time.Minute)
-
-svc.Watch(ctx, "cache-ttl",
-  func(key string, val any) {
-    cache.SetTTL(val.(time.Duration))
-  })`,
-    filename: "config.go",
+    code: `gateway.WithLoadBalancing(gateway.LoadBalancingConfig{
+    Strategy: gateway.LBWeightedRoundRobin,
+})
+// Per-route override
+route.LoadBalancing = &gateway.LoadBalancingConfig{
+    Strategy: gateway.LBConsistentHash,
+    HashKey:  "X-User-ID",
+}`,
+    filename: "balancing.go",
   },
   {
-    title: "Secret Rotation",
+    title: "Circuit Breakers",
     description:
-      "Schedule-based automatic rotation with custom rotator functions. Define policies per secret and let the manager handle the lifecycle.",
+      "Per-target three-state circuit breakers (closed/open/half-open) with configurable failure thresholds, reset timeouts, and half-open probe limits.",
     icon: (
       <svg
         className="size-5"
@@ -120,25 +119,22 @@ svc.Watch(ctx, "cache-ttl",
         strokeLinejoin="round"
         aria-hidden="true"
       >
-        <path d="M1 4v6h6M23 20v-6h-6" />
-        <path d="M20.49 9A9 9 0 005.64 5.64L1 10M23 14l-4.64 4.36A9 9 0 013.51 15" />
+        <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
+        <path d="M13 2l-1 9h4l-5 11" />
       </svg>
     ),
-    code: `mgr := rotation.NewManager(store, secretSvc)
-
-mgr.RegisterRotator("db-password",
-  func(ctx context.Context) ([]byte, error) {
-    pw := generatePassword(32)
-    return []byte(pw), nil
-  })
-
-mgr.Start(ctx) // runs on policy schedule`,
-    filename: "rotation.go",
+    code: `gateway.WithCircuitBreaker(gateway.CircuitBreakerConfig{
+    Enabled:          true,
+    FailureThreshold: 5,
+    ResetTimeout:     30 * time.Second,
+    HalfOpenRequests: 3,
+})`,
+    filename: "breaker.go",
   },
   {
-    title: "Multi-Tenant Isolation",
+    title: "Rate Limiting",
     description:
-      "Every operation is scoped to tenant and app via context. Cross-tenant access is structurally impossible at the store layer.",
+      "Token-bucket rate limiting at global, per-route, and per-client levels. Configurable burst allowance with automatic client identification.",
     icon: (
       <svg
         className="size-5"
@@ -150,23 +146,23 @@ mgr.Start(ctx) // runs on policy schedule`,
         strokeLinejoin="round"
         aria-hidden="true"
       >
-        <path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2" />
-        <circle cx="9" cy="7" r="4" />
-        <path d="M23 21v-2a4 4 0 00-3-3.87M16 3.13a4 4 0 010 7.75" />
+        <path d="M12 2a10 10 0 100 20 10 10 0 000-20z" />
+        <path d="M12 6v6l4 2" />
+        <path d="M16.24 7.76l1.42-1.42" />
       </svg>
     ),
-    code: `ctx = scope.WithAppID(ctx, "myapp")
-ctx = scope.WithTenantID(ctx, "tenant-1")
-ctx = scope.WithUserID(ctx, "user-42")
-
-// All secret, flag, config operations
-// are automatically scoped to this tenant`,
-    filename: "scope.go",
+    code: `gateway.WithRateLimiting(gateway.RateLimitConfig{
+    Enabled:        true,
+    RequestsPerSec: 1000,
+    Burst:          100,
+    PerClient:      true,
+})`,
+    filename: "ratelimit.go",
   },
   {
-    title: "Plugin System",
+    title: "Traffic Splitting",
     description:
-      "Register plugins that implement any of 8 capability interfaces. The registry auto-discovers capabilities via type-switch.",
+      "Canary releases, blue-green deployments, A/B testing, and shadow traffic mirroring. Route percentages of traffic to different upstream versions.",
     icon: (
       <svg
         className="size-5"
@@ -178,19 +174,20 @@ ctx = scope.WithUserID(ctx, "user-42")
         strokeLinejoin="round"
         aria-hidden="true"
       >
-        <path d="M12 2L2 7l10 5 10-5-10-5z" />
-        <path d="M2 17l10 5 10-5M2 12l10 5 10-5" />
+        <line x1="6" y1="3" x2="6" y2="15" />
+        <circle cx="18" cy="6" r="3" />
+        <circle cx="6" cy="18" r="3" />
+        <path d="M18 9a9 9 0 01-9 9" />
       </svg>
     ),
-    code: `reg := plugin.NewRegistry()
-reg.Register(&DatadogPlugin{})
-reg.Register(&SlackAlertsPlugin{})
-
-// Auto-discovered capabilities:
-// - OnInit, OnShutdown
-// - OnSecretAccess, OnConfigChange
-// - RotationStrategy`,
-    filename: "plugins.go",
+    code: `route.TrafficSplit = &gateway.TrafficSplitConfig{
+    Strategy: gateway.SplitCanary,
+    Rules: []gateway.SplitRule{
+        {TargetURL: "http://v2:8080", Weight: 10}, // 10% canary
+        {TargetURL: "http://v1:8080", Weight: 90}, // 90% stable
+    },
+}`,
+    filename: "traffic.go",
     colSpan: 2,
   },
 ];
@@ -219,8 +216,8 @@ export function FeatureBento() {
       <div className="container max-w-(--fd-layout-width) mx-auto px-4 sm:px-6">
         <SectionHeader
           badge="Features"
-          title="Everything you need for application secrets"
-          description="Vault handles the hard parts — encryption, tenant isolation, flag evaluation, config resolution, and audit logging — so you can focus on your application."
+          title="Everything you need for API traffic management"
+          description="Bastion handles the hard parts — routing, load balancing, circuit breaking, rate limiting, and traffic splitting — so you can focus on your services."
         />
 
         <motion.div
@@ -235,13 +232,13 @@ export function FeatureBento() {
               key={feature.title}
               variants={itemVariants}
               className={cn(
-                "group relative rounded-xl border border-fd-border bg-fd-card/50 backdrop-blur-sm p-6 hover:border-amber-500/20 hover:bg-fd-card/80 transition-all duration-300",
+                "group relative rounded-xl border border-fd-border bg-fd-card/50 backdrop-blur-sm p-6 hover:border-blue-500/20 hover:bg-fd-card/80 transition-all duration-300",
                 feature.colSpan === 2 && "md:col-span-2",
               )}
             >
               {/* Header */}
               <div className="flex items-start gap-3 mb-4">
-                <div className="flex items-center justify-center size-9 rounded-lg bg-amber-500/10 text-amber-600 dark:text-amber-400 shrink-0">
+                <div className="flex items-center justify-center size-9 rounded-lg bg-blue-500/10 text-blue-600 dark:text-blue-400 shrink-0">
                   {feature.icon}
                 </div>
                 <div>

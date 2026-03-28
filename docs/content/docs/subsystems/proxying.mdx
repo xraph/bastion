@@ -1,0 +1,186 @@
+---
+title: Proxying
+description: Multi-protocol reverse proxy engine.
+---
+
+Bastion's proxy engine sits at the core of the gateway data plane. Every inbound request is matched to a route, forwarded to a healthy upstream target, and the response is streamed back to the client. The engine handles HTTP, WebSocket, SSE, and gRPC traffic with protocol-specific optimizations.
+
+## Protocol Support
+
+Each route declares its protocol via the `Protocol` field. Bastion uses a dedicated handler per protocol type:
+
+| Protocol | Constant | Description |
+|----------|----------|-------------|
+| HTTP/HTTPS | `bastion.ProtocolHTTP` | Standard reverse proxy using Go's `httputil.ReverseProxy` |
+| WebSocket | `bastion.ProtocolWebSocket` | Full-duplex WebSocket proxying with ping/pong keep-alive |
+| SSE | `bastion.ProtocolSSE` | Server-Sent Events with streaming flush support |
+| gRPC | `bastion.ProtocolGRPC` | gRPC proxying over HTTP/2 |
+| GraphQL | `bastion.ProtocolGraphQL` | HTTP-based GraphQL with schema-aware handling |
+
+```go
+bastion.WithRoute(bastion.RouteConfig{
+    Path:     "/api/v1/*",
+    Protocol: bastion.ProtocolHTTP,
+    Targets:  []bastion.TargetConfig{{URL: "http://backend:8080", Weight: 1}},
+    Enabled:  true,
+})
+```
+
+## HTTP Proxying
+
+HTTP proxying is built on Go's `httputil.ReverseProxy` with a custom transport layer. The engine selects a target through the load balancer, rewrites the request path if configured, applies header policies, and forwards the request.
+
+### Connection Pooling
+
+The proxy transport maintains a shared connection pool to upstream targets:
+
+```go
+bastion.WithTimeouts(bastion.TimeoutConfig{
+    Connect: 10 * time.Second,
+    Read:    30 * time.Second,
+    Write:   30 * time.Second,
+    Idle:    90 * time.Second,
+})
+```
+
+- **Connect** -- maximum time to establish a TCP connection to the upstream.
+- **Read** -- maximum time to wait for the upstream response body.
+- **Write** -- maximum time to send the request body to the upstream.
+- **Idle** -- how long idle connections remain in the pool before being closed.
+
+### Buffer Pool
+
+Request and response body sizes can be capped to protect gateway memory:
+
+```go
+bastion.WithConfig(bastion.Config{
+    BufferPool: bastion.BufferPoolConfig{
+        MaxRequestBodySize:  10 * 1024 * 1024,  // 10 MB
+        MaxResponseBodySize: 50 * 1024 * 1024,  // 50 MB
+    },
+})
+```
+
+## WebSocket Proxying
+
+When a route is configured with `ProtocolWebSocket`, the engine upgrades the client connection and establishes a mirrored connection to the upstream. Messages are relayed bidirectionally with configurable buffer sizes and keep-alive settings.
+
+```go
+bastion.WithWebSocket(bastion.WebSocketConfig{
+    ReadBufferSize:   4096,
+    WriteBufferSize:  4096,
+    HandshakeTimeout: 10 * time.Second,
+    PingInterval:     30 * time.Second,
+    PongTimeout:      60 * time.Second,
+})
+```
+
+- **PingInterval** -- how often the gateway sends WebSocket ping frames to both sides.
+- **PongTimeout** -- maximum time to wait for a pong response before closing the connection.
+
+Active WebSocket connections are tracked in the gateway stats as `ActiveWSConns`.
+
+## SSE Proxying
+
+Server-Sent Events require the proxy to stream the upstream response without buffering. The SSE handler sets `Transfer-Encoding: chunked` and flushes the response writer at a configurable interval.
+
+```go
+bastion.WithSSE(bastion.SSEConfig{
+    FlushInterval: 100 * time.Millisecond,
+})
+```
+
+Active SSE connections are tracked as `ActiveSSEConns` in the gateway stats.
+
+## gRPC Proxying
+
+Routes with `ProtocolGRPC` use HTTP/2 transport to forward gRPC frames. The proxy preserves gRPC trailers and status codes. TLS is typically required for gRPC upstreams -- see the [TLS & mTLS](/docs/subsystems/tls) subsystem.
+
+## Path Rewriting
+
+The proxy engine supports three path manipulation modes, evaluated in order:
+
+### Strip Prefix
+
+Remove the matched route prefix before forwarding:
+
+```go
+bastion.WithRoute(bastion.RouteConfig{
+    Path:        "/api/users/*",
+    StripPrefix: true,
+    Targets:     []bastion.TargetConfig{{URL: "http://users-svc:8080"}},
+})
+// Client: GET /api/users/123 -> Upstream: GET /123
+```
+
+### Add Prefix
+
+Prepend a path segment after stripping:
+
+```go
+bastion.WithRoute(bastion.RouteConfig{
+    Path:        "/v2/*",
+    StripPrefix: true,
+    AddPrefix:   "/api/v2",
+    Targets:     []bastion.TargetConfig{{URL: "http://backend:8080"}},
+})
+// Client: GET /v2/items -> Upstream: GET /api/v2/items
+```
+
+### Rewrite Path
+
+Apply a regex-based path rewrite:
+
+```go
+bastion.WithRoute(bastion.RouteConfig{
+    Path:        "/old-api/*",
+    RewritePath: "/new-api/$1",
+    Targets:     []bastion.TargetConfig{{URL: "http://backend:8080"}},
+})
+```
+
+## Header Manipulation
+
+Each route carries a `HeaderPolicy` with three operations applied to the upstream request:
+
+```go
+bastion.WithRoute(bastion.RouteConfig{
+    Path: "/api/*",
+    Headers: bastion.HeaderPolicy{
+        Add:    map[string]string{"X-Gateway": "bastion"},
+        Set:    map[string]string{"Host": "internal.example.com"},
+        Remove: []string{"X-Debug"},
+    },
+    Targets: []bastion.TargetConfig{{URL: "http://backend:8080"}},
+})
+```
+
+- **Add** -- appends headers (does not overwrite existing values).
+- **Set** -- sets headers (overwrites existing values).
+- **Remove** -- deletes headers from the request.
+
+Additionally, when authentication is enabled and `ForwardHeaders` is true, the gateway injects `X-Auth-Subject`, `X-Auth-Provider`, `X-Auth-Scopes`, `X-Auth-Role`, and `X-Auth-Email` headers so upstream services receive the authenticated identity without re-authenticating.
+
+## Upstream Connection Management
+
+The proxy engine integrates with several subsystems during request processing:
+
+1. **Route matching** -- the routing manager matches the request path and method to a route.
+2. **Traffic splitting** -- if a traffic policy is set, targets are filtered (canary, blue-green, A/B, mirror).
+3. **Load balancing** -- a healthy target is selected from the filtered set.
+4. **Circuit breaker check** -- if the target's circuit is open, the request is rejected with 503.
+5. **Rate limiting** -- global and per-route rate limits are enforced.
+6. **Authentication** -- credentials are validated if auth is enabled for the route.
+7. **Caching** -- cached responses are served without hitting the upstream.
+8. **Proxy** -- the request is forwarded and the response streamed back.
+9. **Metrics and logging** -- latency, status, and upstream info are recorded.
+
+## Graceful Shutdown
+
+When the gateway shuts down, the proxy engine:
+
+1. Stops accepting new connections.
+2. Marks all targets as draining (`SetDraining(true)`), causing the load balancer to stop routing new requests to them.
+3. Waits for in-flight requests to complete (respecting the configured write timeout).
+4. Closes idle connections in the transport pool.
+5. Stops the health monitor and TLS reload loops.

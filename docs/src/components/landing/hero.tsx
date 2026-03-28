@@ -24,8 +24,8 @@ function GitHubIcon({ className }: { className?: string }) {
   );
 }
 
-// ─── Mini Vault Operations Diagram ───────────────────────────
-function MiniVaultDiagram() {
+// ─── Mini Gateway Operations Diagram ───────────────────────────
+function MiniGatewayDiagram() {
   return (
     <motion.div
       initial={{ opacity: 0 }}
@@ -34,14 +34,14 @@ function MiniVaultDiagram() {
       className="relative w-full max-w-md mx-auto"
     >
       {/* Background glow */}
-      <div className="absolute inset-0 -m-8 bg-gradient-to-br from-amber-500/5 via-transparent to-orange-500/5 rounded-3xl blur-2xl" />
+      <div className="absolute inset-0 -m-8 bg-gradient-to-br from-blue-500/5 via-transparent to-indigo-500/5 rounded-3xl blur-2xl" />
 
       <div className="relative space-y-6 p-4">
-        {/* Row 1: Secret → Encrypt → Store */}
+        {/* Row 1: Client → Route → Upstream */}
         <div className="flex items-center justify-center gap-0">
           <FlowNode
-            label="Secret"
-            color="amber"
+            label="Client"
+            color="blue"
             size="sm"
             delay={0.4}
             icon={
@@ -60,17 +60,17 @@ function MiniVaultDiagram() {
               </svg>
             }
           />
-          <FlowLine length={24} color="amber" delay={1} />
-          <FlowNode label="Encrypt" color="orange" size="sm" delay={0.55} />
-          <FlowLine length={24} color="amber" delay={2} />
-          <FlowNode label="Store" color="amber" size="sm" pulse delay={0.7} />
+          <FlowLine length={24} color="blue" delay={1} />
+          <FlowNode label="Route" color="indigo" size="sm" delay={0.55} />
+          <FlowLine length={24} color="blue" delay={2} />
+          <FlowNode label="Upstream" color="blue" size="sm" pulse delay={0.7} />
         </div>
 
-        {/* Row 2: Flag → Rules → Evaluate */}
+        {/* Row 2: Auth → Balance → Proxy */}
         <div className="flex items-center justify-center gap-0">
           <FlowNode
-            label="Flag"
-            color="orange"
+            label="Auth"
+            color="indigo"
             size="sm"
             delay={0.85}
             icon={
@@ -81,7 +81,7 @@ function MiniVaultDiagram() {
                 aria-hidden="true"
               >
                 <path
-                  d="M2 1v10M2 2h7l-2 3 2 3H2"
+                  d="M6 1L2 4v3c0 2.5 1.5 4 4 5 2.5-1 4-2.5 4-5V4L6 1z"
                   stroke="currentColor"
                   strokeWidth="1.5"
                   strokeLinecap="round"
@@ -90,12 +90,12 @@ function MiniVaultDiagram() {
               </svg>
             }
           />
-          <FlowLine length={24} color="orange" delay={3} />
-          <FlowNode label="Rules" color="amber" size="sm" delay={1.0} />
-          <FlowLine length={24} color="orange" delay={4} />
+          <FlowLine length={24} color="indigo" delay={3} />
+          <FlowNode label="Balance" color="blue" size="sm" delay={1.0} />
+          <FlowLine length={24} color="indigo" delay={4} />
           <FlowNode
-            label="Evaluate"
-            color="orange"
+            label="Proxy"
+            color="indigo"
             size="sm"
             pulse
             delay={1.15}
@@ -105,7 +105,7 @@ function MiniVaultDiagram() {
         {/* Row 3: Operation events */}
         <div className="flex items-start justify-center">
           <div className="space-y-2.5">
-            {/* Event 1: secret encrypted */}
+            {/* Event 1: route matched */}
             <motion.div
               initial={{ opacity: 0, x: -10 }}
               animate={{ opacity: 1, x: 0 }}
@@ -113,25 +113,25 @@ function MiniVaultDiagram() {
               className="flex items-center gap-0"
             >
               <FlowLine length={28} color="green" delay={3} />
-              <FlowNode label="secret.set" color="gray" size="sm" delay={1.1} />
+              <FlowNode label="route.matched" color="gray" size="sm" delay={1.1} />
               <FlowLine length={24} color="green" delay={4} />
-              <StatusBadge status="delivered" label="encrypted" />
+              <StatusBadge status="delivered" label="delivered" />
             </motion.div>
 
-            {/* Event 2: flag evaluated */}
+            {/* Event 2: request proxied */}
             <motion.div
               initial={{ opacity: 0, x: -10 }}
               animate={{ opacity: 1, x: 0 }}
               transition={{ delay: 1.2 }}
               className="flex items-center gap-0"
             >
-              <FlowLine length={28} color="amber" delay={5} />
-              <FlowNode label="flag.eval" color="gray" size="sm" delay={1.3} />
-              <FlowLine length={24} color="amber" delay={6} />
-              <StatusBadge status="retry" label="true" />
+              <FlowLine length={28} color="green" delay={5} />
+              <FlowNode label="request.proxied" color="gray" size="sm" delay={1.3} />
+              <FlowLine length={24} color="green" delay={6} />
+              <StatusBadge status="delivered" label="delivered" />
             </motion.div>
 
-            {/* Event 3: audit recorded */}
+            {/* Event 3: health checked */}
             <motion.div
               initial={{ opacity: 0, x: -10 }}
               animate={{ opacity: 1, x: 0 }}
@@ -139,19 +139,19 @@ function MiniVaultDiagram() {
               className="flex items-center gap-0"
             >
               <FlowLine length={28} color="green" delay={7} />
-              <FlowNode label="audit.log" color="gray" size="sm" delay={1.5} />
+              <FlowNode label="health.checked" color="gray" size="sm" delay={1.5} />
               <FlowLine length={24} color="green" delay={8} />
-              <StatusBadge status="delivered" label="recorded" />
+              <StatusBadge status="delivered" label="delivered" />
             </motion.div>
           </div>
         </div>
 
         {/* Floating capability badges */}
         <div className="flex flex-wrap items-center justify-center gap-2 pt-2">
-          <FloatingBadge label="AES-256-GCM" delay={1.6} />
-          <FloatingBadge label="Multi-Tenant" delay={1.8} />
-          <FloatingBadge label="TypeID" delay={2.0} />
-          <FloatingBadge label="Pluggable" delay={2.2} />
+          <FloatingBadge label="HTTP/WS/SSE/gRPC" delay={1.6} />
+          <FloatingBadge label="Load Balance" delay={1.8} />
+          <FloatingBadge label="Circuit Breaker" delay={2.0} />
+          <FloatingBadge label="Auto-Discovery" delay={2.2} />
         </div>
       </div>
     </motion.div>
@@ -167,7 +167,7 @@ export function Hero() {
 
       {/* Radial gradient overlays */}
       <div className="absolute inset-0 bg-gradient-to-b from-fd-background via-transparent to-fd-background" />
-      <div className="absolute top-0 left-1/2 -translate-x-1/2 w-[800px] h-[600px] bg-gradient-to-b from-amber-500/8 to-transparent rounded-full blur-3xl" />
+      <div className="absolute top-0 left-1/2 -translate-x-1/2 w-[800px] h-[600px] bg-gradient-to-b from-blue-500/8 to-transparent rounded-full blur-3xl" />
 
       <div className="relative container max-w-(--fd-layout-width) mx-auto px-4 sm:px-6">
         <div className="grid gap-12 lg:grid-cols-2 lg:gap-16 items-center py-20 sm:py-28 md:py-32">
@@ -179,8 +179,8 @@ export function Hero() {
               animate={{ opacity: 1, y: 0 }}
               transition={{ duration: 0.4 }}
             >
-              <span className="inline-flex items-center rounded-full border border-amber-500/20 bg-amber-500/10 px-3.5 py-1 text-xs font-medium text-amber-600 dark:text-amber-400 mb-6">
-                Composable secrets, flags &amp; config for Go
+              <span className="inline-flex items-center rounded-full border border-blue-500/20 bg-blue-500/10 px-3.5 py-1 text-xs font-medium text-blue-600 dark:text-blue-400 mb-6">
+                Production-grade API gateway for Go
               </span>
             </motion.div>
 
@@ -194,9 +194,9 @@ export function Hero() {
               transition={{ duration: 0.5, delay: 0.6 }}
               className="mt-6 text-lg text-fd-muted-foreground leading-relaxed max-w-lg"
             >
-              Encrypted secrets, type-safe feature flags, runtime configuration,
-              audit trails, and secret rotation &mdash; tenant-scoped,
-              plugin-extensible, and composable.
+              Multi-protocol reverse proxy with automatic service discovery,
+              load balancing, circuit breakers, rate limiting, and traffic
+              splitting &mdash; composable, extensible, and Forge-native.
             </motion.p>
 
             {/* Install command */}
@@ -208,7 +208,7 @@ export function Hero() {
             >
               <span className="text-fd-muted-foreground select-none">$</span>
               <code className="text-fd-foreground">
-                go get github.com/xraph/vault
+                go get github.com/xraph/bastion
               </code>
             </motion.div>
 
@@ -223,14 +223,14 @@ export function Hero() {
                 href="/docs"
                 className={cn(
                   "inline-flex items-center justify-center rounded-lg px-5 py-2.5 text-sm font-medium transition-colors",
-                  "bg-amber-500 text-white hover:bg-amber-600",
-                  "shadow-sm shadow-amber-500/20",
+                  "bg-blue-500 text-white hover:bg-blue-600",
+                  "shadow-sm shadow-blue-500/20",
                 )}
               >
                 Get Started
               </Link>
               <a
-                href="https://github.com/xraph/vault"
+                href="https://github.com/xraph/bastion"
                 target="_blank"
                 rel="noreferrer"
                 className={cn(
@@ -244,9 +244,9 @@ export function Hero() {
             </motion.div>
           </div>
 
-          {/* Right: Mini Vault operations diagram */}
+          {/* Right: Mini Gateway operations diagram */}
           <div className="relative lg:pl-8">
-            <MiniVaultDiagram />
+            <MiniGatewayDiagram />
           </div>
         </div>
       </div>

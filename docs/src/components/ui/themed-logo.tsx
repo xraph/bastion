@@ -10,22 +10,28 @@ export function ThemedLogo() {
         className="size-8"
         aria-hidden="true"
       >
-        {/* Arrow/relay symbol */}
+        {/* Shield/gateway symbol */}
         <rect
           x="2"
           y="2"
           width="28"
           height="28"
           rx="6"
-          className="fill-teal-500 dark:fill-teal-400"
+          className="fill-blue-500 dark:fill-blue-400"
         />
+        {/* Shield outline */}
         <path
-          d="M10 16L15 11L15 14L22 14L22 18L15 18L15 21L10 16Z"
-          className="fill-white"
+          d="M16 6L8 10V16C8 20.4 11.4 24.5 16 26C20.6 24.5 24 20.4 24 16V10L16 6Z"
+          className="fill-white/20"
         />
-        <circle cx="8" cy="16" r="1.5" className="fill-white/60" />
-        <circle cx="24" cy="12" r="1.5" className="fill-white/60" />
-        <circle cx="24" cy="20" r="1.5" className="fill-white/60" />
+        {/* Arrow through shield (gateway) */}
+        <path
+          d="M11 16H21M18 13L21 16L18 19"
+          stroke="white"
+          strokeWidth="2"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+        />
       </svg>
     </div>
   );

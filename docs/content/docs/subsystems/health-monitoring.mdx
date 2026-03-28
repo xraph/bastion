@@ -1,0 +1,158 @@
+---
+title: Health Monitoring
+description: Active and passive health checking for upstream targets.
+---
+
+Bastion continuously monitors the health of upstream targets using both active probes and passive failure tracking. Unhealthy targets are automatically removed from the load balancer pool and re-added when they recover.
+
+## Configuration
+
+```go
+bastion.WithHealthCheck(bastion.HealthCheckConfig{
+    Enabled:              true,
+    Interval:             10 * time.Second,
+    Path:                 "/_/health",
+    Timeout:              5 * time.Second,
+    FailureThreshold:     3,
+    SuccessThreshold:     2,
+    EnablePassive:        true,
+    PassiveFailThreshold: 5,
+})
+```
+
+### Configuration Fields
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `Enabled` | `bool` | `true` | Enable or disable health monitoring |
+| `Interval` | `time.Duration` | `10s` | Time between active health check probes |
+| `Path` | `string` | `/_/health` | HTTP path to probe on each target |
+| `Timeout` | `time.Duration` | `5s` | Maximum time to wait for a health check response |
+| `FailureThreshold` | `int` | `3` | Consecutive failed probes before marking a target unhealthy |
+| `SuccessThreshold` | `int` | `2` | Consecutive successful probes before marking a target healthy again |
+| `EnablePassive` | `bool` | `true` | Enable passive health checking from proxy traffic |
+| `PassiveFailThreshold` | `int` | `5` | Consecutive proxy failures before marking a target unhealthy |
+
+## Active Health Checks
+
+The health monitor runs a background loop that sends HTTP GET requests to each registered target at the configured interval.
+
+### Probe Behavior
+
+1. The monitor sends `GET <target_url>/<path>` with the configured timeout.
+2. A response with status code 200-399 is considered healthy.
+3. Any other status code, connection error, or timeout is considered unhealthy.
+4. The monitor tracks consecutive successes and failures per target.
+
+### State Transitions
+
+A target transitions from **healthy** to **unhealthy** after `FailureThreshold` consecutive failed probes. It transitions back to **healthy** after `SuccessThreshold` consecutive successful probes. This hysteresis prevents flapping.
+
+```
+Healthy ──[3 consecutive failures]──► Unhealthy
+Unhealthy ──[2 consecutive successes]──► Healthy
+```
+
+### Per-Target Health Paths
+
+Individual targets can override the global health check path by setting a `health_check_path` key in their metadata:
+
+```go
+bastion.WithRoute(bastion.RouteConfig{
+    Path: "/api/*",
+    Targets: []bastion.TargetConfig{
+        {
+            URL: "http://backend:8080",
+            Metadata: map[string]string{
+                "health_check_path": "/healthz",
+            },
+        },
+    },
+})
+```
+
+If the target implements the `HealthPathProvider` interface and returns a non-empty string, that path is used instead of the monitor's global `Path`.
+
+## Passive Health Checking
+
+When `EnablePassive` is true, the health monitor also observes real proxy traffic. If a target accumulates `PassiveFailThreshold` consecutive failures from actual requests (5xx responses, timeouts, connection errors), it is marked unhealthy without waiting for the next active probe cycle.
+
+Passive checks provide faster failure detection because they react to real traffic patterns rather than waiting for the next probe interval.
+
+## Health States
+
+Targets have a binary health state: **healthy** or **unhealthy**. The state is stored on the `Target` struct and used by both the load balancer and the proxy engine:
+
+- **Healthy targets** receive traffic from the load balancer.
+- **Unhealthy targets** are excluded from target selection. Requests are never forwarded to them.
+
+## Health Events
+
+When a target's health state changes, the monitor fires a health change event:
+
+```go
+type Event struct {
+    TargetID  string    // Unique target identifier
+    TargetURL string    // Target URL
+    Healthy   bool      // New health state
+    Previous  bool      // Previous health state
+    RouteID   string    // Route this target belongs to
+    Timestamp time.Time // When the change occurred
+}
+```
+
+These events are used by the dashboard for real-time health updates and by the metrics system to update upstream health gauges.
+
+## Health Check History
+
+The health monitor maintains a rolling history of check results per target. Each result records:
+
+```go
+type CheckResult struct {
+    TargetID  string
+    TargetURL string
+    Healthy   bool
+    Latency   time.Duration
+    Error     string
+    Timestamp time.Time
+}
+```
+
+### Health Summary
+
+A summary aggregates the history for a target:
+
+```go
+type Summary struct {
+    TargetID      string
+    TotalChecks   int
+    HealthyChecks int
+    UptimePercent float64
+    AvgLatency    time.Duration
+    LastCheck     *CheckResult
+}
+```
+
+The admin API exposes health summaries at:
+
+```
+GET /gateway/api/health
+```
+
+## Integration with Load Balancing
+
+The load balancer's target filter checks `target.Healthy` before including a target in the selection pool. Combined with circuit breaker state, a target is only eligible if:
+
+- `Healthy == true`
+- `CircuitState != CircuitOpen`
+- `IsDraining() == false`
+
+## Metrics
+
+When metrics are enabled, the health monitor updates a gauge per target:
+
+```
+gateway.upstream_health.<targetID>
+```
+
+Values: `1.0` = healthy, `0.0` = unhealthy.

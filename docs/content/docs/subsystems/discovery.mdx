@@ -1,0 +1,169 @@
+---
+title: Service Discovery
+description: FARP-based automatic service discovery and route generation.
+---
+
+Bastion includes a built-in service discovery system based on FARP (Forge Application Resource Protocol). When discovery is enabled, the gateway automatically finds services registered in the Forge service registry, fetches their API schemas, and generates proxy routes -- no manual route configuration required.
+
+## How FARP Works
+
+FARP is a lightweight protocol where each Forge service publishes a manifest describing its endpoints, protocols, and API schemas. The discovery subsystem:
+
+1. Queries the Forge service registry for all registered services.
+2. Fetches each service's FARP manifest (typically at `/_/manifest`).
+3. Parses the manifest to extract route definitions, supported protocols, and schema URLs.
+4. Generates gateway routes with automatic path prefixes, targets, and protocol handlers.
+5. Continuously watches for service changes and updates the route table.
+
+## Configuration
+
+```go
+gateway := bastion.New(
+    bastion.WithDiscoveryEnabled(true),
+    bastion.WithDiscovery(bastion.DiscoveryConfig{
+        Enabled:        true,
+        WatchMode:      true,
+        PollInterval:   30 * time.Second,
+        AutoPrefix:     true,
+        PrefixTemplate: "/{{.ServiceName}}",
+        StripPrefix:    true,
+    }),
+)
+```
+
+### Configuration Fields
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `Enabled` | `bool` | `true` | Enable or disable service discovery |
+| `WatchMode` | `bool` | `true` | Use event-driven updates instead of polling |
+| `PollInterval` | `time.Duration` | `30s` | Polling interval when watch mode is off |
+| `AutoPrefix` | `bool` | `true` | Auto-generate path prefixes for discovered services |
+| `PrefixTemplate` | `string` | `/{{.ServiceName}}` | Go template for generating route prefixes |
+| `StripPrefix` | `bool` | `true` | Strip the auto-prefix before forwarding to upstream |
+| `PrefixOverrides` | `map[string]string` | `nil` | Per-service prefix overrides |
+| `FetchTimeout` | `time.Duration` | `10s` | Timeout for fetching FARP manifests |
+| `RemovalGracePeriod` | `time.Duration` | `60s` | Grace period before removing routes for disappeared services |
+| `ServiceFilters` | `[]ServiceFilter` | `[]` | Filters to include/exclude discovered services |
+
+## Watch Mode vs Poll Mode
+
+### Watch Mode (default)
+
+In watch mode, the gateway subscribes to service registry change events. When a service registers, deregisters, or updates its manifest, the gateway immediately updates its route table. This provides near-instant route convergence.
+
+```go
+bastion.WithDiscoveryWatchMode(true)
+```
+
+### Poll Mode
+
+In poll mode, the gateway periodically queries the service registry at the configured interval. This is useful when the service registry does not support event subscriptions.
+
+```go
+bastion.WithDiscoveryWatchMode(false)
+bastion.WithDiscoveryPollInterval(15 * time.Second)
+```
+
+## Schema-Driven Route Generation
+
+FARP manifests can reference API schemas. The discovery engine parses these schemas to generate fine-grained routes:
+
+| Schema Type | Route Generation |
+|-------------|-----------------|
+| **OpenAPI** | Each path/operation becomes a route with method constraints |
+| **AsyncAPI** | WebSocket and SSE channels become protocol-specific routes |
+| **GraphQL** | A single `/graphql` route with `ProtocolGraphQL` handling |
+
+Routes generated from schemas carry `Source: "farp"` and include the service name for observability.
+
+## Auto-Prefix Templates
+
+When `AutoPrefix` is enabled, each discovered service's routes are mounted under a path prefix generated from the `PrefixTemplate`. The template receives a context with the service name:
+
+```go
+// Default: /{{.ServiceName}}
+// Service "users" -> routes mounted at /users/*
+
+bastion.WithDiscoveryPrefixTemplate("/api/{{.ServiceName}}")
+// Service "users" -> routes mounted at /api/users/*
+```
+
+### Prefix Overrides
+
+For specific services, you can override the auto-generated prefix. An empty string mounts the service at root:
+
+```go
+bastion.WithDiscoveryPrefixOverrides(map[string]string{
+    "frontend": "",           // Mount at / (no prefix)
+    "admin":    "/admin-api", // Custom prefix
+})
+```
+
+Prefix overrides take precedence over `AutoPrefix`, `PrefixTemplate`, and the FARP manifest routing strategy.
+
+## Service Filters
+
+Filters control which discovered services are included in the route table. Filters support inclusion and exclusion by name, tag, and metadata:
+
+```go
+bastion.WithDiscoveryServiceFilters(
+    bastion.ServiceFilter{
+        IncludeNames: []string{"users", "orders", "products"},
+    },
+    bastion.ServiceFilter{
+        ExcludeTags: []string{"internal"},
+    },
+    bastion.ServiceFilter{
+        RequireMetadata: map[string]string{"env": "production"},
+    },
+)
+```
+
+| Filter Field | Description |
+|-------------|-------------|
+| `IncludeNames` | Only discover services with these names |
+| `ExcludeNames` | Skip services with these names |
+| `IncludeTags` | Only discover services with at least one of these tags |
+| `ExcludeTags` | Skip services with any of these tags |
+| `RequireMetadata` | Only discover services whose metadata contains all these key-value pairs |
+
+## Discovered Service Information
+
+Each discovered service is represented as a `DiscoveredService`:
+
+```go
+type DiscoveredService struct {
+    Name         string
+    Version      string
+    Address      string
+    Port         int
+    Protocols    []string   // e.g., ["http", "websocket", "grpc"]
+    SchemaTypes  []string   // e.g., ["openapi", "asyncapi"]
+    Capabilities []string
+    Healthy      bool
+    Metadata     map[string]string
+    RouteCount   int
+    DiscoveredAt time.Time
+}
+```
+
+## Removal Grace Period
+
+When a service disappears from the registry, the gateway does not immediately remove its routes. The `RemovalGracePeriod` (default 60 seconds) allows transient discovery failures to resolve without causing route flapping:
+
+```go
+bastion.WithDiscovery(bastion.DiscoveryConfig{
+    RemovalGracePeriod: 2 * time.Minute,
+})
+```
+
+## Manual Refresh
+
+The admin API exposes an endpoint to force an immediate discovery refresh, bypassing the poll interval or waiting for a watch event:
+
+```
+POST /gateway/api/discovery/refresh
+```
+
+This triggers a full re-scan of the service registry, fetches all FARP manifests, and reconciles the route table.

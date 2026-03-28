@@ -1,0 +1,249 @@
+---
+title: Routes
+description: Route configuration, path matching, protocol selection, and per-route overrides.
+---
+
+A route defines how incoming requests are matched and forwarded to upstream targets. Each route has a path pattern, one or more targets, a protocol, and optional overrides for load balancing, rate limiting, authentication, and caching.
+
+## RouteConfig
+
+The `RouteConfig` struct is the primary way to define routes programmatically:
+
+```go
+type RouteConfig struct {
+    // Path is the URL pattern to match (e.g., "/users/*", "/api/v1/orders/*").
+    Path string
+
+    // Targets is the list of upstream targets for this route.
+    Targets []TargetConfig
+
+    // StripPrefix removes the matched path prefix before forwarding.
+    StripPrefix bool
+
+    // Protocol specifies the proxy protocol (HTTP, WebSocket, SSE, gRPC).
+    Protocol Protocol
+
+    // Enabled controls whether this route is active.
+    Enabled bool
+
+    // LoadBalancer overrides the global load balancing strategy for this route.
+    LoadBalancer LoadBalancerStrategy
+
+    // RateLimit overrides the global rate limit for this route.
+    RateLimit *RateLimitConfig
+
+    // Auth sets route-specific authentication requirements.
+    Auth *AuthConfig
+
+    // Cache sets route-specific response caching policy.
+    Cache *CacheConfig
+
+    // Timeout overrides the global upstream timeout for this route.
+    Timeout time.Duration
+
+    // RetryPolicy overrides the global retry configuration for this route.
+    RetryPolicy *RetryConfig
+
+    // Metadata is a free-form map for custom route annotations.
+    Metadata map[string]string
+}
+```
+
+### Registering routes
+
+Routes are registered via the `WithRoute` option function:
+
+```go
+bastion.NewExtension(
+    bastion.WithRoute(bastion.RouteConfig{
+        Path:    "/users/*",
+        Targets: []bastion.TargetConfig{
+            {URL: "http://user-service:8080", Weight: 1},
+        },
+        StripPrefix: true,
+        Protocol:    bastion.ProtocolHTTP,
+        Enabled:     true,
+    }),
+)
+```
+
+## Path matching
+
+Bastion uses path patterns to match incoming requests to routes. Patterns support these forms:
+
+| Pattern | Matches | Example |
+|---------|---------|---------|
+| `/users/*` | Any path starting with `/users/` | `/users/42`, `/users/42/profile` |
+| `/api/v1/orders/*` | Any path starting with `/api/v1/orders/` | `/api/v1/orders/123` |
+| `/health` | Exact match only | `/health` |
+
+The `*` wildcard matches one or more path segments. Routes are matched in registration order -- the first matching route wins.
+
+### Path conflicts
+
+When multiple routes could match the same request, the most specific route wins. Exact matches take precedence over wildcard matches. If two wildcard routes overlap, the one registered first wins.
+
+## Protocol selection
+
+Each route specifies a protocol that determines how requests are proxied:
+
+```go
+const (
+    ProtocolHTTP      Protocol = "http"
+    ProtocolWebSocket Protocol = "websocket"
+    ProtocolSSE       Protocol = "sse"
+    ProtocolGRPC      Protocol = "grpc"
+)
+```
+
+| Protocol | Use case |
+|----------|----------|
+| `ProtocolHTTP` | Standard HTTP/HTTPS API traffic. Also handles WebSocket upgrades automatically. |
+| `ProtocolWebSocket` | Dedicated WebSocket routes where all traffic is WebSocket. |
+| `ProtocolSSE` | Server-Sent Events streaming endpoints. Disables response buffering. |
+| `ProtocolGRPC` | gRPC services. Forwards HTTP/2 frames including trailers. |
+
+For most services, `ProtocolHTTP` is the right choice. It handles both regular HTTP requests and WebSocket upgrade requests transparently.
+
+## Strip prefix
+
+When `StripPrefix` is `true`, Bastion removes the matched path prefix before forwarding the request to the upstream.
+
+```go
+// Route: /users/* with StripPrefix: true
+// Request:  GET /users/42/profile
+// Upstream: GET /42/profile
+
+// Route: /users/* with StripPrefix: false
+// Request:  GET /users/42/profile
+// Upstream: GET /users/42/profile
+```
+
+This is useful when the upstream service does not expect the gateway's path prefix. Most microservice deployments use `StripPrefix: true`.
+
+## Enable and disable
+
+Routes have an `Enabled` field that controls whether they accept traffic:
+
+```go
+bastion.RouteConfig{
+    Path:    "/users/*",
+    Enabled: true,  // route is active
+}
+```
+
+Disabled routes return `404 Not Found` as if they do not exist. You can enable and disable routes at runtime through the admin API:
+
+```
+POST /bastion/api/routes/:id/enable
+POST /bastion/api/routes/:id/disable
+```
+
+## Static vs discovered routes
+
+Bastion supports two sources of routes:
+
+**Static routes** are defined in code (via `WithRoute`) or in YAML configuration. They are loaded at startup and persist across restarts.
+
+**Discovered routes** are created automatically by the FARP service discovery integration. When a new service registers itself via FARP, Bastion creates a route for it. When the service deregisters, the route is removed.
+
+Static routes take precedence over discovered routes when paths overlap. Discovered routes are tagged with metadata indicating their source.
+
+## Per-route overrides
+
+Several global settings can be overridden at the route level:
+
+### Rate limiting
+
+```go
+bastion.RouteConfig{
+    Path: "/uploads/*",
+    RateLimit: &bastion.RateLimitConfig{
+        Enabled:        true,
+        RequestsPerSec: 10,
+        Burst:          5,
+    },
+}
+```
+
+### Load balancing
+
+```go
+bastion.RouteConfig{
+    Path:         "/users/*",
+    LoadBalancer: bastion.LoadBalancerLeastConn,
+}
+```
+
+### Authentication
+
+```go
+bastion.RouteConfig{
+    Path: "/admin/*",
+    Auth: &bastion.AuthConfig{
+        Type:   bastion.AuthBearer,
+        Secret: "my-admin-token",
+    },
+}
+```
+
+### Response caching
+
+```go
+bastion.RouteConfig{
+    Path: "/products/*",
+    Cache: &bastion.CacheConfig{
+        Enabled: true,
+        TTL:     5 * time.Minute,
+    },
+}
+```
+
+### Timeout
+
+```go
+bastion.RouteConfig{
+    Path:    "/reports/*",
+    Timeout: 60 * time.Second,
+}
+```
+
+### Retry policy
+
+```go
+bastion.RouteConfig{
+    Path: "/payments/*",
+    RetryPolicy: &bastion.RetryConfig{
+        MaxRetries:  3,
+        Strategy:    bastion.RetryExponential,
+        BaseDelay:   100 * time.Millisecond,
+        MaxDelay:    5 * time.Second,
+        Jitter:      true,
+    },
+}
+```
+
+## YAML route configuration
+
+Routes can also be defined in YAML:
+
+```yaml
+bastion:
+  routes:
+    - path: "/users/*"
+      targets:
+        - url: "http://user-service:8080"
+          weight: 1
+      stripPrefix: true
+      protocol: http
+      enabled: true
+      loadBalancer: round-robin
+      timeout: 30s
+      rateLimit:
+        enabled: true
+        requestsPerSec: 100
+        burst: 20
+      cache:
+        enabled: true
+        ttl: 5m
+```

@@ -1,0 +1,277 @@
+---
+title: Hook System
+description: Extend gateway behavior with OnRequest, OnResponse, OnError, and lifecycle hooks.
+---
+
+Bastion's hook system provides extension points at every stage of the request lifecycle and for gateway management events. Hooks let you add custom logic without modifying the gateway core -- authentication, logging, metrics, header injection, error handling, and alerting are all common use cases.
+
+## Available Hooks
+
+| Hook | Signature | When Fired |
+|------|-----------|------------|
+| `OnRequest` | `func(r *http.Request, route *Route) error` | Before a request is proxied to upstream. Return an error to reject the request. |
+| `OnResponse` | `func(resp *http.Response, route *Route)` | After the upstream response is received, before returning to the client. |
+| `OnError` | `func(err error, route *Route, w http.ResponseWriter)` | When an upstream error occurs (connection failure, timeout, etc.). |
+| `OnRouteChange` | `func(event RouteEvent)` | When a route is added, updated, or removed. Runs asynchronously. |
+| `OnUpstreamHealth` | `func(event UpstreamHealthEvent)` | When an upstream target's health status changes. Runs asynchronously. |
+| `OnCircuitBreak` | `func(targetID string, from, to CircuitState)` | When a circuit breaker state changes. Runs asynchronously. |
+
+## Hook Registration
+
+Hooks must be registered after the gateway extension has started. Use Forge's `AfterStart` callback to ensure the gateway is fully initialized:
+
+```go
+import (
+    "github.com/xraph/forge"
+    "github.com/xraph/bastion"
+    "github.com/xraph/bastion/extension"
+    "github.com/xraph/vessel"
+)
+
+app := forge.New()
+app.Register(extension.New(
+    bastion.WithDashboardEnabled(true),
+))
+
+app.AfterStart(func() {
+    gw, err := vessel.Inject[*bastion.Gateway](app.Container())
+    if err != nil {
+        log.Fatal("bastion not registered:", err)
+    }
+
+    // Register hooks on the running gateway
+    gw.Hooks().OnRequest(func(r *http.Request, route *bastion.Route) error {
+        r.Header.Set("X-Gateway-Auth", "validated")
+        return nil
+    })
+})
+
+app.Run()
+```
+
+Multiple hooks of the same type can be registered. They execute in registration order.
+
+## OnRequest Hook
+
+The `OnRequest` hook is called before every proxied request. It receives the outgoing `*http.Request` and the matched `*Route`. Returning a non-nil error rejects the request and short-circuits the proxy pipeline.
+
+### Adding Authentication Headers
+
+```go
+gw.Hooks().OnRequest(func(r *http.Request, route *bastion.Route) error {
+    r.Header.Set("X-Gateway-Auth", "validated")
+    r.Header.Set("X-Request-ID", uuid.New().String())
+    return nil
+})
+```
+
+### Rejecting Unauthorized Requests
+
+```go
+gw.Hooks().OnRequest(func(r *http.Request, route *bastion.Route) error {
+    token := r.Header.Get("Authorization")
+    if token == "" {
+        return fmt.Errorf("missing authorization header")
+    }
+
+    claims, err := validateToken(token)
+    if err != nil {
+        return fmt.Errorf("invalid token: %w", err)
+    }
+
+    // Inject claims into the request context
+    r.Header.Set("X-User-ID", claims.UserID)
+    return nil
+})
+```
+
+### Request Logging
+
+```go
+gw.Hooks().OnRequest(func(r *http.Request, route *bastion.Route) error {
+    log.Printf("[%s] %s %s -> route=%s", time.Now().Format(time.RFC3339),
+        r.Method, r.URL.Path, route.ID)
+    return nil
+})
+```
+
+## OnResponse Hook
+
+The `OnResponse` hook is called after the upstream response is received. It receives the `*http.Response` and the matched `*Route`. Use it to modify response headers, record metrics, or transform responses.
+
+### Adding Gateway Headers
+
+```go
+gw.Hooks().OnResponse(func(resp *http.Response, route *bastion.Route) {
+    resp.Header.Set("X-Served-By", "bastion")
+    resp.Header.Set("X-Route-ID", route.ID)
+    resp.Header.Set("X-Upstream-Latency", resp.Header.Get("X-Response-Time"))
+})
+```
+
+### Recording Custom Metrics
+
+```go
+gw.Hooks().OnResponse(func(resp *http.Response, route *bastion.Route) {
+    metrics.RecordResponse(route.Path, resp.StatusCode)
+    if resp.StatusCode >= 500 {
+        metrics.IncrServerErrors(route.ServiceName)
+    }
+})
+```
+
+## OnError Hook
+
+The `OnError` hook is called when the proxy encounters an error communicating with an upstream target. It receives the error, the matched `*Route`, and the `http.ResponseWriter` for writing a custom error response.
+
+### Custom Error Responses
+
+```go
+gw.Hooks().OnError(func(err error, route *bastion.Route, w http.ResponseWriter) {
+    log.Printf("Gateway error on route %s: %v", route.Path, err)
+
+    w.Header().Set("Content-Type", "application/json")
+    w.WriteHeader(http.StatusBadGateway)
+    json.NewEncoder(w).Encode(map[string]string{
+        "error":   "upstream_unavailable",
+        "message": "The upstream service is temporarily unavailable",
+        "route":   route.Path,
+    })
+})
+```
+
+### Error Alerting
+
+```go
+gw.Hooks().OnError(func(err error, route *bastion.Route, w http.ResponseWriter) {
+    if isCircuitBreakerError(err) {
+        alerting.Send(alerting.Critical,
+            "Circuit breaker open for route %s: %v", route.Path, err)
+    }
+})
+```
+
+## OnRouteChange Hook
+
+The `OnRouteChange` hook fires when the route table changes -- routes added, updated, or removed. It runs asynchronously in a goroutine. The `RouteEvent` contains the event type and the affected route.
+
+```go
+gw.Hooks().OnRouteChange(func(event bastion.RouteEvent) {
+    switch event.Type {
+    case bastion.RouteEventAdded:
+        log.Printf("Route added: %s (%s)", event.Route.Path, event.Route.Source)
+    case bastion.RouteEventUpdated:
+        log.Printf("Route updated: %s", event.Route.Path)
+    case bastion.RouteEventRemoved:
+        log.Printf("Route removed: %s", event.Route.Path)
+    }
+})
+```
+
+### Route Event Types
+
+| Type | Constant | Description |
+|------|----------|-------------|
+| Added | `RouteEventAdded` | A new route was registered (manual, FARP, or API) |
+| Updated | `RouteEventUpdated` | An existing route was modified |
+| Removed | `RouteEventRemoved` | A route was deleted |
+
+## OnUpstreamHealth Hook
+
+The `OnUpstreamHealth` hook fires when an upstream target's health status changes. Use it for alerting, logging, or triggering failover logic. It runs asynchronously.
+
+```go
+gw.Hooks().OnUpstreamHealth(func(event bastion.UpstreamHealthEvent) {
+    if !event.Healthy {
+        alerting.Send(alerting.Warning,
+            "Upstream %s (%s) is unhealthy", event.TargetID, event.TargetURL)
+    } else if event.Previous == false && event.Healthy {
+        alerting.Send(alerting.Info,
+            "Upstream %s (%s) recovered", event.TargetID, event.TargetURL)
+    }
+})
+```
+
+### UpstreamHealthEvent Fields
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `TargetID` | `string` | Unique identifier of the upstream target |
+| `TargetURL` | `string` | URL of the upstream target |
+| `Healthy` | `bool` | Current health status |
+| `Previous` | `bool` | Previous health status |
+| `RouteID` | `string` | ID of the route this target belongs to |
+| `Timestamp` | `time.Time` | When the health change was detected |
+
+## OnCircuitBreak Hook
+
+The `OnCircuitBreak` hook fires when a circuit breaker transitions between states. Use it for alerting and observability. It runs asynchronously.
+
+```go
+gw.Hooks().OnCircuitBreak(func(targetID string, from, to bastion.CircuitState) {
+    log.Printf("Circuit breaker for %s: %s -> %s", targetID, from, to)
+
+    if to == bastion.CircuitOpen {
+        alerting.Send(alerting.Critical,
+            "Circuit breaker OPEN for target %s", targetID)
+    } else if to == bastion.CircuitClosed {
+        alerting.Send(alerting.Info,
+            "Circuit breaker CLOSED for target %s (recovered)", targetID)
+    }
+})
+```
+
+### Circuit States
+
+| State | Constant | Description |
+|-------|----------|-------------|
+| Closed | `CircuitClosed` | Normal operation, requests flow through |
+| Open | `CircuitOpen` | Fail-fast, all requests rejected |
+| Half-Open | `CircuitHalfOpen` | Limited probe requests allowed |
+
+## Execution Model
+
+- **OnRequest** and **OnResponse** run synchronously in the request path. Keep them fast to avoid adding latency.
+- **OnError** runs synchronously so you can write custom error responses.
+- **OnRouteChange**, **OnUpstreamHealth**, and **OnCircuitBreak** run asynchronously in goroutines. They do not block the request path.
+- Multiple hooks of the same type execute in registration order.
+- **OnRequest** hooks short-circuit on the first error -- subsequent hooks are not called.
+- All hooks are thread-safe. The hook engine uses read-write locks internally.
+
+## Complete Example
+
+```go
+app.AfterStart(func() {
+    gw, _ := vessel.Inject[*bastion.Gateway](app.Container())
+
+    // Request pipeline
+    gw.Hooks().OnRequest(func(r *http.Request, route *bastion.Route) error {
+        r.Header.Set("X-Gateway-Auth", "validated")
+        r.Header.Set("X-Request-Start", fmt.Sprint(time.Now().UnixMilli()))
+        return nil
+    })
+
+    gw.Hooks().OnResponse(func(resp *http.Response, route *bastion.Route) {
+        resp.Header.Set("X-Served-By", "bastion")
+    })
+
+    gw.Hooks().OnError(func(err error, route *bastion.Route, w http.ResponseWriter) {
+        log.Printf("Gateway error on route %s: %v", route.Path, err)
+    })
+
+    // Lifecycle events
+    gw.Hooks().OnRouteChange(func(event bastion.RouteEvent) {
+        log.Printf("Route %s: %s (%s)", event.Type, event.Route.Path, event.Route.Source)
+    })
+
+    gw.Hooks().OnUpstreamHealth(func(event bastion.UpstreamHealthEvent) {
+        if !event.Healthy {
+            log.Printf("ALERT: Upstream %s is unhealthy", event.TargetURL)
+        }
+    })
+
+    gw.Hooks().OnCircuitBreak(func(targetID string, from, to bastion.CircuitState) {
+        log.Printf("Circuit %s: %s -> %s", targetID, from, to)
+    })
+})
+```

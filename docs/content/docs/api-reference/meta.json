@@ -1,4 +1,4 @@
 {
   "title": "API Reference",
-  "pages": ["go-packages", "http-api"]
+  "pages": ["admin-api", "go-packages", "dashboard"]
 }

@@ -1,0 +1,155 @@
+---
+title: Rate Limiting
+description: Token-bucket rate limiting at global, per-route, and per-client levels.
+---
+
+Bastion enforces request rate limits using a token bucket algorithm. Rate limiting protects upstream services from traffic spikes and ensures fair resource allocation across clients.
+
+## Configuration
+
+```go
+bastion.WithRateLimiting(bastion.RateLimitConfig{
+    Enabled:        true,
+    RequestsPerSec: 1000,
+    Burst:          100,
+    PerClient:      true,
+})
+```
+
+### Configuration Fields
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `Enabled` | `bool` | `false` | Enable or disable rate limiting |
+| `RequestsPerSec` | `float64` | `1000` | Sustained request rate (tokens added per second) |
+| `Burst` | `int` | `100` | Maximum burst size (token bucket capacity) |
+| `PerClient` | `bool` | `false` | Whether to apply limits per client or globally |
+| `KeyHeader` | `string` | `""` | Custom header to use as the client identifier |
+
+## Token Bucket Algorithm
+
+The rate limiter uses the token bucket algorithm:
+
+1. Each bucket starts full with `Burst` tokens.
+2. Tokens are added at a rate of `RequestsPerSec` per second.
+3. Each request consumes one token.
+4. If no tokens are available, the request is rejected with HTTP 429 Too Many Requests.
+5. Tokens accumulate up to the `Burst` maximum -- unused capacity allows short traffic spikes.
+
+The `Burst` parameter controls how much traffic can spike above the sustained rate. For example, with `RequestsPerSec: 100` and `Burst: 50`, the system allows a burst of 50 requests instantly, then sustains 100 requests per second thereafter.
+
+## Global Rate Limiting
+
+When `PerClient` is false, all requests share a single token bucket:
+
+```go
+bastion.WithRateLimiting(bastion.RateLimitConfig{
+    Enabled:        true,
+    RequestsPerSec: 5000,
+    Burst:          500,
+    PerClient:      false,
+})
+```
+
+This limits the total throughput of the gateway regardless of which client is making the requests.
+
+## Per-Client Rate Limiting
+
+When `PerClient` is true, each client gets its own token bucket:
+
+```go
+bastion.WithRateLimiting(bastion.RateLimitConfig{
+    Enabled:        true,
+    RequestsPerSec: 100,
+    Burst:          20,
+    PerClient:      true,
+})
+```
+
+### Client Identification
+
+Clients are identified using the following strategy, in priority order:
+
+1. **Custom header** -- if `KeyHeader` is set, the value of that header is used as the key.
+2. **Remote address** -- falls back to `r.RemoteAddr` (IP:port).
+
+```go
+bastion.WithRateLimiting(bastion.RateLimitConfig{
+    Enabled:        true,
+    RequestsPerSec: 50,
+    Burst:          10,
+    PerClient:      true,
+    KeyHeader:      "X-API-Key",  // Rate limit by API key
+})
+```
+
+Common patterns for `KeyHeader`:
+
+| Header | Use Case |
+|--------|----------|
+| `X-API-Key` | Rate limit by API key (service-to-service) |
+| `X-Forwarded-For` | Rate limit by original client IP (behind a load balancer) |
+| `Authorization` | Rate limit by auth token (per-user) |
+
+## Per-Route Rate Limits
+
+Individual routes can override the global rate limit configuration:
+
+```go
+bastion.WithRoute(bastion.RouteConfig{
+    Path: "/api/search/*",
+    RateLimit: &bastion.RateLimitConfig{
+        Enabled:        true,
+        RequestsPerSec: 10,
+        Burst:          5,
+        PerClient:      true,
+    },
+    Targets: []bastion.TargetConfig{
+        {URL: "http://search-svc:8080"},
+    },
+})
+```
+
+When a route has a per-route rate limit, it is used instead of the global configuration. The per-route limiter creates separate buckets keyed by the combination of route path and client identifier.
+
+## Rate Limit Response
+
+When a request is rate limited, the gateway returns:
+
+- **Status**: `429 Too Many Requests`
+- **Body**: JSON error response
+
+```json
+{
+    "error": "rate limit exceeded",
+    "retryAfter": 1
+}
+```
+
+## Bucket Cleanup
+
+Per-client buckets are automatically cleaned up when they have been inactive for a configurable period. This prevents memory growth from clients that make a single request and never return.
+
+## Metrics
+
+When metrics are enabled, rate-limited requests increment a counter:
+
+```
+gateway.rate_limited_total
+```
+
+The gateway stats also track `RateLimited` in the `GatewayStats` struct, visible in the admin dashboard.
+
+## Distributed Rate Limiting
+
+For multi-instance gateway deployments, Bastion supports pluggable rate limit backends via the `RateLimitStore` interface:
+
+```go
+type RateLimitStore interface {
+    // Allow checks if a request with the given key is allowed.
+    // Returns true if allowed, false if rate limited.
+    Allow(ctx context.Context, key string, rate float64, burst int) (bool, error)
+}
+```
+
+Implement this interface with a Redis or similar distributed store to share rate limit state across gateway instances.

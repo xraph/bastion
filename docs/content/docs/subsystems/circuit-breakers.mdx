@@ -1,0 +1,153 @@
+---
+title: Circuit Breakers
+description: Per-target failure isolation with three-state circuit breakers.
+---
+
+Bastion implements per-target circuit breakers that prevent cascading failures by short-circuiting requests to unhealthy upstreams. When an upstream target accumulates too many failures, the circuit opens and subsequent requests fail fast with 503 instead of waiting for the upstream to time out.
+
+## Three-State Model
+
+Circuit breakers follow the standard three-state pattern:
+
+```
+         failures >= threshold
+  CLOSED ─────────────────────► OPEN
+    ▲                              │
+    │                              │ reset timeout expires
+    │  success threshold met       │
+    │                              ▼
+    └──────────────────────── HALF-OPEN
+                               (limited probes)
+```
+
+### Closed (Normal)
+
+All requests pass through to the upstream. Failures are counted within a sliding time window. When the failure count reaches the threshold, the circuit transitions to **Open**.
+
+### Open (Fail-Fast)
+
+All requests are immediately rejected with HTTP 503. No traffic reaches the upstream. After the reset timeout expires, the circuit transitions to **Half-Open**.
+
+### Half-Open (Probing)
+
+A limited number of probe requests are allowed through. If the probes succeed, the circuit transitions back to **Closed**. If any probe fails, the circuit returns to **Open** and the reset timer restarts.
+
+## Configuration
+
+```go
+bastion.WithCircuitBreaker(bastion.CircuitBreakerConfig{
+    Enabled:          true,
+    FailureThreshold: 5,
+    FailureWindow:    60 * time.Second,
+    ResetTimeout:     30 * time.Second,
+    HalfOpenMax:      3,
+})
+```
+
+### Configuration Fields
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `Enabled` | `bool` | `true` | Enable or disable circuit breakers |
+| `FailureThreshold` | `int` | `5` | Number of failures within the window to trip the circuit |
+| `FailureWindow` | `time.Duration` | `60s` | Sliding window for counting failures |
+| `ResetTimeout` | `time.Duration` | `30s` | Time to wait in Open state before transitioning to Half-Open |
+| `HalfOpenMax` | `int` | `3` | Maximum number of probe requests allowed in Half-Open state |
+
+## Per-Target Isolation
+
+Each upstream target has its own independent circuit breaker. A failing target does not affect other targets in the same route. The load balancer skips targets whose circuit is in the Open state, ensuring traffic flows only to healthy targets.
+
+```go
+// Target A's circuit is open (failing)
+// Target B's circuit is closed (healthy)
+// Load balancer routes all traffic to Target B
+```
+
+The current circuit state is stored on the `Target` struct:
+
+```go
+type Target struct {
+    // ...
+    CircuitState CircuitState `json:"circuitState"`
+    // ...
+}
+```
+
+## Per-Route Overrides
+
+Individual routes can override the global circuit breaker settings:
+
+```go
+bastion.WithRoute(bastion.RouteConfig{
+    Path: "/critical-api/*",
+    CircuitBreaker: &bastion.CBConfig{
+        FailureThreshold: 3,    // Trip faster for critical routes
+        ResetTimeout:     15 * time.Second,
+        HalfOpenMax:      1,    // Single probe before full recovery
+    },
+    Targets: []bastion.TargetConfig{
+        {URL: "http://critical-backend:8080"},
+    },
+})
+```
+
+## State Transitions
+
+### Closed to Open
+
+The circuit trips when the number of consecutive failures (5xx responses, timeouts, connection errors) within the `FailureWindow` reaches the `FailureThreshold`.
+
+### Open to Half-Open
+
+After `ResetTimeout` elapses, the next request transitions the circuit to Half-Open. The timer is purely duration-based -- no traffic is needed to trigger the transition.
+
+### Half-Open to Closed
+
+If `HalfOpenMax` consecutive probe requests succeed, the circuit returns to Closed and normal traffic resumes.
+
+### Half-Open to Open
+
+If any probe request fails during the Half-Open state, the circuit immediately returns to Open and the reset timer restarts.
+
+## Monitoring Circuit Breaker State
+
+### Metrics
+
+When metrics are enabled, the gateway exports a gauge per target:
+
+```
+gateway.circuit_breaker_state.<targetID>
+```
+
+Values: `0` = Closed, `1` = Half-Open, `2` = Open.
+
+### Admin API
+
+The admin API exposes circuit breaker state for all targets:
+
+```
+GET /gateway/api/routes
+```
+
+Each route's targets include the `circuitState` field in the JSON response.
+
+### Resetting a Circuit
+
+The admin API allows manually resetting a circuit breaker to the Closed state:
+
+```
+POST /gateway/api/circuits/<targetID>/reset
+```
+
+This is useful for recovering from a known transient failure without waiting for the reset timeout.
+
+## Integration with Load Balancing
+
+The load balancer's health filter excludes targets with an Open circuit. This means:
+
+- Targets in **Closed** state receive normal traffic.
+- Targets in **Half-Open** state receive limited probe traffic.
+- Targets in **Open** state receive no traffic at all.
+
+If all targets in a route have open circuits, the proxy engine returns 503 Service Unavailable.
