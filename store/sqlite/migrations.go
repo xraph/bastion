@@ -2,7 +2,6 @@ package sqlite
 
 import (
 	"context"
-	"fmt"
 
 	"github.com/xraph/grove/migrate"
 )
@@ -133,8 +132,8 @@ func init() {
 					return err
 				}
 
-				_, err := exec.Exec(ctx, fmt.Sprintf(`CREATE INDEX IF NOT EXISTS idx_cache_entries_expires
-					ON bastion_cache_entries (expires_at)`))
+				_, err := exec.Exec(ctx, `CREATE INDEX IF NOT EXISTS idx_cache_entries_expires
+					ON bastion_cache_entries (expires_at)`)
 				return err
 			},
 			Down: func(ctx context.Context, exec migrate.Executor) error {

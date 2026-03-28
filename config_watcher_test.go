@@ -14,7 +14,7 @@ func TestConfigWatcher_DetectsChange(t *testing.T) {
 
 	cfg := Config{Enabled: true, BasePath: "/gw"}
 	data, _ := json.Marshal(cfg)
-	os.WriteFile(cfgPath, data, 0644)
+	_ = os.WriteFile(cfgPath, data, 0644)
 
 	changed := make(chan Config, 1)
 
@@ -30,7 +30,7 @@ func TestConfigWatcher_DetectsChange(t *testing.T) {
 	// Modify the config
 	cfg.BasePath = "/api"
 	data, _ = json.Marshal(cfg)
-	os.WriteFile(cfgPath, data, 0644)
+	_ = os.WriteFile(cfgPath, data, 0644)
 
 	select {
 	case newCfg := <-changed:
@@ -48,7 +48,7 @@ func TestConfigWatcher_InvalidJSON(t *testing.T) {
 
 	cfg := Config{Enabled: true}
 	data, _ := json.Marshal(cfg)
-	os.WriteFile(cfgPath, data, 0644)
+	_ = os.WriteFile(cfgPath, data, 0644)
 
 	errCh := make(chan error, 1)
 
@@ -64,7 +64,7 @@ func TestConfigWatcher_InvalidJSON(t *testing.T) {
 	time.Sleep(200 * time.Millisecond)
 
 	// Write invalid JSON
-	os.WriteFile(cfgPath, []byte("not json!!!"), 0644)
+	_ = os.WriteFile(cfgPath, []byte("not json!!!"), 0644)
 
 	select {
 	case err := <-errCh:
@@ -82,7 +82,7 @@ func TestConfigWatcher_NoChangeNoCallback(t *testing.T) {
 
 	cfg := Config{Enabled: true}
 	data, _ := json.Marshal(cfg)
-	os.WriteFile(cfgPath, data, 0644)
+	_ = os.WriteFile(cfgPath, data, 0644)
 
 	callCount := 0
 	cw := NewConfigWatcher(cfgPath, 100*time.Millisecond, func(c Config) {

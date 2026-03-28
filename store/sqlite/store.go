@@ -67,7 +67,7 @@ func (s *Store) ListRoutes(ctx context.Context) ([]*bastion.Route, error) {
 	if err != nil {
 		return nil, fmt.Errorf("bastion/sqlite: list routes: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var routes []*bastion.Route
 	for rows.Next() {
@@ -185,7 +185,7 @@ func (s *Store) ListStates(ctx context.Context) ([]*bastion.CircuitBreakerSnapsh
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var states []*bastion.CircuitBreakerSnapshot
 	for rows.Next() {
@@ -230,7 +230,7 @@ func (s *Store) GetHistory(ctx context.Context, targetID string, limit int) ([]b
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var results []bastion.HealthCheckResult
 	for rows.Next() {
@@ -371,41 +371,41 @@ func scanRoute(row scannable) (*bastion.Route, error) {
 		return nil, err
 	}
 
-	json.Unmarshal([]byte(methods), &r.Methods)
-	json.Unmarshal([]byte(targets), &r.Targets)
-	json.Unmarshal([]byte(headers), &r.Headers)
-	json.Unmarshal([]byte(metadata), &r.Metadata)
+	_ = json.Unmarshal([]byte(methods), &r.Methods)
+	_ = json.Unmarshal([]byte(targets), &r.Targets)
+	_ = json.Unmarshal([]byte(headers), &r.Headers)
+	_ = json.Unmarshal([]byte(metadata), &r.Metadata)
 	if retry != "" && retry != "null" {
 		r.Retry = &bastion.RetryConfig{}
-		json.Unmarshal([]byte(retry), r.Retry)
+		_ = json.Unmarshal([]byte(retry), r.Retry)
 	}
 	if timeout != "" && timeout != "null" {
 		r.Timeout = &bastion.TimeoutConfig{}
-		json.Unmarshal([]byte(timeout), r.Timeout)
+		_ = json.Unmarshal([]byte(timeout), r.Timeout)
 	}
 	if rateLimit != "" && rateLimit != "null" {
 		r.RateLimit = &bastion.RateLimitConfig{}
-		json.Unmarshal([]byte(rateLimit), r.RateLimit)
+		_ = json.Unmarshal([]byte(rateLimit), r.RateLimit)
 	}
 	if auth != "" && auth != "null" {
 		r.Auth = &bastion.RouteAuthConfig{}
-		json.Unmarshal([]byte(auth), r.Auth)
+		_ = json.Unmarshal([]byte(auth), r.Auth)
 	}
 	if cb != "" && cb != "null" {
 		r.CircuitBreaker = &bastion.CBConfig{}
-		json.Unmarshal([]byte(cb), r.CircuitBreaker)
+		_ = json.Unmarshal([]byte(cb), r.CircuitBreaker)
 	}
 	if cache != "" && cache != "null" {
 		r.Cache = &bastion.RouteCacheConfig{}
-		json.Unmarshal([]byte(cache), r.Cache)
+		_ = json.Unmarshal([]byte(cache), r.Cache)
 	}
 	if tp != "" && tp != "null" {
 		r.TrafficPolicy = &bastion.TrafficPolicy{}
-		json.Unmarshal([]byte(tp), r.TrafficPolicy)
+		_ = json.Unmarshal([]byte(tp), r.TrafficPolicy)
 	}
 	if transform != "" && transform != "null" {
 		r.Transform = &bastion.TransformConfig{}
-		json.Unmarshal([]byte(transform), r.Transform)
+		_ = json.Unmarshal([]byte(transform), r.Transform)
 	}
 
 	return r, nil

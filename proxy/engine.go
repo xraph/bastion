@@ -1,10 +1,8 @@
 package proxy
 
 import (
-	"context"
 	"crypto/tls"
 	"fmt"
-	"io"
 	"net"
 	"net/http"
 	"net/http/httputil"
@@ -612,11 +610,4 @@ func (p *proxyBufferPool) Get() []byte {
 
 func (p *proxyBufferPool) Put(buf []byte) {
 	p.pool.Put(&buf)
-}
-
-// copyBody copies body without loading it all into memory.
-func copyBody(_ context.Context, dst io.Writer, src io.Reader) error {
-	_, err := io.Copy(dst, src)
-
-	return err
 }

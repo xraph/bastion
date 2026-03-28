@@ -33,7 +33,7 @@ func TestAggregator_FetchServiceSpec_Success(t *testing.T) {
 				},
 			},
 		}
-		json.NewEncoder(w).Encode(spec)
+		_ = json.NewEncoder(w).Encode(spec)
 	}))
 	defer server.Close()
 
@@ -105,7 +105,7 @@ func TestAggregator_FetchServiceSpec_404(t *testing.T) {
 
 func TestAggregator_FetchServiceSpec_InvalidJSON(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte("invalid json"))
+		_, _ = w.Write([]byte("invalid json"))
 	}))
 	defer server.Close()
 

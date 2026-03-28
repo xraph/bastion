@@ -78,7 +78,7 @@ func (s *Store) ListRoutes(ctx context.Context) ([]*bastion.Route, error) {
 	if err != nil {
 		return nil, fmt.Errorf("bastion/mongo: list routes: %w", err)
 	}
-	defer cursor.Close(ctx)
+	defer func() { _ = cursor.Close(ctx) }()
 
 	var docs []routeDoc
 	if err := cursor.All(ctx, &docs); err != nil {
@@ -148,7 +148,7 @@ func (s *Store) ListStates(ctx context.Context) ([]*bastion.CircuitBreakerSnapsh
 	if err != nil {
 		return nil, err
 	}
-	defer cursor.Close(ctx)
+	defer func() { _ = cursor.Close(ctx) }()
 
 	var docs []cbDoc
 	if err := cursor.All(ctx, &docs); err != nil {
@@ -199,7 +199,7 @@ func (s *Store) GetHistory(ctx context.Context, targetID string, limit int) ([]b
 	if err != nil {
 		return nil, err
 	}
-	defer cursor.Close(ctx)
+	defer func() { _ = cursor.Close(ctx) }()
 
 	var docs []healthDoc
 	if err := cursor.All(ctx, &docs); err != nil {
@@ -600,7 +600,7 @@ func unmarshalBSONRaw(raw bson.Raw, dst any) {
 		return
 	}
 
-	json.Unmarshal(wrapper.V, dst)
+	_ = json.Unmarshal(wrapper.V, dst)
 }
 
 // migrationIndexes returns the index definitions for all bastion collections.

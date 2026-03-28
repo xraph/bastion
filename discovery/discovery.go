@@ -736,7 +736,7 @@ func (sd *Manager) fetchManifest(ctx context.Context, manifestURL string) (*farp
 	if err != nil {
 		return nil, fmt.Errorf("fetch: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode == http.StatusNotFound {
 		return nil, errManifestNotFound

@@ -156,7 +156,7 @@ func (gp *GRPCProxy) ServeHTTP(w http.ResponseWriter, r *http.Request, route *ba
 		writeGRPCError(w, http.StatusBadGateway, fmt.Sprintf("upstream error: %v", err))
 		return
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	// Copy response headers
 	copyResponseHeaders(w, resp)

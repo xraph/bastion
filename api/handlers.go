@@ -8,6 +8,7 @@ import (
 	"github.com/gorilla/websocket"
 	bastion "github.com/xraph/bastion"
 	"github.com/xraph/bastion/health"
+	"github.com/xraph/bastion/observability"
 	"github.com/xraph/forge"
 )
 
@@ -17,7 +18,7 @@ type Gateway interface {
 	RouteManager() bastion.RouteRegistry
 	HealthMonitor() *health.Monitor
 	Snapshot() *bastion.GatewayStats
-	AccessLog() *bastion.AccessLogger
+	AccessLog() *observability.AccessLogger
 	Discovery() *bastion.ServiceDiscovery
 	Logger() forge.Logger
 	Hub() bastion.WSBroadcaster

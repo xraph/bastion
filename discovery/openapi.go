@@ -382,7 +382,7 @@ func (oa *OpenAPIAggregator) fetchServiceSpec(ctx context.Context, svc discovere
 		)
 		return result
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		result.Error = fmt.Sprintf("HTTP %d", resp.StatusCode)

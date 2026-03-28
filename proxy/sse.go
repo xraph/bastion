@@ -102,7 +102,7 @@ func ProxySSE(
 		return
 	}
 
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	target.IncrConns()
 	defer target.DecrConns()

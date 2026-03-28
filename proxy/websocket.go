@@ -7,7 +7,6 @@ import (
 	"net/url"
 	"strings"
 	"sync"
-	"time"
 
 	"github.com/gobwas/ws"
 	"github.com/gobwas/ws/wsutil"
@@ -72,7 +71,7 @@ func ProxyWebSocket(
 		return
 	}
 
-	defer clientConn.Close()
+	defer func() { _ = clientConn.Close() }()
 
 	// Connect to upstream
 	dialer := ws.Dialer{
@@ -97,7 +96,7 @@ func ProxyWebSocket(
 		return
 	}
 
-	defer upstreamConn.Close()
+	defer func() { _ = upstreamConn.Close() }()
 
 	target.IncrConns()
 	defer target.DecrConns()
@@ -133,8 +132,8 @@ func ProxyWebSocket(
 	<-errCh
 
 	// Close both connections to unblock the other goroutine
-	clientConn.Close()
-	upstreamConn.Close()
+	_ = clientConn.Close()
+	_ = upstreamConn.Close()
 
 	wg.Wait()
 
@@ -240,12 +239,5 @@ func copyWebSocket(dst net.Conn, src net.Conn, state ws.State) error {
 		if err != nil {
 			return err
 		}
-	}
-}
-
-// setWriteDeadline sets the write deadline on a connection if supported.
-func setWriteDeadline(conn net.Conn, d time.Duration) {
-	if d > 0 {
-		_ = conn.SetWriteDeadline(time.Now().Add(d))
 	}
 }

@@ -64,7 +64,7 @@ func (s *Store) ListRoutes(ctx context.Context) ([]*bastion.Route, error) {
 	if err != nil {
 		return nil, fmt.Errorf("bastion/pg: list routes: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var routes []*bastion.Route
 	for rows.Next() {
@@ -176,7 +176,7 @@ func (s *Store) ListStates(ctx context.Context) ([]*bastion.CircuitBreakerSnapsh
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var states []*bastion.CircuitBreakerSnapshot
 	for rows.Next() {
@@ -221,7 +221,7 @@ func (s *Store) GetHistory(ctx context.Context, targetID string, limit int) ([]b
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var results []bastion.HealthCheckResult
 	for rows.Next() {
@@ -355,41 +355,41 @@ func scanRoute(rows scannable) (*bastion.Route, error) {
 		return nil, err
 	}
 
-	json.Unmarshal(methods, &r.Methods)
-	json.Unmarshal(targets, &r.Targets)
-	json.Unmarshal(headers, &r.Headers)
-	json.Unmarshal(metadata, &r.Metadata)
+	_ = json.Unmarshal(methods, &r.Methods)
+	_ = json.Unmarshal(targets, &r.Targets)
+	_ = json.Unmarshal(headers, &r.Headers)
+	_ = json.Unmarshal(metadata, &r.Metadata)
 	if len(retry) > 0 {
 		r.Retry = &bastion.RetryConfig{}
-		json.Unmarshal(retry, r.Retry)
+		_ = json.Unmarshal(retry, r.Retry)
 	}
 	if len(timeout) > 0 {
 		r.Timeout = &bastion.TimeoutConfig{}
-		json.Unmarshal(timeout, r.Timeout)
+		_ = json.Unmarshal(timeout, r.Timeout)
 	}
 	if len(rateLimit) > 0 {
 		r.RateLimit = &bastion.RateLimitConfig{}
-		json.Unmarshal(rateLimit, r.RateLimit)
+		_ = json.Unmarshal(rateLimit, r.RateLimit)
 	}
 	if len(auth) > 0 {
 		r.Auth = &bastion.RouteAuthConfig{}
-		json.Unmarshal(auth, r.Auth)
+		_ = json.Unmarshal(auth, r.Auth)
 	}
 	if len(cb) > 0 {
 		r.CircuitBreaker = &bastion.CBConfig{}
-		json.Unmarshal(cb, r.CircuitBreaker)
+		_ = json.Unmarshal(cb, r.CircuitBreaker)
 	}
 	if len(cache) > 0 {
 		r.Cache = &bastion.RouteCacheConfig{}
-		json.Unmarshal(cache, r.Cache)
+		_ = json.Unmarshal(cache, r.Cache)
 	}
 	if len(tp) > 0 {
 		r.TrafficPolicy = &bastion.TrafficPolicy{}
-		json.Unmarshal(tp, r.TrafficPolicy)
+		_ = json.Unmarshal(tp, r.TrafficPolicy)
 	}
 	if len(transform) > 0 {
 		r.Transform = &bastion.TransformConfig{}
-		json.Unmarshal(transform, r.Transform)
+		_ = json.Unmarshal(transform, r.Transform)
 	}
 
 	return r, nil

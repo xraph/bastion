@@ -116,7 +116,7 @@ func TestWAF_BodySizeLimit(t *testing.T) {
 
 	v := waf.Check(req)
 	if v == nil {
-		t.Error("expected body size violation")
+		t.Fatal("expected body size violation")
 	}
 
 	if v.Rule != "body-size" {

@@ -316,7 +316,7 @@ func (p *ForwardAuthProvider) Authenticate(ctx context.Context, r *http.Request)
 	if err != nil {
 		return nil, &AuthError{Code: http.StatusBadGateway, Message: "auth service unavailable"}
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		return nil, &AuthError{Code: resp.StatusCode, Message: "authentication failed"}

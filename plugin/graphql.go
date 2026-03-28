@@ -202,9 +202,10 @@ func estimateComplexity(query string) int {
 			parenDepth := 1
 			i++
 			for i < len(query) && parenDepth > 0 {
-				if query[i] == '(' {
+				switch query[i] {
+				case '(':
 					parenDepth++
-				} else if query[i] == ')' {
+				case ')':
 					parenDepth--
 				}
 				i++

@@ -91,7 +91,7 @@ func (e *pgMigrateExecutor) ListApplied(ctx context.Context) ([]*migrate.Applied
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var applied []*migrate.AppliedMigration
 	for rows.Next() {

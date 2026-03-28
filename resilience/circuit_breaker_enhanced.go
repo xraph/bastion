@@ -182,9 +182,9 @@ func (cb *SlidingWindowCircuitBreaker) RecordResult(failed bool, latency time.Du
 	if cb.config.Mode == CBModeCount {
 		// Delegate to base circuit breaker for count mode
 		if failed {
-			cb.CircuitBreaker.RecordFailure()
+			cb.RecordFailure()
 		} else {
-			cb.CircuitBreaker.RecordSuccess()
+			cb.RecordSuccess()
 		}
 
 		return
@@ -197,7 +197,7 @@ func (cb *SlidingWindowCircuitBreaker) RecordResult(failed bool, latency time.Du
 	slow := cb.slowCfg && latency > cb.config.SlowCallDurationThreshold
 	cb.window.record(failed, slow)
 
-	state := cb.CircuitBreaker.State()
+	state := cb.State()
 
 	switch state {
 	case bastion.CircuitClosed:
@@ -215,21 +215,21 @@ func (cb *SlidingWindowCircuitBreaker) RecordResult(failed bool, latency time.Du
 			}
 
 			if shouldTrip {
-				cb.CircuitBreaker.mu.Lock()
-				cb.CircuitBreaker.transitionTo(bastion.CircuitOpen)
-				cb.CircuitBreaker.mu.Unlock()
+				cb.mu.Lock()
+				cb.transitionTo(bastion.CircuitOpen)
+				cb.mu.Unlock()
 			}
 		}
 
 	case bastion.CircuitHalfOpen:
 		if failed {
-			cb.CircuitBreaker.RecordFailure()
+			cb.RecordFailure()
 		} else {
-			cb.CircuitBreaker.RecordSuccess()
+			cb.RecordSuccess()
 		}
 
 		// Reset window on state change
-		if cb.CircuitBreaker.State() != bastion.CircuitHalfOpen {
+		if cb.State() != bastion.CircuitHalfOpen {
 			cb.window.reset()
 		}
 	}
@@ -241,7 +241,7 @@ func (cb *SlidingWindowCircuitBreaker) Metrics() CircuitBreakerMetrics {
 	defer cb.mu.Unlock()
 
 	return CircuitBreakerMetrics{
-		State:       cb.CircuitBreaker.State(),
+		State:       cb.State(),
 		FailureRate: cb.window.failureRate(),
 		SlowRate:    cb.window.slowCallRate(),
 		TotalCount:  cb.window.count(),
