@@ -7,15 +7,15 @@ require (
 	github.com/gobwas/ws v1.4.0
 	github.com/google/uuid v1.6.0
 	github.com/gorilla/websocket v1.5.4-0.20250319132907-e064f32e3674
-	github.com/xraph/farp v1.0.2
-	github.com/xraph/forge v1.4.1
+	github.com/xraph/farp v1.3.0
+	github.com/xraph/forge v1.4.5
 	github.com/xraph/forge/extensions/discovery v0.9.7
-	github.com/xraph/go-utils v1.1.0
-	github.com/xraph/grove v1.4.1
-	github.com/xraph/grove/drivers/mongodriver v1.4.1
-	github.com/xraph/grove/drivers/pgdriver v1.4.1
-	github.com/xraph/grove/drivers/sqlitedriver v1.4.1
-	github.com/xraph/vessel v1.0.0
+	github.com/xraph/go-utils v1.1.1
+	github.com/xraph/grove v1.4.3
+	github.com/xraph/grove/drivers/mongodriver v1.4.3
+	github.com/xraph/grove/drivers/pgdriver v1.4.3
+	github.com/xraph/grove/drivers/sqlitedriver v1.4.3
+	github.com/xraph/vessel v1.0.1
 	go.mongodb.org/mongo-driver/v2 v2.5.0
 )
 
@@ -94,7 +94,7 @@ require (
 	github.com/xdg-go/scram v1.2.0 // indirect
 	github.com/xdg-go/stringprep v1.0.4 // indirect
 	github.com/xraph/confy v0.5.0 // indirect
-	github.com/xraph/forgeui v1.4.0 // indirect
+	github.com/xraph/forgeui v1.4.1 // indirect
 	github.com/youmark/pkcs8 v0.0.0-20240726163527-a2c0da244d78 // indirect
 	go.etcd.io/etcd/api/v3 v3.5.17 // indirect
 	go.etcd.io/etcd/client/pkg/v3 v3.5.17 // indirect
