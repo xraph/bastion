@@ -393,3 +393,55 @@ func TestRoute_IsHealthy(t *testing.T) {
 		})
 	}
 }
+
+func TestManager_MatchRoute_SpecificPathBeforeCatchAll(t *testing.T) {
+	rm := NewManager()
+
+	// Add a root catch-all route (simulates service mounted at "/")
+	rootRoute := &bastion.Route{
+		ID:       "farp-twinos-http",
+		Path:     "/*",
+		Protocol: bastion.ProtocolHTTP,
+		Source:   bastion.SourceFARP,
+		Priority: 20,
+		Enabled:  true,
+		Targets:  []*bastion.Target{{ID: "t1", URL: "http://localhost:7900"}},
+	}
+
+	// Add a service-prefixed route (simulates Portal at /portal)
+	portalRoute := &bastion.Route{
+		ID:       "farp-portal-http",
+		Path:     "/portal/*",
+		Protocol: bastion.ProtocolHTTP,
+		Source:   bastion.SourceFARP,
+		Priority: 20,
+		Enabled:  true,
+		Targets:  []*bastion.Target{{ID: "t2", URL: "http://localhost:7901"}},
+	}
+
+	// Add root FIRST (the problematic ordering)
+	if err := rm.AddRoute(rootRoute); err != nil {
+		t.Fatalf("failed to add root route: %v", err)
+	}
+	if err := rm.AddRoute(portalRoute); err != nil {
+		t.Fatalf("failed to add portal route: %v", err)
+	}
+
+	// Request to /portal/... must match the portal route, NOT the root catch-all.
+	matched := rm.MatchRoute("/portal/authsome/v1/admin/settings", "GET")
+	if matched == nil {
+		t.Fatal("expected a matching route")
+	}
+	if matched.ID != "farp-portal-http" {
+		t.Errorf("expected portal route (farp-portal-http), got %s", matched.ID)
+	}
+
+	// Request to /other/... should still match the root catch-all.
+	matched = rm.MatchRoute("/other/path", "GET")
+	if matched == nil {
+		t.Fatal("expected a matching route for /other/path")
+	}
+	if matched.ID != "farp-twinos-http" {
+		t.Errorf("expected root route (farp-twinos-http), got %s", matched.ID)
+	}
+}

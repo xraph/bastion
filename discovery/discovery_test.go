@@ -559,6 +559,7 @@ func newTestManager(rm *mockRouteRegistry, mock *mockDiscoveryService) *Manager 
 		discoveredSvcs:  make(map[string]*DiscoveredService),
 		servicePrefixes: make(map[string]string),
 		serviceLastSeen: make(map[string]time.Time),
+		pushInstances:   make(map[string]map[string]*ServiceInstanceInfo),
 	}
 }
 
@@ -781,5 +782,326 @@ func TestRefresh_ServiceRecovers(t *testing.T) {
 
 	if !found {
 		t.Error("expected routes for my-svc to exist after recovery")
+	}
+}
+
+// --- Push registration tests ---
+
+func TestRegisterService_SurvivesPollCycle(t *testing.T) {
+	rm := &mockRouteRegistry{}
+	// The discovery backend has NO services — push-registered services
+	// are not stored in the backend.
+	mock := &mockDiscoveryService{
+		services:  []string{},
+		instances: map[string][]*ServiceInstanceInfo{},
+	}
+
+	sd := newTestManager(rm, mock)
+	sd.config.RemovalGracePeriod = 5 * time.Second
+
+	// Push-register a service.
+	info := &ServiceInstanceInfo{
+		ID:      "inst-1",
+		Name:    "my-svc",
+		Address: "10.0.0.1",
+		Port:    8080,
+		Healthy: true,
+	}
+
+	if err := sd.RegisterService(context.Background(), info); err != nil {
+		t.Fatalf("RegisterService failed: %v", err)
+	}
+
+	if len(rm.routes) == 0 {
+		t.Fatal("expected routes after push registration")
+	}
+
+	// Simulate a poll cycle — ListServices returns empty (backend doesn't
+	// know about push-registered services).
+	if err := sd.refresh(context.Background()); err != nil {
+		t.Fatalf("refresh failed: %v", err)
+	}
+
+	// Routes must survive because serviceLastSeen protects via grace period.
+	if len(rm.routes) == 0 {
+		t.Fatal("expected routes to survive poll cycle via grace period")
+	}
+
+	sd.mu.RLock()
+	_, exists := sd.discoveredSvcs["my-svc"]
+	sd.mu.RUnlock()
+
+	if !exists {
+		t.Fatal("expected my-svc to remain in discoveredSvcs after poll")
+	}
+}
+
+func TestRegisterService_RemovedAfterTTL(t *testing.T) {
+	rm := &mockRouteRegistry{}
+	mock := &mockDiscoveryService{
+		services:  []string{},
+		instances: map[string][]*ServiceInstanceInfo{},
+	}
+
+	sd := newTestManager(rm, mock)
+	// Push-registered services survive poll cycles, but are evicted after TTL.
+	sd.config.PushInstanceTTL = 50 * time.Millisecond
+
+	info := &ServiceInstanceInfo{
+		ID:      "inst-1",
+		Name:    "my-svc",
+		Address: "10.0.0.1",
+		Port:    8080,
+		Healthy: true,
+	}
+
+	if err := sd.RegisterService(context.Background(), info); err != nil {
+		t.Fatalf("RegisterService failed: %v", err)
+	}
+
+	if len(rm.routes) == 0 {
+		t.Fatal("expected routes after push registration")
+	}
+
+	// Wait past the TTL.
+	time.Sleep(100 * time.Millisecond)
+
+	// Poll cycle should evict the stale push instance via TTL, then
+	// remove the service since it has no remaining instances.
+	if err := sd.refresh(context.Background()); err != nil {
+		t.Fatalf("refresh failed: %v", err)
+	}
+
+	sd.mu.RLock()
+	_, exists := sd.discoveredSvcs["my-svc"]
+	_, pushExists := sd.pushInstances["my-svc"]
+	sd.mu.RUnlock()
+
+	if exists {
+		t.Error("expected my-svc to be removed from discoveredSvcs after TTL")
+	}
+	if pushExists {
+		t.Error("expected my-svc to be removed from pushInstances after TTL")
+	}
+}
+
+func TestRegisterService_AggregatesMultipleInstances(t *testing.T) {
+	rm := &mockRouteRegistry{}
+	mock := &mockDiscoveryService{
+		services:  []string{},
+		instances: map[string][]*ServiceInstanceInfo{},
+	}
+
+	sd := newTestManager(rm, mock)
+
+	// Push two instances of the same service from different ports.
+	inst1 := &ServiceInstanceInfo{
+		ID:      "inst-1",
+		Name:    "my-svc",
+		Address: "10.0.0.1",
+		Port:    8080,
+		Healthy: true,
+	}
+	inst2 := &ServiceInstanceInfo{
+		ID:      "inst-2",
+		Name:    "my-svc",
+		Address: "10.0.0.1",
+		Port:    9090,
+		Healthy: true,
+	}
+
+	if err := sd.RegisterService(context.Background(), inst1); err != nil {
+		t.Fatalf("RegisterService(inst1) failed: %v", err)
+	}
+
+	if err := sd.RegisterService(context.Background(), inst2); err != nil {
+		t.Fatalf("RegisterService(inst2) failed: %v", err)
+	}
+
+	// Verify both instances are tracked.
+	sd.mu.RLock()
+	pushCount := len(sd.pushInstances["my-svc"])
+	sd.mu.RUnlock()
+
+	if pushCount != 2 {
+		t.Fatalf("expected 2 push instances, got %d", pushCount)
+	}
+
+	// The route should have targets for BOTH instances.
+	found := false
+	for _, route := range rm.routes {
+		if route.ServiceName == "my-svc" {
+			found = true
+			if len(route.Targets) != 2 {
+				t.Errorf("expected 2 targets in route, got %d", len(route.Targets))
+			}
+		}
+	}
+
+	if !found {
+		t.Fatal("expected route for my-svc")
+	}
+}
+
+func TestManager_ManifestFailure_PreservesExistingRoutes(t *testing.T) {
+	// Simulate a root-mounted service where manifest fetch fails on second poll.
+	// The existing route (/*) should be preserved, not overwritten with /twinos/*.
+	rm := &mockRouteRegistry{}
+	logger := newTestLogger()
+
+	sd := &Manager{
+		config: DiscoveryConfig{
+			AutoPrefix:     true,
+			PrefixTemplate: "/{{.ServiceName}}",
+			StripPrefix:    true,
+		},
+		logger:          logger,
+		rm:              rm,
+		discoveredSvcs:  make(map[string]*DiscoveredService),
+		servicePrefixes: make(map[string]string),
+		serviceLastSeen: make(map[string]time.Time),
+		pushInstances:   make(map[string]map[string]*ServiceInstanceInfo),
+	}
+
+	targets := []*Target{{ID: "t1", URL: "http://10.0.0.1:8080", Healthy: true}}
+
+	// Step 1: Simulate a successful manifest fetch by setting up a root-mounted route
+	// as if routesFromManifest had run (prefix="" → route "/*").
+	sd.servicePrefixes["twinos"] = "" // Cache the root prefix
+
+	route := &Route{
+		ID:          "farp-twinos-http",
+		Path:        "/*",
+		Targets:     targets,
+		StripPrefix: true,
+		Protocol:    ProtocolHTTP,
+		Source:      SourceFARP,
+		ServiceName: "twinos",
+		Priority:    20,
+		Enabled:     true,
+	}
+	if err := rm.AddRoute(route); err != nil {
+		t.Fatalf("failed to add initial route: %v", err)
+	}
+
+	// Step 2: Simulate manifest fetch failure — routesFromFARP returns nil
+	// when manifest fails and existing FARP routes exist.
+	instance := &ServiceInstanceInfo{
+		ID:      "inst-1",
+		Name:    "twinos",
+		Address: "10.0.0.1",
+		Port:    8080,
+		Metadata: map[string]string{
+			"farp.enabled":  "true",
+			"farp.manifest": "http://10.0.0.1:8080/farp/manifest", // will fail (no httpClient)
+			"farp.openapi":  "/openapi.json",
+		},
+	}
+
+	newTargets := []*Target{
+		{ID: "t1", URL: "http://10.0.0.1:8080", Healthy: true},
+		{ID: "t2", URL: "http://10.0.0.2:8080", Healthy: true},
+	}
+
+	// processService should detect the manifest failure, keep existing route
+	// path as "/*", but update targets.
+	sd.processService("twinos", []*ServiceInstanceInfo{instance})
+
+	// Verify the route still has path "/*" (not "/twinos/*")
+	routes := rm.ListRoutes()
+	var found *Route
+	for _, r := range routes {
+		if r.ID == "farp-twinos-http" {
+			found = r
+			break
+		}
+	}
+
+	if found == nil {
+		t.Fatal("expected farp-twinos-http route to still exist")
+	}
+
+	if found.Path != "/*" {
+		t.Errorf("route path = %q, want %q (should be preserved from manifest)", found.Path, "/*")
+	}
+
+	// Verify targets were NOT changed to newTargets since processService
+	// received instances (not newTargets directly), but the route should
+	// still exist with original targets (refreshTargets updates from the
+	// instances provided to processService).
+	_ = newTargets // targets are built from instances in processService
+}
+
+func TestManager_RoutesFromFARPMetadata_UsesCachedPrefix(t *testing.T) {
+	rm := &mockRouteRegistry{}
+
+	sd := &Manager{
+		config: DiscoveryConfig{
+			AutoPrefix:     true,
+			PrefixTemplate: "/{{.ServiceName}}",
+		},
+		rm:              rm,
+		servicePrefixes: make(map[string]string),
+	}
+
+	// Simulate a previously cached root prefix from manifest
+	sd.servicePrefixes["twinos"] = ""
+
+	instance := &ServiceInstanceInfo{
+		ID:      "inst-1",
+		Name:    "twinos",
+		Address: "10.0.0.1",
+		Port:    8080,
+		Metadata: map[string]string{
+			"farp.openapi": "/openapi.json",
+		},
+	}
+
+	targets := []*Target{{ID: "t1", URL: "http://10.0.0.1:8080"}}
+	routes := sd.routesFromFARPMetadata("twinos", instance, targets)
+
+	if len(routes) != 1 {
+		t.Fatalf("expected 1 route, got %d", len(routes))
+	}
+
+	// Should use cached prefix "" (root), not BuildPrefix "/twinos"
+	if routes[0].Path != "/*" {
+		t.Errorf("route path = %q, want %q (should use cached root prefix)", routes[0].Path, "/*")
+	}
+}
+
+func TestManager_RoutesFromFARPMetadata_FallsBackToBuildPrefix(t *testing.T) {
+	rm := &mockRouteRegistry{}
+
+	sd := &Manager{
+		config: DiscoveryConfig{
+			AutoPrefix:     true,
+			PrefixTemplate: "/{{.ServiceName}}",
+		},
+		rm:              rm,
+		servicePrefixes: make(map[string]string),
+	}
+
+	// No cached prefix — first time seeing this service
+	instance := &ServiceInstanceInfo{
+		ID:      "inst-1",
+		Name:    "new-svc",
+		Address: "10.0.0.1",
+		Port:    8080,
+		Metadata: map[string]string{
+			"farp.openapi": "/openapi.json",
+		},
+	}
+
+	targets := []*Target{{ID: "t1", URL: "http://10.0.0.1:8080"}}
+	routes := sd.routesFromFARPMetadata("new-svc", instance, targets)
+
+	if len(routes) != 1 {
+		t.Fatalf("expected 1 route, got %d", len(routes))
+	}
+
+	// No cached prefix → should fall through to BuildPrefix
+	if routes[0].Path != "/new-svc/*" {
+		t.Errorf("route path = %q, want %q", routes[0].Path, "/new-svc/*")
 	}
 }

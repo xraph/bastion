@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"bufio"
 	"crypto/tls"
 	"fmt"
 	"net"
@@ -294,6 +295,11 @@ func (pe *Engine) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Route matching
 	route := pe.rm.MatchRoute(r.URL.Path, r.Method)
 	if route == nil {
+		pe.logger.Debug("no matching route",
+			forge.F("path", r.URL.Path),
+			forge.F("method", r.Method),
+			forge.F("route_count", pe.rm.RouteCount()),
+		)
 		http.Error(w, `{"error":"no matching route"}`, http.StatusNotFound)
 
 		return
@@ -357,17 +363,19 @@ func (pe *Engine) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Protocol-specific handling
+	// Protocol-specific handling. Check both request headers and the route's
+	// declared protocol — FARP/discovery may have tagged the route as SSE or
+	// gRPC even if the client doesn't send protocol-specific headers.
 	switch {
 	case isWebSocketUpgrade(r):
 		pe.proxyWebSocket(w, r, route)
 
 		return
-	case isSSERequest(r):
+	case isSSERequest(r) || route.Protocol == bastion.ProtocolSSE:
 		pe.proxySSE(w, r, route)
 
 		return
-	case isGRPCRequest(r):
+	case isGRPCRequest(r) || route.Protocol == bastion.ProtocolGRPC:
 		pe.proxyGRPC(w, r, route)
 
 		return
@@ -400,18 +408,31 @@ func (pe *Engine) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Wrap the writer to track whether headers have been flushed. This
+	// lets the error handler avoid writing a duplicate response when the
+	// upstream drops the connection mid-stream (which causes "Body has
+	// already been consumed" errors on the client side).
+	tw := &statusTrackingWriter{ResponseWriter: w}
+
 	proxy := &httputil.ReverseProxy{
 		Director:       pe.director(r, route, targetURL),
 		Transport:      pe.transport,
 		ModifyResponse: pe.modifyResponse(route, target, start),
-		ErrorHandler:   pe.errorHandler(route, target, cb),
+		ErrorHandler:   pe.errorHandler(route, target, cb, tw),
 		BufferPool:     &proxyBufferPool{pool: &pe.bufPool},
+		// FlushInterval enables streaming for chunked/SSE responses that
+		// arrive through the regular HTTP proxy path (e.g., SSE endpoints
+		// registered under the service's HTTP catch-all route rather than
+		// a dedicated /ws/* route). Without this, httputil.ReverseProxy
+		// buffers the entire response, causing SSE streams to appear as
+		// an instant 200 with no body.
+		FlushInterval: -1, // flush immediately as data arrives
 	}
 
 	target.IncrConns()
 	defer target.DecrConns()
 
-	proxy.ServeHTTP(w, r)
+	proxy.ServeHTTP(tw, r)
 }
 
 func (pe *Engine) director(origReq *http.Request, route *bastion.Route, target *url.URL) func(req *http.Request) {
@@ -478,6 +499,25 @@ func (pe *Engine) modifyResponse(route *bastion.Route, target *bastion.Target, s
 			pe.hm.RecordPassiveSuccess(target.ID)
 		}
 
+		// Remove Content-Length and switch to chunked transfer encoding for
+		// streaming-safe proxying. When the upstream drops the connection
+		// mid-stream, a fixed Content-Length causes the client to receive
+		// fewer bytes than promised, leading to "Body has already been
+		// consumed" parse errors in JavaScript fetch() clients. Chunked
+		// encoding lets the client detect truncation cleanly.
+		if resp.ContentLength > 0 && resp.StatusCode != http.StatusNoContent && resp.StatusCode != http.StatusNotModified {
+			resp.Header.Del("Content-Length")
+			resp.ContentLength = -1
+		}
+
+		// Rewrite Location headers on redirect responses when the gateway
+		// stripped a prefix. The upstream's Location header refers to its own
+		// path namespace (e.g., /api/v1/queries) but the client must be
+		// redirected through the gateway prefix (e.g., /twinos/api/v1/queries).
+		if isRedirect(resp.StatusCode) && route.StripPrefix {
+			pe.rewriteLocationHeader(resp, route)
+		}
+
 		// Apply response header transforms
 		if route.Transform != nil {
 			applyResponseHeaderPolicy(resp, route.Transform.ResponseHeaders)
@@ -495,7 +535,7 @@ func (pe *Engine) modifyResponse(route *bastion.Route, target *bastion.Target, s
 	}
 }
 
-func (pe *Engine) errorHandler(route *bastion.Route, target *bastion.Target, cb bastion.Breaker) func(http.ResponseWriter, *http.Request, error) {
+func (pe *Engine) errorHandler(route *bastion.Route, target *bastion.Target, cb bastion.Breaker, tw *statusTrackingWriter) func(http.ResponseWriter, *http.Request, error) {
 	return func(w http.ResponseWriter, _ *http.Request, err error) {
 		pe.logger.Warn("upstream error",
 			forge.F("route_id", route.ID),
@@ -506,6 +546,21 @@ func (pe *Engine) errorHandler(route *bastion.Route, target *bastion.Target, cb 
 		cb.RecordFailure()
 		pe.stats.RecordError(route.ID)
 		pe.hm.RecordPassiveFailure(target.ID)
+
+		// If the proxy already started writing the response (headers
+		// flushed), we cannot write an error body. Signal the client
+		// that the stream ended abruptly by closing the underlying TCP
+		// connection. This is cleaner than sending nothing — the client
+		// sees a network error instead of silently receiving a truncated
+		// body that fails to parse.
+		if tw.written {
+			if hijacker, ok := w.(http.Hijacker); ok {
+				if conn, _, hijackErr := hijacker.Hijack(); hijackErr == nil {
+					_ = conn.Close()
+				}
+			}
+			return
+		}
 
 		if pe.hooks != nil {
 			pe.hooks.RunOnError(err, route, w)
@@ -584,6 +639,64 @@ func isGRPCRequest(r *http.Request) bool {
 	return strings.HasPrefix(r.Header.Get("Content-Type"), "application/grpc")
 }
 
+func isRedirect(statusCode int) bool {
+	return statusCode == http.StatusMovedPermanently ||
+		statusCode == http.StatusFound ||
+		statusCode == http.StatusSeeOther ||
+		statusCode == http.StatusTemporaryRedirect ||
+		statusCode == http.StatusPermanentRedirect
+}
+
+// rewriteLocationHeader prepends the gateway route prefix back onto the
+// upstream's Location header. When StripPrefix is enabled, the gateway
+// strips e.g. "/twinos" before forwarding to the upstream. If the upstream
+// issues a redirect (301/302/307/308), its Location header refers to its
+// own path space (e.g., "/api/v1/queries"). The client needs the full
+// gateway path (e.g., "/twinos/api/v1/queries") to follow the redirect
+// through the gateway.
+func (pe *Engine) rewriteLocationHeader(resp *http.Response, route *bastion.Route) {
+	location := resp.Header.Get("Location")
+	if location == "" {
+		return
+	}
+
+	// Parse the Location to check if it's a relative path or same-host absolute.
+	locURL, err := url.Parse(location)
+	if err != nil {
+		return
+	}
+
+	// Only rewrite same-host or relative redirects. If the upstream redirects
+	// to a completely different host, leave it alone.
+	if locURL.Host != "" && resp.Request != nil && locURL.Host != resp.Request.URL.Host {
+		return
+	}
+
+	// Compute the prefix that was stripped.
+	prefix := strings.TrimSuffix(route.Path, "/*")
+	prefix = strings.TrimSuffix(prefix, "*")
+	if prefix == "" || prefix == "/" {
+		return
+	}
+
+	// If the AddPrefix was used, the upstream path already has that prefix.
+	// We need to strip it before prepending the gateway prefix.
+	upstreamPath := locURL.Path
+	if route.AddPrefix != "" {
+		upstreamPath = strings.TrimPrefix(upstreamPath, route.AddPrefix)
+	}
+
+	// Don't double-prefix if the location already starts with the prefix.
+	if strings.HasPrefix(upstreamPath, prefix) {
+		return
+	}
+
+	// Rebuild the Location with the gateway prefix.
+	locURL.Path = singleJoiningSlash(prefix, upstreamPath)
+
+	resp.Header.Set("Location", locURL.String())
+}
+
 func applyResponseHeaderPolicy(resp *http.Response, policy bastion.HeaderPolicy) {
 	for k, v := range policy.Add {
 		resp.Header.Add(k, v)
@@ -611,4 +724,38 @@ func (p *proxyBufferPool) Get() []byte {
 
 func (p *proxyBufferPool) Put(buf []byte) {
 	p.pool.Put(&buf)
+}
+
+// statusTrackingWriter wraps http.ResponseWriter to track whether headers
+// have been sent to the client. This allows the error handler to avoid
+// writing a second response after the proxy has already started streaming.
+type statusTrackingWriter struct {
+	http.ResponseWriter
+	written bool
+}
+
+func (w *statusTrackingWriter) WriteHeader(code int) {
+	w.written = true
+	w.ResponseWriter.WriteHeader(code)
+}
+
+func (w *statusTrackingWriter) Write(b []byte) (int, error) {
+	w.written = true
+	return w.ResponseWriter.Write(b)
+}
+
+// Flush delegates to the underlying writer if it supports http.Flusher.
+func (w *statusTrackingWriter) Flush() {
+	if f, ok := w.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
+// Hijack delegates to the underlying writer if it supports http.Hijacker
+// (needed for WebSocket upgrades).
+func (w *statusTrackingWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	if h, ok := w.ResponseWriter.(http.Hijacker); ok {
+		return h.Hijack()
+	}
+	return nil, nil, fmt.Errorf("upstream ResponseWriter does not support hijacking")
 }

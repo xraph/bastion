@@ -169,6 +169,7 @@ func newFARPTestManager(rm *trackingRouteRegistry, mock *mockDiscoveryService) *
 		discoveredSvcs:  make(map[string]*DiscoveredService),
 		servicePrefixes: make(map[string]string),
 		serviceLastSeen: make(map[string]time.Time),
+		pushInstances:   make(map[string]map[string]*ServiceInstanceInfo),
 	}
 }
 

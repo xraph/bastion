@@ -3,9 +3,11 @@ package health
 import (
 	"context"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/xraph/forge"
@@ -21,6 +23,7 @@ type Monitor struct {
 	stopCh   chan struct{}
 	stopOnce sync.Once
 	wg       sync.WaitGroup
+	checking int32 // atomic flag to prevent overlapping check cycles
 
 	// Callbacks
 	onHealthChange func(event Event)
@@ -38,13 +41,18 @@ type monitoredTarget struct {
 
 // NewMonitor creates a new health monitor.
 func NewMonitor(config Config, logger forge.Logger) *Monitor {
+	// Health checks are short-lived, infrequent-per-target requests.
+	// Disable keep-alive to prevent transport goroutine accumulation
+	// (each idle connection spawns readLoop + writeLoop goroutines
+	// that persist until IdleConnTimeout). Without keep-alive, the
+	// connection is closed immediately after each check.
 	transport := &http.Transport{
 		DialContext: (&net.Dialer{
 			Timeout: config.Timeout,
 		}).DialContext,
-		MaxIdleConns:        100,
-		MaxIdleConnsPerHost: 10,
-		IdleConnTimeout:     90 * time.Second,
+		DisableKeepAlives:   true,
+		MaxConnsPerHost:     3,
+		TLSHandshakeTimeout: config.Timeout,
 	}
 
 	return &Monitor{
@@ -170,7 +178,20 @@ func (hm *Monitor) loop(ctx context.Context) {
 	}
 }
 
+// maxConcurrentChecks limits the number of concurrent health check goroutines
+// to prevent goroutine accumulation when many targets are unreachable.
+const maxConcurrentChecks = 32
+
 func (hm *Monitor) checkAll(ctx context.Context) {
+	// Prevent overlapping cycles. If the previous checkAll hasn't finished
+	// (e.g., many targets are unreachable and goroutines are stuck in TCP
+	// dial), skip this cycle entirely to prevent goroutine pile-up.
+	if !atomic.CompareAndSwapInt32(&hm.checking, 0, 1) {
+		hm.logger.Debug("skipping health check cycle: previous cycle still running")
+		return
+	}
+	defer atomic.StoreInt32(&hm.checking, 0)
+
 	hm.mu.RLock()
 	targets := make([]*monitoredTarget, 0, len(hm.targets))
 	for _, mt := range hm.targets {
@@ -178,19 +199,32 @@ func (hm *Monitor) checkAll(ctx context.Context) {
 	}
 	hm.mu.RUnlock()
 
+	// Use a per-cycle context bounded to the check interval so that
+	// goroutines from a slow cycle cannot outlive the next tick.
+	cycleCtx, cancel := context.WithTimeout(ctx, hm.config.Interval)
+	defer cancel()
+
 	var wg sync.WaitGroup
+	sem := make(chan struct{}, maxConcurrentChecks)
 
 	for _, mt := range targets {
 		wg.Add(1)
+		sem <- struct{}{} // acquire
 
 		go func(mt *monitoredTarget) {
 			defer wg.Done()
+			defer func() { <-sem }() // release
 
-			hm.checkTarget(ctx, mt)
+			hm.checkTarget(cycleCtx, mt)
 		}(mt)
 	}
 
 	wg.Wait()
+
+	// Close any lingering connections from this cycle. With DisableKeepAlives
+	// this is mostly a no-op, but it prevents accumulation if the transport
+	// holds connections due to in-flight cancellation races.
+	hm.client.CloseIdleConnections()
 }
 
 func (hm *Monitor) checkTarget(ctx context.Context, mt *monitoredTarget) {
@@ -224,7 +258,14 @@ func (hm *Monitor) checkTarget(ctx context.Context, mt *monitoredTarget) {
 		return
 	}
 
-	defer func() { _ = resp.Body.Close() }()
+	// Drain and close the body. Draining ensures the underlying TCP
+	// connection is returned to the pool in a clean state (or closed
+	// immediately since DisableKeepAlives is true). Without draining,
+	// the transport may hold the connection goroutines open.
+	defer func() {
+		_, _ = io.Copy(io.Discard, resp.Body)
+		_ = resp.Body.Close()
+	}()
 
 	if resp.StatusCode >= 200 && resp.StatusCode < 400 {
 		hm.handleCheckSuccess(mt)

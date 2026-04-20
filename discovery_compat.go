@@ -4,6 +4,8 @@ import (
 	"github.com/xraph/forge"
 
 	disc "github.com/xraph/bastion/discovery"
+	"github.com/xraph/bastion/middleware"
+	"github.com/xraph/bastion/security"
 )
 
 // ServiceDiscovery is a backward-compatible alias for discovery.Manager.
@@ -38,6 +40,14 @@ func NewOpenAPIAggregator(config OpenAPIConfig, logger forge.Logger, rm RouteReg
 	)
 }
 
+// AsyncAPIAggregator is a backward-compatible alias for discovery.AsyncAPIAggregator.
+type AsyncAPIAggregator = disc.AsyncAPIAggregator
+
+// NewAsyncAPIAggregator creates a new AsyncAPI aggregator.
+func NewAsyncAPIAggregator(config AsyncAPIConfig, logger forge.Logger, sd *ServiceDiscovery) *AsyncAPIAggregator {
+	return disc.NewAsyncAPIAggregator(config, logger, sd)
+}
+
 // --- RouteRegistry adapter ---
 
 // routeRegistryAdapter adapts RouteRegistry to discovery.RouteRegistry.
@@ -56,9 +66,77 @@ func (a *routeRegistryAdapter) AddRoute(route *disc.Route) error {
 	return a.rm.AddRoute(discRouteToRoot(route))
 }
 
-// UpdateRoute converts a discovery.Route to root Route and updates it.
+// UpdateRoute merges discovery-managed fields onto the existing bastion.Route
+// to preserve fields that the discovery package doesn't manage (e.g., Version,
+// AddPrefix, RewritePath, Headers, Auth, RateLimit, CircuitBreaker, Cache,
+// TrafficPolicy, Transform, Metadata, CreatedAt). Without this merge,
+// every discovery poll would zero out these fields because discRouteToRoot
+// can't copy what disc.Route doesn't have.
 func (a *routeRegistryAdapter) UpdateRoute(route *disc.Route) error {
-	return a.rm.UpdateRoute(discRouteToRoot(route))
+	existing, ok := a.rm.GetRoute(route.ID)
+	if !ok {
+		// Route doesn't exist yet — create fresh.
+		return a.rm.UpdateRoute(discRouteToRoot(route))
+	}
+
+	// Shallow copy preserves all bastion-specific fields.
+	updated := *existing
+	updated.Path = route.Path
+	updated.Methods = route.Methods
+	updated.StripPrefix = route.StripPrefix
+	updated.Protocol = RouteProtocol(route.Protocol)
+	updated.Source = RouteSource(route.Source)
+	updated.ServiceName = route.ServiceName
+	updated.Priority = route.Priority
+	updated.Enabled = route.Enabled
+	updated.UpdatedAt = route.UpdatedAt
+
+	targets := make([]*Target, len(route.Targets))
+	for i, t := range route.Targets {
+		targets[i] = &Target{
+			ID:       t.ID,
+			URL:      t.URL,
+			Weight:   t.Weight,
+			Healthy:  t.Healthy,
+			Tags:     t.Tags,
+			Metadata: t.Metadata,
+		}
+	}
+	updated.Targets = targets
+
+	// Merge per-route overrides from discovery layer.
+	if route.Timeout != nil {
+		updated.Timeout = &TimeoutConfig{Read: route.Timeout.Read, Write: route.Timeout.Write}
+	}
+	if route.RateLimit != nil {
+		updated.RateLimit = &middleware.RateLimitConfig{
+			Enabled:        true,
+			RequestsPerSec: route.RateLimit.RequestsPerSec,
+			Burst:          route.RateLimit.Burst,
+			PerClient:      route.RateLimit.PerClient,
+		}
+	}
+	if route.Cache != nil {
+		updated.Cache = &middleware.RouteCacheConfig{
+			Enabled: route.Cache.Enabled,
+			TTL:     route.Cache.TTL,
+			VaryBy:  route.Cache.VaryBy,
+		}
+	}
+	if route.Auth != nil {
+		updated.Auth = &security.RouteAuthConfig{
+			SkipAuth: route.Auth.SkipAuth,
+			Scopes:   route.Auth.Scopes,
+		}
+		if !route.Auth.SkipAuth && len(route.Auth.Scopes) > 0 {
+			updated.Auth.Enabled = true
+		}
+	}
+	if route.Metadata != nil {
+		updated.Metadata = route.Metadata
+	}
+
+	return a.rm.UpdateRoute(&updated)
 }
 
 // GetRoute returns a route by ID, converting from root to discovery type.
@@ -109,7 +187,7 @@ func discRouteToRoot(r *disc.Route) *Route {
 		}
 	}
 
-	return &Route{
+	route := &Route{
 		ID:          r.ID,
 		Path:        r.Path,
 		Methods:     r.Methods,
@@ -121,7 +199,39 @@ func discRouteToRoot(r *disc.Route) *Route {
 		Priority:    r.Priority,
 		Enabled:     r.Enabled,
 		UpdatedAt:   r.UpdatedAt,
+		Metadata:    r.Metadata,
 	}
+
+	// Map discovery per-route overrides to bastion root types.
+	if r.Timeout != nil {
+		route.Timeout = &TimeoutConfig{Read: r.Timeout.Read, Write: r.Timeout.Write}
+	}
+	if r.RateLimit != nil {
+		route.RateLimit = &middleware.RateLimitConfig{
+			Enabled:        true,
+			RequestsPerSec: r.RateLimit.RequestsPerSec,
+			Burst:          r.RateLimit.Burst,
+			PerClient:      r.RateLimit.PerClient,
+		}
+	}
+	if r.Cache != nil {
+		route.Cache = &middleware.RouteCacheConfig{
+			Enabled: r.Cache.Enabled,
+			TTL:     r.Cache.TTL,
+			VaryBy:  r.Cache.VaryBy,
+		}
+	}
+	if r.Auth != nil {
+		route.Auth = &security.RouteAuthConfig{
+			SkipAuth: r.Auth.SkipAuth,
+			Scopes:   r.Auth.Scopes,
+		}
+		if !r.Auth.SkipAuth && len(r.Auth.Scopes) > 0 {
+			route.Auth.Enabled = true
+		}
+	}
+
+	return route
 }
 
 // rootRouteToDisc converts a root Route to discovery.Route.
@@ -138,7 +248,7 @@ func rootRouteToDisc(r *Route) *disc.Route {
 		}
 	}
 
-	return &disc.Route{
+	route := &disc.Route{
 		ID:          r.ID,
 		Path:        r.Path,
 		Methods:     r.Methods,
@@ -150,5 +260,33 @@ func rootRouteToDisc(r *Route) *disc.Route {
 		Priority:    r.Priority,
 		Enabled:     r.Enabled,
 		UpdatedAt:   r.UpdatedAt,
+		Metadata:    r.Metadata,
 	}
+
+	// Round-trip per-route overrides back to discovery types.
+	if r.Timeout != nil {
+		route.Timeout = &disc.TimeoutOverride{Read: r.Timeout.Read, Write: r.Timeout.Write}
+	}
+	if r.RateLimit != nil {
+		route.RateLimit = &disc.RateLimitOverride{
+			RequestsPerSec: r.RateLimit.RequestsPerSec,
+			Burst:          r.RateLimit.Burst,
+			PerClient:      r.RateLimit.PerClient,
+		}
+	}
+	if r.Cache != nil {
+		route.Cache = &disc.CacheOverride{
+			Enabled: r.Cache.Enabled,
+			TTL:     r.Cache.TTL,
+			VaryBy:  r.Cache.VaryBy,
+		}
+	}
+	if r.Auth != nil {
+		route.Auth = &disc.AuthOverride{
+			SkipAuth: r.Auth.SkipAuth,
+			Scopes:   r.Auth.Scopes,
+		}
+	}
+
+	return route
 }

@@ -26,17 +26,24 @@ type Manager struct {
 	service    DiscoveryService
 	httpClient *http.Client
 
-	mu              sync.RWMutex
-	discoveredSvcs  map[string]*DiscoveredService
-	servicePrefixes map[string]string    // FARP-resolved prefix per service name
-	serviceLastSeen map[string]time.Time // tracks when each service was last seen in ListServices
-	stopCh          chan struct{}
-	stopOnce        sync.Once
-	started         bool // whether Start() successfully launched the loop goroutine
-	wg              sync.WaitGroup
+	mu               sync.RWMutex
+	discoveredSvcs   map[string]*DiscoveredService
+	servicePrefixes  map[string]string              // FARP-resolved prefix per service name
+	serviceManifests map[string]*farp.SchemaManifest // cached FARP manifests per service
+	serviceLastSeen  map[string]time.Time            // tracks when each service was last seen in ListServices
+	pushInstances    map[string]map[string]*ServiceInstanceInfo // aggregated push-registered instances per service
+	stopCh           chan struct{}
+	stopOnce         sync.Once
+	started          bool // whether Start() successfully launched the loop goroutine
+	wg               sync.WaitGroup
 
 	serviceListenersMu sync.RWMutex
 	serviceListeners   []ServiceChangeHook
+
+	serviceLocksMu        sync.Mutex
+	serviceLocks          map[string]*sync.Mutex
+	pushInstanceTimes     map[string]map[string]time.Time // service -> instanceID -> registered-at
+	serviceRoutesChecksums map[string]string               // cached routes_checksum per service
 }
 
 // NewManager creates a new service discovery integration.
@@ -52,15 +59,20 @@ func NewManager(
 	}
 
 	return &Manager{
-		config:          config,
-		logger:          logger,
-		rm:              rm,
-		service:         discService,
-		httpClient:      &http.Client{Timeout: fetchTimeout},
-		discoveredSvcs:  make(map[string]*DiscoveredService),
-		servicePrefixes: make(map[string]string),
-		serviceLastSeen: make(map[string]time.Time),
-		stopCh:          make(chan struct{}),
+		config:           config,
+		logger:           logger,
+		rm:               rm,
+		service:          discService,
+		httpClient:       &http.Client{Timeout: fetchTimeout},
+		discoveredSvcs:   make(map[string]*DiscoveredService),
+		servicePrefixes:  make(map[string]string),
+		serviceManifests: make(map[string]*farp.SchemaManifest),
+		serviceLastSeen:  make(map[string]time.Time),
+		pushInstances:    make(map[string]map[string]*ServiceInstanceInfo),
+		serviceLocks:          make(map[string]*sync.Mutex),
+		pushInstanceTimes:     make(map[string]map[string]time.Time),
+		serviceRoutesChecksums: make(map[string]string),
+		stopCh:                make(chan struct{}),
 	}
 }
 
@@ -76,6 +88,18 @@ func (sd *Manager) Start(ctx context.Context) error {
 	// Guard against double-start.
 	if sd.started {
 		return nil
+	}
+
+	// Validate poll interval to prevent panic in time.NewTicker.
+	if sd.config.PollInterval <= 0 {
+		sd.config.PollInterval = 30 * time.Second
+		sd.logger.Warn("discovery poll interval was zero or negative, defaulting to 30s")
+	}
+
+	if sd.config.WatchMode {
+		sd.logger.Warn("discovery WatchMode is configured but not yet implemented; falling back to polling",
+			forge.F("poll_interval", sd.config.PollInterval),
+		)
 	}
 
 	sd.logger.Info("starting gateway service discovery",
@@ -134,7 +158,35 @@ func (sd *Manager) RegisterService(ctx context.Context, info *ServiceInstanceInf
 		forge.F("port", info.Port),
 	)
 
-	sd.processService(info.Name, []*ServiceInstanceInfo{info})
+	// Aggregate all push-registered instances for this service so that
+	// processService sees every instance, not just the latest pusher.
+	// This prevents each push from overwriting route targets to a single instance.
+	now := time.Now()
+
+	sd.mu.Lock()
+	if sd.pushInstances[info.Name] == nil {
+		sd.pushInstances[info.Name] = make(map[string]*ServiceInstanceInfo)
+	}
+	sd.pushInstances[info.Name][info.ID] = info
+	sd.serviceLastSeen[info.Name] = now
+
+	// Track registration time for TTL-based eviction.
+	if sd.pushInstanceTimes == nil {
+		sd.pushInstanceTimes = make(map[string]map[string]time.Time)
+	}
+	if sd.pushInstanceTimes[info.Name] == nil {
+		sd.pushInstanceTimes[info.Name] = make(map[string]time.Time)
+	}
+	sd.pushInstanceTimes[info.Name][info.ID] = now
+
+	allInstances := make([]*ServiceInstanceInfo, 0, len(sd.pushInstances[info.Name]))
+	for _, inst := range sd.pushInstances[info.Name] {
+		allInstances = append(allInstances, inst)
+	}
+	sd.mu.Unlock()
+
+	sd.processService(info.Name, allInstances)
+
 	sd.emitServiceChange(info.Name, true)
 
 	return nil
@@ -148,6 +200,9 @@ func (sd *Manager) DeregisterService(ctx context.Context, serviceName string) {
 
 	sd.mu.Lock()
 	delete(sd.discoveredSvcs, serviceName)
+	delete(sd.pushInstances, serviceName)
+	delete(sd.pushInstanceTimes, serviceName)
+	delete(sd.serviceManifests, serviceName)
 	sd.mu.Unlock()
 
 	sd.rm.RemoveByServiceName(serviceName)
@@ -208,13 +263,75 @@ func (sd *Manager) DiscoveredServices() []*DiscoveredService {
 	return services
 }
 
+// SetManifest stores a pre-fetched manifest for a service, so that
+// processService uses it instead of making an HTTP fetch. This supports
+// inline manifests in the FARP v1 push registration protocol.
+func (sd *Manager) SetManifest(serviceName string, manifest *farp.SchemaManifest) {
+	sd.mu.Lock()
+	sd.serviceManifests[serviceName] = manifest
+	sd.mu.Unlock()
+}
+
+// GetInstanceChecksum returns the routes_checksum and schema count for a
+// service instance. Used by the heartbeat handler for reconciliation.
+func (sd *Manager) GetInstanceChecksum(instanceID string) (string, int) {
+	sd.mu.RLock()
+	defer sd.mu.RUnlock()
+
+	for svcName, instances := range sd.pushInstances {
+		for id := range instances {
+			if id == instanceID {
+				if manifest := sd.serviceManifests[svcName]; manifest != nil {
+					return manifest.RoutesChecksum, len(manifest.Schemas)
+				}
+				return "", 0
+			}
+		}
+	}
+	return "", 0
+}
+
+// ServiceManifest returns the cached FARP manifest for a specific service.
+func (sd *Manager) ServiceManifest(name string) *farp.SchemaManifest {
+	sd.mu.RLock()
+	defer sd.mu.RUnlock()
+	return sd.serviceManifests[name]
+}
+
+// ServiceManifests returns a copy of all cached FARP manifests.
+func (sd *Manager) ServiceManifests() map[string]*farp.SchemaManifest {
+	sd.mu.RLock()
+	defer sd.mu.RUnlock()
+
+	result := make(map[string]*farp.SchemaManifest, len(sd.serviceManifests))
+	for k, v := range sd.serviceManifests {
+		result[k] = v
+	}
+
+	return result
+}
+
 // OnServiceChange registers a callback that fires when a service is
 // registered or deregistered. This allows dependent components (e.g.,
 // the OpenAPI aggregator) to react immediately to topology changes.
-func (sd *Manager) OnServiceChange(fn ServiceChangeHook) {
+// Returns an unsubscribe function that removes the listener.
+func (sd *Manager) OnServiceChange(fn ServiceChangeHook) func() {
 	sd.serviceListenersMu.Lock()
 	defer sd.serviceListenersMu.Unlock()
+
+	idx := len(sd.serviceListeners)
 	sd.serviceListeners = append(sd.serviceListeners, fn)
+
+	return func() {
+		sd.serviceListenersMu.Lock()
+		defer sd.serviceListenersMu.Unlock()
+
+		if idx < len(sd.serviceListeners) {
+			// Nil out the slot to avoid shifting indices and breaking other
+			// unsubscribe closures. emitServiceChange skips nil entries.
+			sd.serviceListeners[idx] = nil
+		}
+	}
 }
 
 func (sd *Manager) emitServiceChange(serviceName string, registered bool) {
@@ -224,6 +341,9 @@ func (sd *Manager) emitServiceChange(serviceName string, registered bool) {
 	sd.serviceListenersMu.RUnlock()
 
 	for _, fn := range listeners {
+		if fn == nil {
+			continue // unsubscribed listener
+		}
 		go func(hook ServiceChangeHook) {
 			defer func() {
 				if r := recover(); r != nil {
@@ -353,6 +473,9 @@ func (sd *Manager) refresh(ctx context.Context) error {
 		}
 	}
 
+	// Evict push-registered instances that have exceeded their TTL.
+	sd.evictStalePushInstances(now)
+
 	// Remove routes for services that are no longer listed at all.
 	// Apply a grace period to handle transient discovery backend issues.
 	sd.mu.Lock()
@@ -366,6 +489,14 @@ func (sd *Manager) refresh(ctx context.Context) error {
 
 	for name := range sd.discoveredSvcs {
 		if !currentServices[name] {
+			// Push-registered services with active instances are managed by
+			// TTL eviction (evictStalePushInstances), not by the poll cycle.
+			// Skip them here so they don't get removed just because they
+			// don't appear in the pull-based ListServices.
+			if instances, hasPush := sd.pushInstances[name]; hasPush && len(instances) > 0 {
+				continue
+			}
+
 			// Check grace period: only remove if the service has been absent
 			// for longer than the configured grace period.
 			lastSeen, ok := sd.serviceLastSeen[name]
@@ -386,10 +517,23 @@ func (sd *Manager) refresh(ctx context.Context) error {
 			removedServices = append(removedServices, name)
 			delete(sd.discoveredSvcs, name)
 			delete(sd.serviceLastSeen, name)
+			delete(sd.pushInstances, name)
+			delete(sd.servicePrefixes, name)
+			delete(sd.serviceManifests, name)
 		}
 	}
 
 	sd.mu.Unlock()
+
+	// Clean up per-service locks for removed services to prevent unbounded
+	// map growth in high-churn environments.
+	if len(removedServices) > 0 {
+		sd.serviceLocksMu.Lock()
+		for _, name := range removedServices {
+			delete(sd.serviceLocks, name)
+		}
+		sd.serviceLocksMu.Unlock()
+	}
 
 	// Emit service change events outside the lock
 	for _, name := range removedServices {
@@ -410,17 +554,23 @@ func (sd *Manager) markTargetsUnhealthy(serviceName string) {
 			continue
 		}
 
+		// Copy targets to avoid mutating live route pointers.
+		newTargets := make([]*Target, len(route.Targets))
 		modified := false
-		for _, t := range route.Targets {
-			if t.Healthy {
-				t.Healthy = false
+		for i, t := range route.Targets {
+			copied := *t
+			if copied.Healthy {
+				copied.Healthy = false
 				modified = true
 			}
+			newTargets[i] = &copied
 		}
 
 		if modified {
-			route.UpdatedAt = time.Now()
-			if err := sd.rm.UpdateRoute(route); err != nil {
+			updated := *route
+			updated.Targets = newTargets
+			updated.UpdatedAt = time.Now()
+			if err := sd.rm.UpdateRoute(&updated); err != nil {
 				sd.logger.Warn("failed to mark route targets unhealthy",
 					forge.F("route_id", route.ID),
 					forge.F("error", err),
@@ -440,10 +590,128 @@ func (sd *Manager) markTargetsUnhealthy(serviceName string) {
 	)
 }
 
+// evictStalePushInstances removes push-registered instances that have
+// exceeded their TTL without re-registering. If a service has no remaining
+// instances after eviction, it is fully deregistered.
+func (sd *Manager) evictStalePushInstances(now time.Time) {
+	ttl := sd.config.PushInstanceTTL
+	if ttl <= 0 {
+		return
+	}
+
+	sd.mu.Lock()
+	var emptyServices []string
+
+	for svcName, times := range sd.pushInstanceTimes {
+		for instID, registeredAt := range times {
+			if now.Sub(registeredAt) > ttl {
+				sd.logger.Info("evicting stale push-registered instance",
+					forge.F("service", svcName),
+					forge.F("instance", instID),
+					forge.F("ttl", ttl),
+				)
+				delete(times, instID)
+				if instances, ok := sd.pushInstances[svcName]; ok {
+					delete(instances, instID)
+				}
+			}
+		}
+
+		// If all instances for this service were evicted, mark for removal.
+		if len(sd.pushInstances[svcName]) == 0 {
+			emptyServices = append(emptyServices, svcName)
+		}
+	}
+
+	// Clean up fully evicted services.
+	for _, svcName := range emptyServices {
+		delete(sd.pushInstances, svcName)
+		delete(sd.pushInstanceTimes, svcName)
+		delete(sd.discoveredSvcs, svcName)
+		delete(sd.servicePrefixes, svcName)
+		delete(sd.serviceManifests, svcName)
+		delete(sd.serviceLastSeen, svcName)
+	}
+
+	sd.mu.Unlock()
+
+	// Remove routes and emit events outside the lock.
+	for _, svcName := range emptyServices {
+		sd.logger.Info("all push instances expired, removing service",
+			forge.F("service", svcName),
+		)
+		sd.rm.RemoveByServiceName(svcName)
+		sd.emitServiceChange(svcName, false)
+	}
+}
+
+// hasExistingFARPRoutes returns true if the route table already contains
+// FARP-sourced routes for the given service.
+func (sd *Manager) hasExistingFARPRoutes(serviceName string) bool {
+	for _, route := range sd.rm.ListRoutes() {
+		if route.ServiceName == serviceName && route.Source == SourceFARP {
+			return true
+		}
+	}
+	return false
+}
+
+// refreshTargets updates only the targets on existing FARP routes for a
+// service without changing paths, protocols, or other routing fields. This
+// is used when the manifest fetch fails but existing routes should be kept.
+func (sd *Manager) refreshTargets(serviceName string, targets []*Target) {
+	for _, route := range sd.rm.ListRoutes() {
+		if route.ServiceName != serviceName || route.Source != SourceFARP {
+			continue
+		}
+
+		// Copy to avoid mutating the live route pointer.
+		updated := *route
+		updated.Targets = targets
+		updated.UpdatedAt = time.Now()
+
+		if err := sd.rm.UpdateRoute(&updated); err != nil {
+			sd.logger.Warn("failed to refresh targets on existing route",
+				forge.F("route_id", route.ID),
+				forge.F("error", err),
+			)
+		}
+	}
+}
+
+// serviceLock returns or creates a per-service mutex. This serializes
+// concurrent processService calls for the same service (poll vs push)
+// without blocking unrelated services.
+func (sd *Manager) serviceLock(name string) *sync.Mutex {
+	sd.serviceLocksMu.Lock()
+	defer sd.serviceLocksMu.Unlock()
+
+	if sd.serviceLocks == nil {
+		sd.serviceLocks = make(map[string]*sync.Mutex)
+	}
+
+	mu, ok := sd.serviceLocks[name]
+	if !ok {
+		mu = &sync.Mutex{}
+		sd.serviceLocks[name] = mu
+	}
+
+	return mu
+}
+
 func (sd *Manager) processService(name string, instances []*ServiceInstanceInfo) {
 	if len(instances) == 0 {
 		return
 	}
+
+	// Serialize concurrent calls for the same service. The poll loop and
+	// push registration handler can both call processService concurrently.
+	// Without this lock, their route add/update/remove operations interleave,
+	// and the stale-route cleanup from one call can remove routes that the
+	// other call just added — briefly leaving the route table empty.
+	svcMu := sd.serviceLock(name)
+	svcMu.Lock()
+	defer svcMu.Unlock()
 
 	// Build targets from instances
 	targets := make([]*Target, 0, len(instances))
@@ -503,6 +771,12 @@ func (sd *Manager) processService(name string, instances []*ServiceInstanceInfo)
 					schemaTypes = append(schemaTypes, "openapi")
 				}
 			}
+		} else if sd.hasExistingFARPRoutes(name) {
+			// Manifest fetch failed but we have existing FARP routes.
+			// Only refresh targets (new instances, health changes) without
+			// altering paths or other routing fields that came from the manifest.
+			sd.refreshTargets(name, targets)
+			return
 		}
 
 		// Extract capabilities from FARP metadata
@@ -549,19 +823,36 @@ func (sd *Manager) processService(name string, instances []*ServiceInstanceInfo)
 	for _, route := range routes {
 		existing, ok := sd.rm.GetRoute(route.ID)
 		if ok {
-			// Propagate all fields from the freshly generated route so that
-			// changes in the FARP manifest (path, methods, protocol, etc.)
-			// are reflected without requiring a gateway restart.
-			existing.Path = route.Path
-			existing.Methods = route.Methods
-			existing.Targets = targets
-			existing.StripPrefix = route.StripPrefix
-			existing.Protocol = route.Protocol
-			existing.Priority = route.Priority
-			existing.Enabled = route.Enabled
-			existing.UpdatedAt = time.Now()
+			// Create a shallow copy so we never mutate a live route pointer
+			// that concurrent MatchRoute calls may be reading.
+			updated := *existing
+			updated.Path = route.Path
+			updated.Methods = route.Methods
+			updated.Targets = targets
+			updated.StripPrefix = route.StripPrefix
+			updated.Protocol = route.Protocol
+			updated.Priority = route.Priority
+			updated.Enabled = route.Enabled
+			updated.UpdatedAt = time.Now()
 
-			if err := sd.rm.UpdateRoute(existing); err != nil {
+			// Propagate per-route overrides from FARP RouteDescriptor.
+			if route.Timeout != nil {
+				updated.Timeout = route.Timeout
+			}
+			if route.RateLimit != nil {
+				updated.RateLimit = route.RateLimit
+			}
+			if route.Cache != nil {
+				updated.Cache = route.Cache
+			}
+			if route.Auth != nil {
+				updated.Auth = route.Auth
+			}
+			if route.Metadata != nil {
+				updated.Metadata = route.Metadata
+			}
+
+			if err := sd.rm.UpdateRoute(&updated); err != nil {
 				sd.logger.Warn("failed to update discovered route",
 					forge.F("route_id", route.ID),
 					forge.F("error", err),
@@ -613,6 +904,30 @@ func (sd *Manager) processService(name string, instances []*ServiceInstanceInfo)
 }
 
 func (sd *Manager) routesFromFARP(serviceName string, instance *ServiceInstanceInfo, targets []*Target) []*Route {
+	// 0. Check for a pre-set manifest (from inline push registration).
+	sd.mu.RLock()
+	cachedManifest := sd.serviceManifests[serviceName]
+	sd.mu.RUnlock()
+
+	if cachedManifest != nil {
+		routes := sd.routesFromManifest(serviceName, cachedManifest, targets)
+		if routes == nil {
+			// Fast-path: checksum unchanged, keep existing routes.
+			sd.enrichMetadataFromManifest(instance, cachedManifest)
+			return sd.existingFARPRoutes(serviceName)
+		}
+		if len(routes) > 0 {
+			sd.enrichMetadataFromManifest(instance, cachedManifest)
+			if sd.logger != nil {
+				sd.logger.Debug("bastion: routes from cached/inline FARP manifest",
+					forge.F("service", serviceName),
+					forge.F("routes", len(routes)),
+				)
+			}
+			return routes
+		}
+	}
+
 	// 1. Try fetching the full FARP manifest for rich routing metadata.
 	if manifestURL, ok := instance.Metadata["farp.manifest"]; ok && manifestURL != "" && sd.httpClient != nil {
 		timeout := sd.httpClient.Timeout
@@ -625,7 +940,17 @@ func (sd *Manager) routesFromFARP(serviceName string, instance *ServiceInstanceI
 
 		manifest, err := sd.fetchManifest(ctx, manifestURL)
 		if err == nil && manifest != nil {
+			// Cache the manifest for downstream consumers (OpenAPI/AsyncAPI aggregators).
+			sd.mu.Lock()
+			sd.serviceManifests[serviceName] = manifest
+			sd.mu.Unlock()
+
 			routes := sd.routesFromManifest(serviceName, manifest, targets)
+			if routes == nil {
+				// Fast-path: routes_checksum unchanged, keep existing routes.
+				sd.enrichMetadataFromManifest(instance, manifest)
+				return sd.existingFARPRoutes(serviceName)
+			}
 			if len(routes) > 0 {
 				// Enrich instance metadata with manifest endpoint URLs so
 				// downstream consumers (e.g. OpenAPI aggregator) can find
@@ -657,6 +982,19 @@ func (sd *Manager) routesFromFARP(serviceName string, instance *ServiceInstanceI
 					)
 				}
 			}
+
+			// If we already have FARP routes for this service, don't fall
+			// back to metadata-based routing — the fallback uses BuildPrefix
+			// which may compute a different prefix than the manifest's
+			// routing strategy (e.g., root-mounted services would get
+			// "/service-name" instead of ""). Return nil to signal
+			// processService to keep existing routes and only refresh targets.
+			if sd.hasExistingFARPRoutes(serviceName) {
+				sd.logger.Debug("bastion: keeping existing routes after manifest fetch failure",
+					forge.F("service", serviceName),
+				)
+				return nil
+			}
 		}
 	}
 
@@ -669,7 +1007,12 @@ func (sd *Manager) routesFromFARP(serviceName string, instance *ServiceInstanceI
 // when the full FARP manifest is unavailable.
 func (sd *Manager) routesFromFARPMetadata(serviceName string, instance *ServiceInstanceInfo, targets []*Target) []*Route {
 	var routes []*Route
-	prefix := sd.BuildPrefix(serviceName)
+	// Use GetServicePrefix which checks the cached FARP prefix first (set by
+	// a previous successful manifest fetch), then PrefixOverrides, then
+	// BuildPrefix. This prevents prefix regression when the manifest is
+	// temporarily unavailable — e.g., a root-mounted service would keep ""
+	// instead of reverting to "/service-name".
+	prefix := sd.GetServicePrefix(serviceName)
 
 	if openapiEndpoint, ok := instance.Metadata["farp.openapi"]; ok && openapiEndpoint != "" {
 		route := &Route{
@@ -767,6 +1110,22 @@ func (sd *Manager) routesFromManifest(serviceName string, manifest *farp.SchemaM
 	sd.servicePrefixes[serviceName] = prefix
 	sd.mu.Unlock()
 
+	// Fast-path: if routes_checksum hasn't changed, skip route regeneration
+	// to avoid unnecessary route churn and potential 404s during remounting.
+	if manifest.RoutesChecksum != "" {
+		sd.mu.RLock()
+		prevChecksum := sd.serviceRoutesChecksums[serviceName]
+		sd.mu.RUnlock()
+
+		if prevChecksum == manifest.RoutesChecksum {
+			sd.logger.Debug("routes checksum unchanged, skipping route regeneration",
+				forge.F("service", serviceName),
+				forge.F("checksum", manifest.RoutesChecksum),
+			)
+			return nil // nil signals caller to keep existing routes
+		}
+	}
+
 	// Determine priority (use manifest's if set, otherwise default 20).
 	priority := manifest.Routing.Priority
 	if priority == 0 {
@@ -790,6 +1149,16 @@ func (sd *Manager) routesFromManifest(serviceName string, manifest *farp.SchemaM
 
 			t.Metadata["health_check_path"] = manifest.Endpoints.Health
 		}
+	}
+
+	// FARP v1.1.0: If the manifest has a pre-computed route table, use it
+	// directly instead of generating routes from schema descriptors. This
+	// bypasses schema parsing for faster route registration.
+	if len(manifest.RouteTable) > 0 {
+		routes := sd.routesFromRouteTable(serviceName, manifest.RouteTable, prefix, targets, priority, stripPrefix)
+		applyManifestAuth(manifest, routes, prefix)
+		sd.storeRoutesChecksum(serviceName, manifest.RoutesChecksum)
+		return routes
 	}
 
 	var routes []*Route
@@ -857,6 +1226,40 @@ func (sd *Manager) routesFromManifest(serviceName string, manifest *farp.SchemaM
 				Enabled:     true,
 			}
 			routes = append(routes, route)
+
+		case farp.SchemaTypeThrift, farp.SchemaTypeAvro:
+			// Binary protocols — treat like gRPC with a catch-all route.
+			route := &Route{
+				ID:          fmt.Sprintf("farp-%s-%s", serviceName, schema.Type),
+				Path:        prefix + "/*",
+				Targets:     targets,
+				StripPrefix: stripPrefix,
+				Protocol:    ProtocolGRPC,
+				Source:      SourceFARP,
+				ServiceName: serviceName,
+				Priority:    priority,
+				Enabled:     true,
+				Metadata:    map[string]any{"schema_type": string(schema.Type)},
+			}
+			routes = append(routes, route)
+
+		case farp.SchemaTypeCustom:
+			if !hasHTTP {
+				route := &Route{
+					ID:          fmt.Sprintf("farp-%s-custom", serviceName),
+					Path:        prefix + "/*",
+					Targets:     targets,
+					StripPrefix: stripPrefix,
+					Protocol:    ProtocolHTTP,
+					Source:      SourceFARP,
+					ServiceName: serviceName,
+					Priority:    priority,
+					Enabled:     true,
+					Metadata:    map[string]any{"schema_type": "custom"},
+				}
+				routes = append(routes, route)
+				hasHTTP = true
+			}
 		}
 	}
 
@@ -924,7 +1327,156 @@ func (sd *Manager) routesFromManifest(serviceName string, manifest *farp.SchemaM
 		}
 	}
 
+	applyManifestAuth(manifest, routes, prefix)
+	sd.storeRoutesChecksum(serviceName, manifest.RoutesChecksum)
 	return routes
+}
+
+// existingFARPRoutes returns the current FARP routes for a service.
+// Used by the checksum fast-path to return existing routes when unchanged.
+func (sd *Manager) existingFARPRoutes(serviceName string) []*Route {
+	var routes []*Route
+	for _, r := range sd.rm.ListRoutes() {
+		if r.ServiceName == serviceName && r.Source == SourceFARP {
+			routes = append(routes, r)
+		}
+	}
+	return routes
+}
+
+// storeRoutesChecksum caches the routes checksum for fast-path comparison.
+func (sd *Manager) storeRoutesChecksum(serviceName, checksum string) {
+	if checksum != "" {
+		sd.mu.Lock()
+		sd.serviceRoutesChecksums[serviceName] = checksum
+		sd.mu.Unlock()
+	}
+}
+
+// applyManifestAuth propagates manifest-level Auth config to routes.
+// Routes that already have per-route auth (e.g., from RouteDescriptor.Public)
+// are left unchanged.
+func applyManifestAuth(manifest *farp.SchemaManifest, routes []*Route, prefix string) {
+	// Apply required scopes from manifest auth config.
+	if len(manifest.Auth.RequiredScopes) > 0 {
+		for _, route := range routes {
+			if route.Auth == nil {
+				route.Auth = &AuthOverride{Scopes: manifest.Auth.RequiredScopes}
+			}
+		}
+	}
+
+	// Mark routes matching PublicRoutes as skip-auth.
+	if len(manifest.Auth.PublicRoutes) > 0 {
+		publicPaths := make(map[string]bool, len(manifest.Auth.PublicRoutes))
+		for _, p := range manifest.Auth.PublicRoutes {
+			publicPaths[p] = true
+		}
+		for _, route := range routes {
+			routePath := strings.TrimPrefix(route.Path, prefix)
+			if publicPaths[routePath] {
+				route.Auth = &AuthOverride{SkipAuth: true}
+			}
+		}
+	}
+}
+
+// routesFromRouteTable converts a FARP RouteTable (v1.1.0) into bastion routes.
+// Each RouteDescriptor becomes a separate bastion route with the appropriate protocol.
+func (sd *Manager) routesFromRouteTable(serviceName string, table []farp.RouteDescriptor, prefix string, targets []*Target, priority int, stripPrefix bool) []*Route {
+	routes := make([]*Route, 0, len(table))
+
+	for i, rd := range table {
+		protocol := mapFARPProtocol(rd.Protocol)
+		path := prefix + rd.Path
+
+		route := &Route{
+			ID:          fmt.Sprintf("farp-%s-rt-%d", serviceName, i),
+			Path:        path,
+			Methods:     rd.Methods,
+			Targets:     targets,
+			StripPrefix: stripPrefix,
+			Protocol:    protocol,
+			Source:      SourceFARP,
+			ServiceName: serviceName,
+			Priority:    priority,
+			Enabled:     true,
+		}
+
+		mapRouteDescriptorOverrides(rd, route)
+		routes = append(routes, route)
+	}
+
+	return routes
+}
+
+// mapRouteDescriptorOverrides applies FARP RouteDescriptor fields
+// (timeout, rate_limit, cache, public, metadata) to a discovery Route.
+func mapRouteDescriptorOverrides(rd farp.RouteDescriptor, route *Route) {
+	// Timeout
+	if rd.Timeout != "" {
+		if d, err := time.ParseDuration(rd.Timeout); err == nil {
+			route.Timeout = &TimeoutOverride{Read: d, Write: d}
+		}
+	}
+
+	// Rate limit
+	if rd.RateLimit != nil && rd.RateLimit.RequestsPerSecond > 0 {
+		route.RateLimit = &RateLimitOverride{
+			RequestsPerSec: float64(rd.RateLimit.RequestsPerSecond),
+			Burst:          rd.RateLimit.BurstSize,
+			PerClient:      rd.RateLimit.Key == farp.RateLimitKeyIP || rd.RateLimit.Key == farp.RateLimitKeyUser,
+		}
+	}
+
+	// Cache
+	if rd.Cache != nil && rd.Cache.Enabled {
+		co := &CacheOverride{Enabled: true, VaryBy: rd.Cache.VaryHeaders}
+		if rd.Cache.TTL != "" {
+			if d, err := time.ParseDuration(rd.Cache.TTL); err == nil {
+				co.TTL = d
+			}
+		}
+		route.Cache = co
+	}
+
+	// Public -> skip auth
+	if rd.Public {
+		route.Auth = &AuthOverride{SkipAuth: true}
+	}
+
+	// Metadata: operation_id, deprecated, and user metadata
+	meta := make(map[string]any)
+	if rd.OperationID != "" {
+		meta["operation_id"] = rd.OperationID
+	}
+	if rd.Deprecated {
+		meta["deprecated"] = true
+	}
+	for k, v := range rd.Metadata {
+		meta[k] = v
+	}
+	if len(meta) > 0 {
+		route.Metadata = meta
+	}
+}
+
+// mapFARPProtocol maps a FARP RouteDescriptor protocol string to a bastion RouteProtocol.
+func mapFARPProtocol(protocol string) RouteProtocol {
+	switch strings.ToLower(protocol) {
+	case "rest", "http", "":
+		return ProtocolHTTP
+	case "websocket", "ws":
+		return ProtocolWebSocket
+	case "sse":
+		return ProtocolSSE
+	case "grpc":
+		return ProtocolGRPC
+	case "graphql":
+		return ProtocolGraphQL
+	default:
+		return ProtocolHTTP
+	}
 }
 
 // enrichMetadataFromManifest propagates the manifest's endpoint URLs into
@@ -1011,6 +1563,9 @@ func (sd *Manager) prefixFromStrategy(serviceName string, manifest *farp.SchemaM
 	case farp.MountStrategySubdomain:
 		// Subdomain strategy is not directly supported in path-based routing;
 		// fall back to the default prefix.
+		sd.logger.Warn("subdomain routing strategy is not supported, falling back to path-based prefix",
+			forge.F("service", serviceName),
+		)
 		return sd.BuildPrefix(serviceName)
 
 	default:

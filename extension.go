@@ -39,11 +39,12 @@ type Gateway struct {
 	gwMetrics   *GatewayMetrics
 	disc        *ServiceDiscovery
 
-	// Security / caching / TLS / OpenAPI
+	// Security / caching / TLS / OpenAPI / AsyncAPI
 	gwAuth     *GatewayAuth
 	respCache  *ResponseCache
 	tlsManager *TLSManager
 	openAPI    *OpenAPIAggregator
+	asyncAPI   *AsyncAPIAggregator
 
 	// Admin handler registration (set by extension/ to avoid circular import)
 	adminHandlerSetup func(gw *Gateway, router forge.Router)
@@ -188,6 +189,12 @@ func (e *Gateway) Start(ctx context.Context) error {
 		e.openAPI.Start(ctx)
 	}
 
+	// Initialize and start AsyncAPI aggregator
+	if e.config.AsyncAPI.Enabled {
+		e.asyncAPI = NewAsyncAPIAggregator(e.config.AsyncAPI, e.Logger(), e.disc)
+		e.asyncAPI.Start(ctx)
+	}
+
 	// Start health monitor
 	e.healthMon.Start(ctx)
 
@@ -294,6 +301,9 @@ func (e *Gateway) RateLimiter() *RateLimiter { return e.rateLimiter }
 
 // OpenAPI returns the OpenAPI aggregator.
 func (e *Gateway) OpenAPI() *OpenAPIAggregator { return e.openAPI }
+
+// AsyncAPI returns the AsyncAPI aggregator.
+func (e *Gateway) AsyncAPI() *AsyncAPIAggregator { return e.asyncAPI }
 
 // Discovery returns the service discovery integration.
 func (e *Gateway) Discovery() *ServiceDiscovery { return e.disc }
@@ -505,6 +515,20 @@ func (e *Gateway) registerRoutes() {
 				mustRegister(router.GET(specBase+e.config.OpenAPI.UIPath,
 					e.openAPI.SwaggerUIHandler(gwSpecPath), forge.WithSchemaExclude()))
 			}
+		}
+	}
+
+	// Register AsyncAPI aggregation endpoints
+	if e.asyncAPI != nil {
+		specBase := e.config.Dashboard.BasePath
+		fullAsyncSpecPath := specBase + e.config.AsyncAPI.Path
+
+		mustRegister(router.GET(fullAsyncSpecPath, e.asyncAPI.HandleMergedSpec, forge.WithSchemaExclude()))
+
+		// Root-level AsyncAPI endpoint
+		if e.config.OpenAPI.EnableRootDocs {
+			rootAsyncSpecPath := e.config.AsyncAPI.Path // "/asyncapi.json"
+			mustRegister(router.GET(rootAsyncSpecPath, e.asyncAPI.HandleMergedSpec, forge.WithSchemaExclude()))
 		}
 	}
 

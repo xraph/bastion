@@ -97,6 +97,11 @@ type Config struct {
 	// OpenAPI configures the aggregated OpenAPI spec from all upstream services
 	OpenAPI OpenAPIConfig `json:"openapi" yaml:"openapi"`
 
+	// --- AsyncAPI ---
+
+	// AsyncAPI configures the aggregated AsyncAPI spec from all upstream services
+	AsyncAPI AsyncAPIConfig `json:"asyncapi" yaml:"asyncapi"`
+
 	// --- Admin ---
 
 	// Dashboard configures the admin UI
@@ -248,6 +253,11 @@ type DiscoveryConfig = disc.DiscoveryConfig
 // Canonical definition: discovery.ServiceFilter
 type ServiceFilter = disc.ServiceFilter
 
+// AsyncAPIConfig holds AsyncAPI aggregation settings.
+//
+// Canonical definition: discovery.AsyncAPIConfig
+type AsyncAPIConfig = disc.AsyncAPIConfig
+
 // MetricsConfig holds metrics settings.
 // The canonical definition lives in the observability subpackage.
 type MetricsConfig = observability.MetricsConfig
@@ -390,7 +400,8 @@ func DefaultConfig() Config {
 			IncludeBody:    false,
 			MaxBodyLogSize: 4096,
 		},
-		OpenAPI: DefaultOpenAPIConfig(),
+		OpenAPI:  DefaultOpenAPIConfig(),
+		AsyncAPI: DefaultAsyncAPIConfig(),
 		Dashboard: DashboardConfig{
 			Enabled:  true,
 			BasePath: "/gateway",
@@ -513,6 +524,13 @@ func WithDiscoveryWatchMode(enabled bool) ConfigOption {
 	return func(c *Config) { c.Discovery.WatchMode = enabled }
 }
 
+// WithDiscoveryPushInstanceTTL sets the TTL for push-registered service instances.
+// Instances that do not re-register within this duration are automatically evicted.
+// Set to 0 to disable TTL (default).
+func WithDiscoveryPushInstanceTTL(ttl time.Duration) ConfigOption {
+	return func(c *Config) { c.Discovery.PushInstanceTTL = ttl }
+}
+
 // WithDiscoveryAutoPrefix sets whether discovered services get automatic path prefixes.
 func WithDiscoveryAutoPrefix(enabled bool) ConfigOption {
 	return func(c *Config) { c.Discovery.AutoPrefix = enabled }
@@ -580,6 +598,18 @@ func WithOpenAPIGatewayDocs(enabled bool) ConfigOption {
 	return func(c *Config) { c.OpenAPI.EnableGatewayDocs = enabled }
 }
 
+// WithOpenAPIDisableServiceTags disables automatic per-service tag creation
+// and per-operation tag injection in the merged OpenAPI spec.
+func WithOpenAPIDisableServiceTags(disabled bool) ConfigOption {
+	return func(c *Config) { c.OpenAPI.DisableServiceTags = disabled }
+}
+
+// WithOpenAPIServiceTagOnly replaces all upstream operation tags with just
+// the service-name tag. Ignored when DisableServiceTags is true.
+func WithOpenAPIServiceTagOnly(enabled bool) ConfigOption {
+	return func(c *Config) { c.OpenAPI.ServiceTagOnly = enabled }
+}
+
 // WithExtensionFilter adds an extension path filter for a specific service.
 // Extension paths matching knownExtensions but not in allowedExtensions will
 // be excluded from the OpenAPI spec and optionally blocked at the proxy level.
@@ -587,6 +617,16 @@ func WithExtensionFilter(filter ExtensionPathFilter) ConfigOption {
 	return func(c *Config) {
 		c.OpenAPI.ExtensionFilters = append(c.OpenAPI.ExtensionFilters, filter)
 	}
+}
+
+// WithAsyncAPI sets the AsyncAPI aggregation configuration.
+func WithAsyncAPI(a AsyncAPIConfig) ConfigOption {
+	return func(c *Config) { c.AsyncAPI = a }
+}
+
+// WithAsyncAPIEnabled enables/disables AsyncAPI aggregation.
+func WithAsyncAPIEnabled(enabled bool) ConfigOption {
+	return func(c *Config) { c.AsyncAPI.Enabled = enabled }
 }
 
 // WithDashboard sets the dashboard configuration.

@@ -156,6 +156,12 @@ func (e *Extension) Register(app forge.App) error {
 		mustReg(router.POST(adminBase+"/discovery/register", h.HandleRegisterService))
 		mustReg(router.DELETE(adminBase+"/discovery/services/:name", h.HandleDeregisterService))
 
+		// FARP v1 push protocol endpoints (spec section 17.4).
+		// Services POST to these endpoints to push-register with the gateway.
+		mustReg(router.POST("/_farp/v1/register", h.HandleFARPRegister, forge.WithSchemaExclude()))
+		mustReg(router.PUT("/_farp/v1/heartbeat/:id", h.HandleFARPHeartbeat, forge.WithSchemaExclude()))
+		mustReg(router.DELETE("/_farp/v1/deregister/:id", h.HandleFARPDeregister, forge.WithSchemaExclude()))
+
 		if hub != nil {
 			mustReg(router.GET(cfg.Dashboard.BasePath+"/ws", h.HandleWebSocket))
 		}
@@ -167,7 +173,9 @@ func (e *Extension) Register(app forge.App) error {
 func (e *Extension) Start(ctx context.Context) error {
 	app := e.gateway().App()
 
-	// Auto-wire discovery service if available
+	// Auto-wire discovery service if available.
+	// Prefer FARP ServiceDiscovery (via the discovery extension's backend)
+	// for richer integration, falling back to the discovery.Service adapter.
 	if app != nil {
 		discSvc, err := forge.Inject[*discovery.Service](app.Container())
 		if err != nil {
@@ -175,6 +183,7 @@ func (e *Extension) Start(ctx context.Context) error {
 				forge.F("error", err),
 			)
 		} else if discSvc != nil {
+			// Use the FARP-aware adapter that wraps forge's backend as FARP ServiceDiscovery
 			e.gw.Logger().Info("bastion: discovery service wired from DI container")
 			e.gw.SetDiscoveryService(NewDiscoveryAdapter(discSvc))
 		} else {

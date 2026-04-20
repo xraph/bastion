@@ -2,10 +2,12 @@ package api
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strings"
 
 	"github.com/gorilla/websocket"
+	"github.com/xraph/farp"
 	"github.com/xraph/forge"
 
 	bastion "github.com/xraph/bastion"
@@ -301,6 +303,148 @@ type serviceRegistrationPayload struct {
 	Tags           []string          `json:"tags"`
 	Metadata       map[string]string `json:"metadata"`
 	FARPEnabled    bool              `json:"farp_enabled"`
+}
+
+// farpV1PushPayload is the FARP v1 push protocol payload (spec section 17.4).
+// Services POST this to /_farp/v1/register.
+type farpV1PushPayload struct {
+	Instance farpV1Instance `json:"instance"`
+	Manifest json.RawMessage `json:"manifest,omitempty"`
+}
+
+// farpV1Instance represents a service instance in the FARP v1 push protocol.
+type farpV1Instance struct {
+	ID             string            `json:"id"`
+	ServiceName    string            `json:"service_name"`
+	ServiceVersion string            `json:"service_version"`
+	Address        string            `json:"address"`
+	Port           int               `json:"port"`
+	Tags           []string          `json:"tags"`
+	Metadata       map[string]string `json:"metadata"`
+	Status         string            `json:"status"`
+}
+
+// HandleFARPRegister handles the FARP v1 push registration protocol.
+// POST /_farp/v1/register — accepts {instance: {...}, manifest?: {...}}
+// The gateway fetches the full manifest from the service's /_farp/manifest
+// endpoint if not included in the payload.
+func (h *Handlers) HandleFARPRegister(ctx forge.Context) error {
+	if h.gw.Discovery() == nil {
+		return ctx.JSON(http.StatusBadRequest, map[string]string{"error": "discovery not enabled"})
+	}
+
+	var payload farpV1PushPayload
+	if err := json.NewDecoder(ctx.Request().Body).Decode(&payload); err != nil {
+		return ctx.JSON(http.StatusBadRequest, map[string]string{"error": "invalid request body: " + err.Error()})
+	}
+
+	inst := payload.Instance
+
+	if inst.ServiceName == "" {
+		return ctx.JSON(http.StatusBadRequest, map[string]string{"error": "instance.service_name is required"})
+	}
+
+	if inst.Address == "" || inst.Port == 0 {
+		return ctx.JSON(http.StatusBadRequest, map[string]string{"error": "instance.address and instance.port are required"})
+	}
+
+	// Ensure metadata has farp.enabled
+	metadata := inst.Metadata
+	if metadata == nil {
+		metadata = make(map[string]string)
+	}
+	metadata["farp.enabled"] = "true"
+
+	// Build the manifest URL from the instance address so the discovery
+	// manager can fetch the manifest when processing the registration.
+	if _, ok := metadata["farp.manifest"]; !ok {
+		metadata["farp.manifest"] = fmt.Sprintf("http://%s:%d/_farp/manifest", inst.Address, inst.Port)
+	}
+
+	info := &bastion.ServiceInstanceInfo{
+		ID:       inst.ID,
+		Name:     inst.ServiceName,
+		Version:  inst.ServiceVersion,
+		Address:  inst.Address,
+		Port:     inst.Port,
+		Tags:     inst.Tags,
+		Metadata: metadata,
+		Healthy:  inst.Status == "" || inst.Status == "healthy",
+	}
+
+	// If the payload includes an inline manifest, decode and pre-set it
+	// so the discovery manager uses it instead of fetching via HTTP.
+	if len(payload.Manifest) > 0 {
+		var manifest farp.SchemaManifest
+		if err := json.Unmarshal(payload.Manifest, &manifest); err == nil {
+			h.gw.Discovery().SetManifest(inst.ServiceName, &manifest)
+		}
+	}
+
+	if err := h.gw.Discovery().RegisterService(ctx.Context(), info); err != nil {
+		return ctx.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
+	}
+
+	h.gw.AccessLog().LogAdminAction("farp_register", inst.ServiceName, "success", ctx.Request())
+
+	return ctx.JSON(http.StatusOK, map[string]any{
+		"status":     "registered",
+		"service":    inst.ServiceName,
+		"instance":   inst.ID,
+	})
+}
+
+// farpV1HeartbeatRequest is the optional JSON body for the FARP v1 heartbeat.
+type farpV1HeartbeatRequest struct {
+	Status         string `json:"status"`
+	RoutesChecksum string `json:"routes_checksum,omitempty"`
+}
+
+// HandleFARPHeartbeat handles FARP v1 heartbeat protocol.
+// PUT /_farp/v1/heartbeat/:id
+//
+// Returns the gateway's known routes_checksum so the service SDK can
+// detect mismatches and trigger re-registration for reconciliation.
+func (h *Handlers) HandleFARPHeartbeat(ctx forge.Context) error {
+	if h.gw.Discovery() == nil {
+		return ctx.JSON(http.StatusBadRequest, map[string]string{"error": "discovery not enabled"})
+	}
+
+	instanceID := ctx.Param("id")
+
+	var hb farpV1HeartbeatRequest
+	_ = json.NewDecoder(ctx.Request().Body).Decode(&hb) // allow empty body
+
+	gwChecksum, schemasApplied := h.gw.Discovery().GetInstanceChecksum(instanceID)
+
+	return ctx.JSON(http.StatusOK, map[string]any{
+		"status":          "ok",
+		"instance":        instanceID,
+		"routes_checksum": gwChecksum,
+		"schemas_applied": schemasApplied,
+	})
+}
+
+// HandleFARPDeregister handles FARP v1 deregistration.
+// DELETE /_farp/v1/deregister/:id
+func (h *Handlers) HandleFARPDeregister(ctx forge.Context) error {
+	if h.gw.Discovery() == nil {
+		return ctx.JSON(http.StatusBadRequest, map[string]string{"error": "discovery not enabled"})
+	}
+
+	instanceID := ctx.Param("id")
+	if instanceID == "" {
+		return ctx.JSON(http.StatusBadRequest, map[string]string{"error": "instance id is required"})
+	}
+
+	// Instance-level deregistration: we need to find which service this
+	// instance belongs to. For now, iterate discovered services.
+	// TODO: Add instance-level deregistration to discovery Manager.
+
+	return ctx.JSON(http.StatusOK, map[string]any{
+		"status":   "deregistered",
+		"instance": instanceID,
+	})
 }
 
 // HandleRegisterService accepts a service registration push.

@@ -4,13 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"sort"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/xraph/farp"
+	"github.com/xraph/farp/merger"
 	"github.com/xraph/forge"
 )
 
@@ -24,11 +25,12 @@ import (
 // extension's SchemaPublisher. The aggregator periodically refreshes specs
 // and supports on-demand refresh.
 type OpenAPIAggregator struct {
-	config     OpenAPIConfig
-	logger     forge.Logger
-	rm         RouteRegistry
-	disc       *Manager
-	httpClient *http.Client
+	config        OpenAPIConfig
+	logger        forge.Logger
+	rm            RouteRegistry
+	disc          *Manager
+	httpClient    *http.Client
+	schemaFetcher *SchemaFetcher
 
 	mu             sync.RWMutex
 	serviceSpecs   map[string]*ServiceOpenAPISpec // serviceName -> spec
@@ -42,16 +44,19 @@ type OpenAPIAggregator struct {
 
 // NewAggregator creates a new OpenAPI aggregator.
 func NewAggregator(config OpenAPIConfig, logger forge.Logger, rm RouteRegistry, disc *Manager) *OpenAPIAggregator {
+	httpClient := &http.Client{
+		Timeout: config.FetchTimeout,
+	}
+
 	return &OpenAPIAggregator{
-		config: config,
-		logger: logger,
-		rm:     rm,
-		disc:   disc,
-		httpClient: &http.Client{
-			Timeout: config.FetchTimeout,
-		},
-		serviceSpecs: make(map[string]*ServiceOpenAPISpec),
-		refreshCh:    make(chan struct{}, 1),
+		config:        config,
+		logger:        logger,
+		rm:            rm,
+		disc:          disc,
+		httpClient:    httpClient,
+		schemaFetcher: NewSchemaFetcher(httpClient, logger),
+		serviceSpecs:  make(map[string]*ServiceOpenAPISpec),
+		refreshCh:     make(chan struct{}, 1),
 	}
 }
 
@@ -169,42 +174,241 @@ func (oa *OpenAPIAggregator) Refresh(ctx context.Context) {
 		oa.mu.Unlock()
 	}()
 
-	// Discover services with OpenAPI endpoints
-	services := oa.discoverOpenAPIServices()
+	// Fetch specs in parallel with concurrency limit and cycle timeout.
+	const maxConcurrentSpecFetches = 10
 
-	// Fetch specs in parallel
+	refreshCtx, refreshCancel := context.WithTimeout(ctx, 30*time.Second)
+	defer refreshCancel()
+
+	// Collect schema sources: FARP manifests (preferred) + fallback metadata-based services.
+	type schemaSource struct {
+		ServiceName string
+		Version     string
+		Manifest    *farp.SchemaManifest // nil for non-FARP services
+		Descriptor  *farp.SchemaDescriptor
+		SpecURL     string // fallback URL for non-FARP services
+	}
+
+	var sources []schemaSource
+	currentServiceSet := make(map[string]bool)
+
+	// 1. Get schemas from cached FARP manifests (preferred path).
+	if oa.disc != nil {
+		manifests := oa.disc.ServiceManifests()
+		for name, manifest := range manifests {
+			if oa.isExcluded(name) {
+				continue
+			}
+			currentServiceSet[name] = true
+
+			// Find OpenAPI schema descriptor in manifest.
+			for i := range manifest.Schemas {
+				desc := &manifest.Schemas[i]
+				if desc.Type == farp.SchemaTypeOpenAPI || desc.Type == farp.SchemaTypeORPC {
+					sources = append(sources, schemaSource{
+						ServiceName: name,
+						Version:     manifest.ServiceVersion,
+						Manifest:    manifest,
+						Descriptor:  desc,
+					})
+					break // one OpenAPI descriptor per service
+				}
+			}
+
+			// If manifest has no OpenAPI schema descriptor but has an OpenAPI endpoint,
+			// create a source from the endpoint URL.
+			if manifest.Endpoints.OpenAPI != "" {
+				hasOpenAPISource := false
+				for _, s := range sources {
+					if s.ServiceName == name {
+						hasOpenAPISource = true
+						break
+					}
+				}
+				if !hasOpenAPISource {
+					// Build URL from first discovered service instance.
+					svcs := oa.disc.DiscoveredServices()
+					for _, svc := range svcs {
+						if svc.Name == name {
+							specURL := fmt.Sprintf("http://%s:%d%s", svc.Address, svc.Port, manifest.Endpoints.OpenAPI)
+							sources = append(sources, schemaSource{
+								ServiceName: name,
+								Version:     manifest.ServiceVersion,
+								Manifest:    manifest,
+								SpecURL:     specURL,
+							})
+							break
+						}
+					}
+				}
+			}
+		}
+	}
+
+	// Track which services actually got a source from their manifest.
+	hasSource := make(map[string]bool)
+	for _, s := range sources {
+		hasSource[s.ServiceName] = true
+	}
+
+	// 2. Fallback: discover services with OpenAPI endpoints from flat metadata.
+	//    This covers services that:
+	//    - Don't have a cached manifest (manifest fetch failed)
+	//    - Have a cached manifest but no OpenAPI schema descriptor or endpoint
+	//    - Were never FARP-enabled (only flat metadata)
+	legacyServices := oa.discoverOpenAPIServices()
+	for _, svc := range legacyServices {
+		if hasSource[svc.Name] {
+			continue // already has a source from manifest
+		}
+		currentServiceSet[svc.Name] = true
+		sources = append(sources, schemaSource{
+			ServiceName: svc.Name,
+			Version:     svc.Version,
+			SpecURL:     svc.SpecURL,
+		})
+	}
+
+	if len(sources) == 0 {
+		oa.logger.Debug("OpenAPI: no schema sources found, skipping refresh")
+		return
+	}
+
+	oa.logger.Debug("OpenAPI: refreshing schemas",
+		forge.F("sources", len(sources)),
+	)
+
+	// Fetch all schemas in parallel.
 	var wg sync.WaitGroup
-	specCh := make(chan *ServiceOpenAPISpec, len(services))
+	type fetchResult struct {
+		source schemaSource
+		spec   *ServiceOpenAPISpec
+		schema map[string]any
+	}
+	resultCh := make(chan fetchResult, len(sources))
+	sem := make(chan struct{}, maxConcurrentSpecFetches)
 
-	for _, svc := range services {
+	for _, src := range sources {
 		wg.Add(1)
-		go func(s discoveredOpenAPIService) {
+		sem <- struct{}{} // acquire
+
+		go func(s schemaSource) {
 			defer wg.Done()
-			spec := oa.fetchServiceSpec(ctx, s)
-			specCh <- spec
-		}(svc)
+			defer func() { <-sem }() // release
+
+			var fetched *FetchedSchema
+			if s.Descriptor != nil {
+				// Use schema descriptor (supports inline + HTTP).
+				fetched = oa.schemaFetcher.FetchSchema(refreshCtx, *s.Descriptor, s.ServiceName)
+			} else if s.SpecURL != "" {
+				// Fallback to direct URL fetch.
+				fetched = oa.schemaFetcher.FetchFromURL(refreshCtx, s.SpecURL, s.ServiceName)
+			}
+
+			if fetched != nil && !fetched.Healthy {
+				// Single retry after a short backoff for transient failures.
+				time.Sleep(500 * time.Millisecond)
+				var retry *FetchedSchema
+				if s.Descriptor != nil {
+					retry = oa.schemaFetcher.FetchSchema(refreshCtx, *s.Descriptor, s.ServiceName)
+				} else if s.SpecURL != "" {
+					retry = oa.schemaFetcher.FetchFromURL(refreshCtx, s.SpecURL, s.ServiceName)
+				}
+				if retry != nil && retry.Healthy {
+					fetched = retry
+				}
+			}
+
+			if fetched == nil {
+				return
+			}
+
+			specURL := s.SpecURL
+			if s.Descriptor != nil && s.Descriptor.Location.URL != "" {
+				specURL = s.Descriptor.Location.URL
+			}
+
+			resultCh <- fetchResult{
+				source: s,
+				spec: &ServiceOpenAPISpec{
+					ServiceName: s.ServiceName,
+					Version:     s.Version,
+					SpecURL:     specURL,
+					Spec:        fetched.Schema,
+					FetchedAt:   fetched.FetchedAt,
+					Error:       fetched.Error,
+					Healthy:     fetched.Healthy,
+					PathCount:   fetched.PathCount,
+				},
+				schema: fetched.Schema,
+			}
+		}(src)
 	}
 
 	wg.Wait()
-	close(specCh)
+	close(resultCh)
 
-	// Collect results
+	// Collect results.
 	newSpecs := make(map[string]*ServiceOpenAPISpec)
-	for spec := range specCh {
-		newSpecs[spec.ServiceName] = spec
+	var mergerInputs []fetchResult
+	for r := range resultCh {
+		newSpecs[r.source.ServiceName] = r.spec
+		if r.spec.Healthy && r.schema != nil {
+			mergerInputs = append(mergerInputs, r)
+		}
 	}
 
-	// Build merged spec
+	// Retain previously cached specs when a fresh fetch returns fewer paths.
+	oa.mu.RLock()
+	prevSpecs := oa.serviceSpecs
+	oa.mu.RUnlock()
+
+	if prevSpecs != nil {
+		for name, newSpec := range newSpecs {
+			prev, ok := prevSpecs[name]
+			if !ok || !prev.Healthy {
+				continue
+			}
+			if !newSpec.Healthy {
+				oa.logger.Debug("OpenAPI: keeping cached spec (new fetch failed)",
+					forge.F("service", name),
+					forge.F("error", newSpec.Error),
+				)
+				newSpecs[name] = prev
+				continue
+			}
+			if newSpec.PathCount < prev.PathCount {
+				oa.logger.Debug("OpenAPI: keeping cached spec (new has fewer paths)",
+					forge.F("service", name),
+					forge.F("prev_paths", prev.PathCount),
+					forge.F("new_paths", newSpec.PathCount),
+				)
+				newSpecs[name] = prev
+			}
+		}
+
+		// Evict cached specs for services that are no longer discovered.
+		for name := range prevSpecs {
+			if !currentServiceSet[name] {
+				oa.logger.Debug("OpenAPI: evicting spec for removed service",
+					forge.F("service", name),
+				)
+				delete(newSpecs, name)
+			}
+		}
+	}
+
+	// Build merged spec using FARP merger.
 	merged := oa.buildMergedSpec(newSpecs)
 
-	// Serialize to JSON
+	// Serialize to JSON.
 	mergedJSON, err := json.Marshal(merged)
 	if err != nil {
 		oa.logger.Error("failed to serialize merged OpenAPI spec", forge.F("error", err))
 		return
 	}
 
-	// Atomically update
+	// Atomically update.
 	oa.mu.Lock()
 	oa.serviceSpecs = newSpecs
 	oa.mergedSpec = merged
@@ -350,94 +554,38 @@ func (oa *OpenAPIAggregator) discoverOpenAPIServices() []discoveredOpenAPIServic
 	return services
 }
 
-// fetchServiceSpec fetches the OpenAPI spec from a single upstream service.
-func (oa *OpenAPIAggregator) fetchServiceSpec(ctx context.Context, svc discoveredOpenAPIService) *ServiceOpenAPISpec {
-	result := &ServiceOpenAPISpec{
-		ServiceName: svc.Name,
-		Version:     svc.Version,
-		SpecURL:     svc.SpecURL,
-		FetchedAt:   time.Now(),
-	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, svc.SpecURL, nil)
-	if err != nil {
-		result.Error = fmt.Sprintf("failed to create request: %v", err)
-		oa.logger.Debug("failed to create OpenAPI fetch request",
-			forge.F("service", svc.Name),
-			forge.F("url", svc.SpecURL),
-			forge.F("error", err),
-		)
-		return result
-	}
-
-	req.Header.Set("Accept", "application/json")
-
-	resp, err := oa.httpClient.Do(req)
-	if err != nil {
-		result.Error = fmt.Sprintf("fetch failed: %v", err)
-		oa.logger.Debug("failed to fetch OpenAPI spec",
-			forge.F("service", svc.Name),
-			forge.F("url", svc.SpecURL),
-			forge.F("error", err),
-		)
-		return result
-	}
-	defer func() { _ = resp.Body.Close() }()
-
-	if resp.StatusCode != http.StatusOK {
-		result.Error = fmt.Sprintf("HTTP %d", resp.StatusCode)
-		oa.logger.Debug("non-200 response for OpenAPI spec",
-			forge.F("service", svc.Name),
-			forge.F("status", resp.StatusCode),
-		)
-		return result
-	}
-
-	// Read with a size limit (10MB max)
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 10*1024*1024))
-	if err != nil {
-		result.Error = fmt.Sprintf("read failed: %v", err)
-		return result
-	}
-
-	// Parse the spec
-	var spec map[string]any
-	if err := json.Unmarshal(body, &spec); err != nil {
-		result.Error = fmt.Sprintf("invalid JSON: %v", err)
-		oa.logger.Debug("failed to parse OpenAPI spec",
-			forge.F("service", svc.Name),
-			forge.F("error", err),
-		)
-		return result
-	}
-
-	result.Spec = spec
-	result.Healthy = true
-	result.PathCount = countPaths(spec)
-
-	oa.logger.Debug("fetched OpenAPI spec",
-		forge.F("service", svc.Name),
-		forge.F("paths", result.PathCount),
-	)
-
-	return result
-}
-
-// buildMergedSpec builds a unified OpenAPI 3.1.0 spec from all service specs.
+// buildMergedSpec builds a unified OpenAPI 3.1.0 spec from all service specs
+// using the FARP merger package for proper conflict resolution, component
+// prefixing, and routing strategy application.
 func (oa *OpenAPIAggregator) buildMergedSpec(specs map[string]*ServiceOpenAPISpec) map[string]any {
-	mergedPaths := make(map[string]any)
-	mergedTags := make([]any, 0)
-	mergedSchemas := make(map[string]any)
-	mergedSecuritySchemes := make(map[string]any)
-	serviceNames := make([]string, 0, len(specs))
+	// Map bastion config to FARP merger config.
+	defaultStrategy := farp.ConflictStrategyPrefix
+	if oa.config.MergeStrategy == "flat" {
+		defaultStrategy = farp.ConflictStrategyOverwrite
+	}
 
-	// Sort service names for deterministic output
+	// Disable the FARP merger's tag handling — bastion applies its own tag logic
+	// in post-processing (service tags, ServiceTagOnly, DisableServiceTags).
+	// Letting the merger handle tags causes tag prefixing that conflicts with
+	// bastion's conventions.
+	mergerConfig := merger.MergerConfig{
+		DefaultConflictStrategy: defaultStrategy,
+		MergedTitle:             oa.config.Title,
+		MergedDescription:       oa.config.Description,
+		MergedVersion:           oa.config.Version,
+		IncludeServiceTags:      false,
+		CollapseServiceTags:     false,
+		SortOutput:              true,
+	}
+
+	// Build merger inputs from cached specs + manifests.
+	var serviceSchemas []merger.ServiceSchema
+	serviceNames := make([]string, 0, len(specs))
 	for name := range specs {
 		serviceNames = append(serviceNames, name)
 	}
 	sort.Strings(serviceNames)
-
-	tagSet := make(map[string]bool)
 
 	for _, name := range serviceNames {
 		svcSpec := specs[name]
@@ -445,151 +593,462 @@ func (oa *OpenAPIAggregator) buildMergedSpec(specs map[string]*ServiceOpenAPISpe
 			continue
 		}
 
-		spec := svcSpec.Spec
+		// Get the cached FARP manifest for routing strategy, or build a synthetic one.
+		manifest := oa.getOrBuildManifest(name, svcSpec)
 
-		// Extract paths
-		paths, _ := spec["paths"].(map[string]any)
+		serviceSchemas = append(serviceSchemas, merger.ServiceSchema{
+			Manifest: manifest,
+			Schema:   svcSpec.Spec,
+		})
+	}
 
-		// Determine the prefix for this service's paths.
-		// GetServicePrefix respects the FARP manifest routing strategy
-		// (e.g., root-mounted services get "" instead of "/{name}").
-		prefix := ""
-		if oa.config.MergeStrategy == "prefix" {
-			if oa.disc != nil {
-				prefix = oa.disc.GetServicePrefix(name)
-			} else {
-				prefix = "/" + normalizeServiceName(name)
-			}
-		}
+	if len(serviceSchemas) == 0 {
+		return oa.buildEmptySpec()
+	}
 
-		// Add a service-level tag
-		serviceTag := name
-		if !tagSet[serviceTag] {
-			tagDesc := fmt.Sprintf("Operations from %s", name)
-			if svcSpec.Version != "" {
-				tagDesc += " v" + svcSpec.Version
-			}
-			mergedTags = append(mergedTags, map[string]any{
-				"name":        serviceTag,
-				"description": tagDesc,
-			})
-			tagSet[serviceTag] = true
-		}
+	// Run the FARP merger.
+	m := merger.NewMerger(mergerConfig)
+	result, err := m.Merge(serviceSchemas)
+	if err != nil {
+		oa.logger.Error("FARP merger failed, falling back to empty spec",
+			forge.F("error", err),
+		)
+		return oa.buildEmptySpec()
+	}
 
-		// Build a ref mapping for THIS service's schemas so we can
-		// precisely rewrite $ref pointers without cross-service corruption.
-		refMap := make(map[string]string)
+	// Log any conflicts.
+	if len(result.Conflicts) > 0 {
+		oa.logger.Debug("OpenAPI merge conflicts",
+			forge.F("conflicts", len(result.Conflicts)),
+		)
+	}
 
-		// Merge components/schemas (namespace to avoid conflicts)
-		if components, ok := spec["components"].(map[string]any); ok {
-			if schemas, ok := components["schemas"].(map[string]any); ok {
-				for schemaName, schema := range schemas {
-					namespacedName := name + "_" + schemaName
-					mergedSchemas[namespacedName] = schema
-					refMap["#/components/schemas/"+schemaName] = "#/components/schemas/" + namespacedName
-				}
-			}
+	// Convert the typed merger result to map[string]any for JSON serialization.
+	merged := oa.mergerResultToMap(result)
 
-			if secSchemes, ok := components["securitySchemes"].(map[string]any); ok {
-				for schemeName, scheme := range secSchemes {
-					namespacedName := name + "_" + schemeName
-					mergedSecuritySchemes[namespacedName] = scheme
-				}
-			}
-		}
+	// Post-processing: apply bastion-specific extensions.
 
-		// Merge paths and rewrite $ref pointers for THIS service only
+	// 0. Tag handling — the FARP merger always prefixes tags with the service name,
+	//    but bastion has its own tag conventions (DisableServiceTags, ServiceTagOnly).
+	//    We restore original tags from the source specs, then apply bastion's logic.
+	if paths, ok := merged["paths"].(map[string]any); ok {
 		for path, pathItem := range paths {
-			// Skip paths belonging to excluded extensions
-			if oa.isExtensionPathExcluded(name, path) {
+			// Determine which service owns this path and restore original tags.
+			ownerService := ""
+			originalPath := ""
+			for _, name := range serviceNames {
+				svc := specs[name]
+				if svc == nil || svc.Spec == nil {
+					continue
+				}
+
+				// Check if the merged path corresponds to a path in this service's spec.
+				prefix := ""
+				if oa.disc != nil {
+					prefix = oa.disc.GetServicePrefix(name)
+				}
+				if prefix == "" {
+					prefix = "/" + normalizeServiceName(name)
+				}
+
+				upstreamPath := path
+				if prefix != "" && strings.HasPrefix(path, prefix) {
+					upstreamPath = strings.TrimPrefix(path, prefix)
+					if upstreamPath == "" {
+						upstreamPath = "/"
+					}
+				}
+
+				svcPaths, _ := svc.Spec["paths"].(map[string]any)
+				if _, ok := svcPaths[upstreamPath]; ok {
+					ownerService = name
+					originalPath = upstreamPath
+					break
+				}
+				// Also try the full path for root-mounted services.
+				if _, ok := svcPaths[path]; ok {
+					ownerService = name
+					originalPath = path
+					break
+				}
+			}
+
+			if ownerService == "" {
 				continue
 			}
 
-			mergedPath := prefix + path
-			if mergedPath == "" {
-				mergedPath = "/"
+			// Restore original tags from source spec, then apply bastion's tag policy.
+			svc := specs[ownerService]
+			svcPaths, _ := svc.Spec["paths"].(map[string]any)
+			if origPathItem, ok := svcPaths[originalPath]; ok {
+				restoreOriginalTags(pathItem, origPathItem)
 			}
 
-			// Tag all operations with the service name
-			taggedPathItem := tagOperations(pathItem, serviceTag)
-
-			// Strip requestBody from GET/HEAD/DELETE — upstream generators
-			// (e.g., protoc-gen-openapiv2) may incorrectly add them.
-			taggedPathItem = sanitizeOperations(taggedPathItem)
-
-			// Rewrite $ref pointers in this service's paths using exact mapping
-			rewriteRefsWithMap(taggedPathItem, refMap)
-
-			if _, exists := mergedPaths[mergedPath]; exists && oa.config.MergeStrategy == "prefix" {
-				// Prefix strategy shouldn't have conflicts, but handle gracefully
-				oa.logger.Debug("path conflict in merged spec",
-					forge.F("path", mergedPath),
-					forge.F("service", name),
-				)
-			}
-
-			mergedPaths[mergedPath] = taggedPathItem
-		}
-
-		// Rewrite $ref pointers inside this service's schemas (schema→schema refs)
-		if components, ok := spec["components"].(map[string]any); ok {
-			if schemas, ok := components["schemas"].(map[string]any); ok {
-				for schemaName := range schemas {
-					namespacedName := name + "_" + schemaName
-					if schema, exists := mergedSchemas[namespacedName]; exists {
-						rewriteRefsWithMap(schema, refMap)
-					}
+			if !oa.config.DisableServiceTags {
+				if oa.config.ServiceTagOnly {
+					paths[path] = replaceOperationTags(pathItem, ownerService)
+				} else {
+					paths[path] = tagOperations(pathItem, ownerService)
 				}
 			}
 		}
 	}
 
-	// Build the merged spec
+	// Add top-level service tags.
+	if !oa.config.DisableServiceTags {
+		tags, _ := merged["tags"].([]any)
+		tagSet := make(map[string]bool)
+		for _, t := range tags {
+			if tm, ok := t.(map[string]any); ok {
+				if name, ok := tm["name"].(string); ok {
+					tagSet[name] = true
+				}
+			}
+		}
+
+		for _, name := range serviceNames {
+			svcSpec := specs[name]
+			if svcSpec == nil || svcSpec.Spec == nil || svcSpec.Error != "" {
+				continue
+			}
+
+			if !tagSet[name] {
+				tagDesc := fmt.Sprintf("Operations from %s", name)
+				if svcSpec.Version != "" {
+					tagDesc += " v" + svcSpec.Version
+				}
+				tags = append(tags, map[string]any{
+					"name":        name,
+					"description": tagDesc,
+				})
+				tagSet[name] = true
+			}
+		}
+		merged["tags"] = tags
+	}
+
+	// 1. Extension path filtering — remove excluded extension paths.
+	//    Extension filters work on upstream (unprefixed) paths, so we need to
+	//    strip the service prefix before checking.
+	if paths, ok := merged["paths"].(map[string]any); ok {
+		for path := range paths {
+			for _, name := range serviceNames {
+				// Determine the service prefix to strip.
+				prefix := ""
+				if oa.disc != nil {
+					prefix = oa.disc.GetServicePrefix(name)
+				}
+				if prefix == "" {
+					// Fallback: try the default service name prefix.
+					prefix = "/" + normalizeServiceName(name)
+				}
+
+				// Strip the service prefix to get the upstream path.
+				upstreamPath := path
+				if prefix != "" && strings.HasPrefix(path, prefix) {
+					upstreamPath = strings.TrimPrefix(path, prefix)
+					if upstreamPath == "" {
+						upstreamPath = "/"
+					}
+				}
+				if oa.isExtensionPathExcluded(name, upstreamPath) {
+					delete(paths, path)
+					break
+				}
+			}
+		}
+	}
+
+	// 2. Sanitize operations (strip requestBody from GET/HEAD/DELETE).
+	if paths, ok := merged["paths"].(map[string]any); ok {
+		for path, pathItem := range paths {
+			paths[path] = sanitizeOperations(pathItem)
+		}
+	}
+
+	// 3. Add contact info.
+	if oa.config.ContactName != "" || oa.config.ContactEmail != "" {
+		if info, ok := merged["info"].(map[string]any); ok {
+			contact := make(map[string]any)
+			if oa.config.ContactName != "" {
+				contact["name"] = oa.config.ContactName
+			}
+			if oa.config.ContactEmail != "" {
+				contact["email"] = oa.config.ContactEmail
+			}
+			info["contact"] = contact
+		}
+	}
+
+	// 4. Add x-gateway metadata.
+	pathCount := 0
+	if paths, ok := merged["paths"].(map[string]any); ok {
+		pathCount = len(paths)
+	}
+
+	merged["x-gateway"] = map[string]any{
+		"generatedAt":     time.Now().UTC().Format(time.RFC3339),
+		"serviceCount":    len(specs),
+		"pathCount":       pathCount,
+		"refreshInterval": oa.config.RefreshInterval.String(),
+	}
+
+	// 5. Add gateway admin routes if configured.
+	if oa.config.IncludeGatewayRoutes {
+		paths, _ := merged["paths"].(map[string]any)
+		if paths == nil {
+			paths = make(map[string]any)
+			merged["paths"] = paths
+		}
+		tags, _ := merged["tags"].([]any)
+		tagSet := make(map[string]bool)
+		for _, t := range tags {
+			if tm, ok := t.(map[string]any); ok {
+				if name, ok := tm["name"].(string); ok {
+					tagSet[name] = true
+				}
+			}
+		}
+		oa.addGatewayRoutes(paths, &tags, tagSet)
+		merged["tags"] = tags
+	}
+
+	return merged
+}
+
+// getOrBuildManifest returns the cached FARP manifest for a service, or builds
+// a synthetic one for non-FARP services so the merger can apply routing strategies.
+func (oa *OpenAPIAggregator) getOrBuildManifest(serviceName string, spec *ServiceOpenAPISpec) *farp.SchemaManifest {
+	// Try cached manifest from discovery.
+	if oa.disc != nil {
+		if manifest := oa.disc.ServiceManifest(serviceName); manifest != nil {
+			return manifest
+		}
+	}
+
+	// Build a synthetic manifest for non-FARP services.
+	strategy := farp.MountStrategyService
+	if oa.config.MergeStrategy == "flat" {
+		strategy = farp.MountStrategyRoot
+	}
+
+	// Check for prefix overrides via discovery.
+	basePath := ""
+	if oa.disc != nil {
+		prefix := oa.disc.GetServicePrefix(serviceName)
+		if prefix != "" {
+			strategy = farp.MountStrategyCustom
+			basePath = prefix
+		}
+	}
+
+	manifest := &farp.SchemaManifest{
+		Version:        "1.0.0",
+		ServiceName:    serviceName,
+		ServiceVersion: spec.Version,
+		InstanceID:     serviceName + "-synthetic",
+		Schemas: []farp.SchemaDescriptor{
+			{
+				Type:        farp.SchemaTypeOpenAPI,
+				SpecVersion: "3.1.0",
+				ContentType: "application/json",
+			},
+		},
+		Routing: farp.RoutingConfig{
+			Strategy: strategy,
+			BasePath: basePath,
+		},
+	}
+
+	return manifest
+}
+
+// mergerResultToMap converts a typed merger.MergeResult to map[string]any.
+func (oa *OpenAPIAggregator) mergerResultToMap(result *merger.MergeResult) map[string]any {
+	if result == nil || result.Spec == nil {
+		return oa.buildEmptySpec()
+	}
+
+	spec := result.Spec
+
+	// Convert paths.
+	paths := make(map[string]any)
+	for path, pathItem := range spec.Paths {
+		paths[path] = pathItemToMap(pathItem)
+	}
+
+	// Convert tags.
+	tags := make([]any, 0, len(spec.Tags))
+	for _, tag := range spec.Tags {
+		tagMap := map[string]any{"name": tag.Name}
+		if tag.Description != "" {
+			tagMap["description"] = tag.Description
+		}
+		tags = append(tags, tagMap)
+	}
+
 	merged := map[string]any{
+		"openapi": spec.OpenAPI,
+		"info": map[string]any{
+			"title":       spec.Info.Title,
+			"description": spec.Info.Description,
+			"version":     spec.Info.Version,
+		},
+		"paths": paths,
+		"tags":  tags,
+	}
+
+	// Convert servers.
+	if len(spec.Servers) > 0 {
+		servers := make([]any, 0, len(spec.Servers))
+		for _, s := range spec.Servers {
+			serverMap := map[string]any{"url": s.URL}
+			if s.Description != "" {
+				serverMap["description"] = s.Description
+			}
+			servers = append(servers, serverMap)
+		}
+		merged["servers"] = servers
+	}
+
+	// Convert components.
+	if spec.Components != nil {
+		components := make(map[string]any)
+
+		if len(spec.Components.Schemas) > 0 {
+			schemas := make(map[string]any)
+			for name, schema := range spec.Components.Schemas {
+				schemas[name] = schema
+			}
+			components["schemas"] = schemas
+		}
+
+		if len(spec.Components.Responses) > 0 {
+			// Convert via JSON round-trip for simplicity.
+			data, err := json.Marshal(spec.Components.Responses)
+			if err == nil {
+				var responses map[string]any
+				if json.Unmarshal(data, &responses) == nil {
+					components["responses"] = responses
+				}
+			}
+		}
+
+		if len(spec.Components.Parameters) > 0 {
+			data, err := json.Marshal(spec.Components.Parameters)
+			if err == nil {
+				var params map[string]any
+				if json.Unmarshal(data, &params) == nil {
+					components["parameters"] = params
+				}
+			}
+		}
+
+		if len(spec.Components.RequestBodies) > 0 {
+			data, err := json.Marshal(spec.Components.RequestBodies)
+			if err == nil {
+				var bodies map[string]any
+				if json.Unmarshal(data, &bodies) == nil {
+					components["requestBodies"] = bodies
+				}
+			}
+		}
+
+		if len(spec.Components.SecuritySchemes) > 0 {
+			data, err := json.Marshal(spec.Components.SecuritySchemes)
+			if err == nil {
+				var schemes map[string]any
+				if json.Unmarshal(data, &schemes) == nil {
+					components["securitySchemes"] = schemes
+				}
+			}
+		}
+
+		if len(components) > 0 {
+			merged["components"] = components
+		}
+	}
+
+	return merged
+}
+
+// pathItemToMap converts a typed merger.PathItem to map[string]any.
+func pathItemToMap(item merger.PathItem) map[string]any {
+	result := make(map[string]any)
+
+	addOp := func(method string, op *merger.Operation) {
+		if op == nil {
+			return
+		}
+		opMap := make(map[string]any)
+		if op.OperationID != "" {
+			opMap["operationId"] = op.OperationID
+		}
+		if op.Summary != "" {
+			opMap["summary"] = op.Summary
+		}
+		if op.Description != "" {
+			opMap["description"] = op.Description
+		}
+		if len(op.Tags) > 0 {
+			// Convert to []any for compatibility with bastion's tag helpers.
+			anyTags := make([]any, len(op.Tags))
+			for i, t := range op.Tags {
+				anyTags[i] = t
+			}
+			opMap["tags"] = anyTags
+		}
+		if len(op.Parameters) > 0 {
+			opMap["parameters"] = op.Parameters
+		}
+		if op.RequestBody != nil {
+			opMap["requestBody"] = op.RequestBody
+		}
+		if len(op.Responses) > 0 {
+			opMap["responses"] = op.Responses
+		}
+		if len(op.Security) > 0 {
+			opMap["security"] = op.Security
+		}
+		if op.Deprecated {
+			opMap["deprecated"] = true
+		}
+		// Copy extensions.
+		for k, v := range op.Extensions {
+			opMap[k] = v
+		}
+		result[method] = opMap
+	}
+
+	addOp("get", item.Get)
+	addOp("put", item.Put)
+	addOp("post", item.Post)
+	addOp("delete", item.Delete)
+	addOp("patch", item.Patch)
+	addOp("options", item.Options)
+	addOp("head", item.Head)
+	addOp("trace", item.Trace)
+
+	// Copy path-level parameters.
+	if len(item.Parameters) > 0 {
+		result["parameters"] = item.Parameters
+	}
+
+	return result
+}
+
+// buildEmptySpec returns an empty but valid OpenAPI 3.1.0 spec.
+func (oa *OpenAPIAggregator) buildEmptySpec() map[string]any {
+	return map[string]any{
 		"openapi": "3.1.0",
 		"info": map[string]any{
 			"title":       oa.config.Title,
 			"description": oa.config.Description,
 			"version":     oa.config.Version,
 		},
-		"paths": mergedPaths,
-		"tags":  mergedTags,
+		"paths": map[string]any{},
+		"tags":  []any{},
 	}
-
-	// Add contact info if configured
-	if oa.config.ContactName != "" || oa.config.ContactEmail != "" {
-		info := merged["info"].(map[string]any)
-		contact := make(map[string]any)
-		if oa.config.ContactName != "" {
-			contact["name"] = oa.config.ContactName
-		}
-		if oa.config.ContactEmail != "" {
-			contact["email"] = oa.config.ContactEmail
-		}
-		info["contact"] = contact
-	}
-
-	// Add components if we have any
-	if len(mergedSchemas) > 0 || len(mergedSecuritySchemes) > 0 {
-		components := make(map[string]any)
-		if len(mergedSchemas) > 0 {
-			components["schemas"] = mergedSchemas
-		}
-		if len(mergedSecuritySchemes) > 0 {
-			components["securitySchemes"] = mergedSecuritySchemes
-		}
-		merged["components"] = components
-	}
-
-	// Add x-gateway metadata
-	merged["x-gateway"] = map[string]any{
-		"generatedAt":     time.Now().UTC().Format(time.RFC3339),
-		"serviceCount":    len(specs),
-		"pathCount":       len(mergedPaths),
-		"refreshInterval": oa.config.RefreshInterval.String(),
-	}
-
-	return merged
 }
 
 // addGatewayRoutes adds the gateway's own admin API routes to the merged spec
@@ -1109,6 +1568,26 @@ func tagOperations(pathItem any, tag string) any {
 	return pathItemMap
 }
 
+// replaceOperationTags replaces all existing tags on operations with only the
+// given tag. This is used when ServiceTagOnly is enabled to strip upstream tags.
+func replaceOperationTags(pathItem any, tag string) any {
+	pathItemMap, ok := pathItem.(map[string]any)
+	if !ok {
+		return pathItem
+	}
+
+	methods := []string{"get", "put", "post", "delete", "options", "head", "patch", "trace"}
+	for _, method := range methods {
+		if op, ok := pathItemMap[method]; ok {
+			if opMap, ok := op.(map[string]any); ok {
+				opMap["tags"] = []any{tag}
+			}
+		}
+	}
+
+	return pathItemMap
+}
+
 // sanitizeOperations removes requestBody from HTTP methods that must not
 // have a body (GET, HEAD, DELETE) per the HTTP and OpenAPI specifications.
 // This handles upstream generators (e.g., protoc-gen-openapiv2) that
@@ -1155,6 +1634,44 @@ func rewriteRefsWithMap(obj any, refMap map[string]string) {
 	case []any:
 		for _, item := range v {
 			rewriteRefsWithMap(item, refMap)
+		}
+	}
+}
+
+// restoreOriginalTags replaces the FARP merger's prefixed tags with the original
+// tags from the upstream spec. This is necessary because the merger always prefixes
+// tags with the service name, but bastion handles tags differently.
+func restoreOriginalTags(mergedPathItem any, originalPathItem any) {
+	mergedMap, ok := mergedPathItem.(map[string]any)
+	if !ok {
+		return
+	}
+
+	originalMap, ok := originalPathItem.(map[string]any)
+	if !ok {
+		return
+	}
+
+	methods := []string{"get", "put", "post", "delete", "options", "head", "patch", "trace"}
+	for _, method := range methods {
+		mergedOp, ok := mergedMap[method]
+		if !ok {
+			continue
+		}
+		mergedOpMap, ok := mergedOp.(map[string]any)
+		if !ok {
+			continue
+		}
+
+		// Get original tags from source spec.
+		if origOp, ok := originalMap[method]; ok {
+			if origOpMap, ok := origOp.(map[string]any); ok {
+				if origTags, ok := origOpMap["tags"]; ok {
+					mergedOpMap["tags"] = origTags
+				} else {
+					delete(mergedOpMap, "tags")
+				}
+			}
 		}
 	}
 }

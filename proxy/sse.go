@@ -13,6 +13,24 @@ import (
 	bastion "github.com/xraph/bastion"
 )
 
+// sseTransport is a shared transport for SSE upstream connections.
+// Keep-alives are enabled (the default) because DisableKeepAlives causes
+// the transport to send "Connection: close", which makes many upstream
+// servers close the connection immediately after responding — terminating
+// the SSE stream. Instead, we set a short IdleConnTimeout so that
+// connections are cleaned up quickly once the SSE stream ends.
+var sseTransport = &http.Transport{
+	DialContext: (&net.Dialer{
+		Timeout:   30 * time.Second,
+		KeepAlive: 30 * time.Second,
+	}).DialContext,
+	TLSHandshakeTimeout: 10 * time.Second,
+	IdleConnTimeout:     5 * time.Second,
+	MaxIdleConnsPerHost: 2,
+	// No ResponseHeaderTimeout — SSE upstreams may take time before
+	// sending the first event.
+}
+
 // ProxySSE proxies a Server-Sent Events connection to an upstream target.
 func ProxySSE(
 	w http.ResponseWriter,
@@ -57,21 +75,36 @@ func ProxySSE(
 		upstreamURL += "?" + r.URL.RawQuery
 	}
 
-	// Create upstream request
-	upstreamReq, err := http.NewRequestWithContext(r.Context(), http.MethodGet, upstreamURL, nil)
+	// Create upstream request preserving the original method and body.
+	// SSE endpoints may use POST (e.g., to send a subscription payload)
+	// rather than GET.
+	upstreamReq, err := http.NewRequestWithContext(r.Context(), r.Method, upstreamURL, r.Body)
 	if err != nil {
 		http.Error(w, `{"error":"failed to create upstream request"}`, http.StatusBadGateway)
 
 		return
 	}
 
-	// Copy relevant headers
+	// Copy relevant headers from the original request.
+	// Preserve Content-Type for POST bodies (e.g., application/json).
+	if ct := r.Header.Get("Content-Type"); ct != "" {
+		upstreamReq.Header.Set("Content-Type", ct)
+	}
+
+	if cl := r.Header.Get("Content-Length"); cl != "" {
+		upstreamReq.Header.Set("Content-Length", cl)
+	}
+
 	upstreamReq.Header.Set("Accept", "text/event-stream")
 	upstreamReq.Header.Set("Cache-Control", "no-cache")
-	upstreamReq.Header.Set("Connection", "keep-alive")
 
 	if lastEventID := r.Header.Get("Last-Event-ID"); lastEventID != "" {
 		upstreamReq.Header.Set("Last-Event-ID", lastEventID)
+	}
+
+	// Copy auth headers from the original request
+	if auth := r.Header.Get("Authorization"); auth != "" {
+		upstreamReq.Header.Set("Authorization", auth)
 	}
 
 	// Proxy headers
@@ -86,9 +119,11 @@ func ProxySSE(
 	// Apply header policy
 	applyHeaderPolicy(upstreamReq, route.Headers)
 
-	// Make upstream request
+	// Make upstream request using the shared SSE transport.
+	// Timeout=0 because SSE connections are long-lived streams.
 	client := &http.Client{
-		Timeout: 0, // No timeout for SSE
+		Timeout:   0,
+		Transport: sseTransport,
 	}
 
 	resp, err := client.Do(upstreamReq)
@@ -103,7 +138,12 @@ func ProxySSE(
 		return
 	}
 
-	defer func() { _ = resp.Body.Close() }()
+	defer func() {
+		_ = resp.Body.Close()
+		// Eagerly close idle connections after the stream ends so transport
+		// goroutines (readLoop/writeLoop) don't linger until IdleConnTimeout.
+		sseTransport.CloseIdleConnections()
+	}()
 
 	target.IncrConns()
 	defer target.DecrConns()

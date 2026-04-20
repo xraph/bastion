@@ -44,28 +44,22 @@ func TestAggregator_FetchServiceSpec_Success(t *testing.T) {
 
 	aggr := NewAggregator(config, logger, rm, nil)
 
-	svc := discoveredOpenAPIService{
-		Name:    "test-service",
-		Version: "1.0.0",
-		SpecURL: server.URL,
-	}
+	fetched := aggr.schemaFetcher.FetchFromURL(context.Background(), server.URL, "test-service")
 
-	spec := aggr.fetchServiceSpec(context.Background(), svc)
-
-	if spec == nil {
+	if fetched == nil {
 		t.Fatal("expected spec, got nil")
 	}
 
-	if !spec.Healthy {
+	if !fetched.Healthy {
 		t.Error("expected healthy spec")
 	}
 
-	if spec.Error != "" {
-		t.Errorf("unexpected error: %s", spec.Error)
+	if fetched.Error != "" {
+		t.Errorf("unexpected error: %s", fetched.Error)
 	}
 
-	if spec.PathCount != 1 {
-		t.Errorf("expected 1 path, got %d", spec.PathCount)
+	if fetched.PathCount != 1 {
+		t.Errorf("expected 1 path, got %d", fetched.PathCount)
 	}
 }
 
@@ -82,23 +76,17 @@ func TestAggregator_FetchServiceSpec_404(t *testing.T) {
 
 	aggr := NewAggregator(config, logger, rm, nil)
 
-	svc := discoveredOpenAPIService{
-		Name:    "test-service",
-		Version: "1.0.0",
-		SpecURL: server.URL,
-	}
+	fetched := aggr.schemaFetcher.FetchFromURL(context.Background(), server.URL, "test-service")
 
-	spec := aggr.fetchServiceSpec(context.Background(), svc)
-
-	if spec == nil {
+	if fetched == nil {
 		t.Fatal("expected spec result, got nil")
 	}
 
-	if spec.Healthy {
+	if fetched.Healthy {
 		t.Error("expected unhealthy spec for 404")
 	}
 
-	if spec.Error == "" {
+	if fetched.Error == "" {
 		t.Error("expected error message")
 	}
 }
@@ -116,23 +104,17 @@ func TestAggregator_FetchServiceSpec_InvalidJSON(t *testing.T) {
 
 	aggr := NewAggregator(config, logger, rm, nil)
 
-	svc := discoveredOpenAPIService{
-		Name:    "test-service",
-		Version: "1.0.0",
-		SpecURL: server.URL,
-	}
+	fetched := aggr.schemaFetcher.FetchFromURL(context.Background(), server.URL, "test-service")
 
-	spec := aggr.fetchServiceSpec(context.Background(), svc)
-
-	if spec == nil {
+	if fetched == nil {
 		t.Fatal("expected spec result, got nil")
 	}
 
-	if spec.Healthy {
+	if fetched.Healthy {
 		t.Error("expected unhealthy spec for invalid JSON")
 	}
 
-	if spec.Error == "" {
+	if fetched.Error == "" {
 		t.Error("expected error message for invalid JSON")
 	}
 }
@@ -769,5 +751,355 @@ func TestSplitPathSegments(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestAggregator_BuildMergedSpec_DisableServiceTags(t *testing.T) {
+	config := DefaultOpenAPIConfig()
+	config.Title = "Test Gateway"
+	config.Version = "1.0.0"
+	config.MergeStrategy = "prefix"
+	config.DisableServiceTags = true
+	logger := newTestLogger()
+	rm := &mockRouteRegistry{}
+
+	aggr := NewAggregator(config, logger, rm, nil)
+
+	specs := map[string]*ServiceOpenAPISpec{
+		"service-a": {
+			ServiceName: "service-a",
+			Version:     "1.0.0",
+			Healthy:     true,
+			Spec: map[string]any{
+				"openapi": "3.1.0",
+				"paths": map[string]any{
+					"/users": map[string]any{
+						"get": map[string]any{
+							"summary": "List users",
+							"tags":    []any{"existing-tag"},
+						},
+					},
+				},
+			},
+		},
+		"service-b": {
+			ServiceName: "service-b",
+			Version:     "2.0.0",
+			Healthy:     true,
+			Spec: map[string]any{
+				"openapi": "3.1.0",
+				"paths": map[string]any{
+					"/products": map[string]any{
+						"get": map[string]any{
+							"summary": "List products",
+						},
+					},
+				},
+			},
+		},
+	}
+
+	merged := aggr.buildMergedSpec(specs)
+
+	if merged == nil {
+		t.Fatal("expected merged spec, got nil")
+	}
+
+	// Top-level tags should be empty (no service tags created)
+	tags, _ := merged["tags"].([]any)
+	for _, tag := range tags {
+		tagMap, ok := tag.(map[string]any)
+		if !ok {
+			continue
+		}
+		tagName, _ := tagMap["name"].(string)
+		if tagName == "service-a" || tagName == "service-b" {
+			t.Errorf("expected no service tag %q when DisableServiceTags is true", tagName)
+		}
+	}
+
+	// Operations should not have service-name tags injected
+	paths, ok := merged["paths"].(map[string]any)
+	if !ok {
+		t.Fatal("expected paths object")
+	}
+
+	for pathStr, pathItem := range paths {
+		pathItemMap, ok := pathItem.(map[string]any)
+		if !ok {
+			continue
+		}
+		for _, method := range []string{"get", "post", "put", "delete", "patch"} {
+			op, ok := pathItemMap[method]
+			if !ok {
+				continue
+			}
+			opMap, ok := op.(map[string]any)
+			if !ok {
+				continue
+			}
+			opTags, _ := opMap["tags"].([]any)
+			for _, tag := range opTags {
+				tagStr, _ := tag.(string)
+				if tagStr == "service-a" || tagStr == "service-b" {
+					t.Errorf("operation %s %s should not have service tag %q when DisableServiceTags is true", method, pathStr, tagStr)
+				}
+			}
+		}
+	}
+
+	// Existing tags from upstream specs should be preserved
+	usersPath, ok := paths["/service-a/users"]
+	if !ok {
+		t.Fatal("expected /service-a/users path")
+	}
+	usersPathMap := usersPath.(map[string]any)
+	getOp := usersPathMap["get"].(map[string]any)
+	getTags, _ := getOp["tags"].([]any)
+	foundExisting := false
+	for _, tag := range getTags {
+		if tag == "existing-tag" {
+			foundExisting = true
+		}
+	}
+	if !foundExisting {
+		t.Error("expected existing-tag to be preserved on GET /service-a/users")
+	}
+}
+
+func TestAggregator_BuildMergedSpec_ServiceTagOnly(t *testing.T) {
+	config := DefaultOpenAPIConfig()
+	config.Title = "Test Gateway"
+	config.Version = "1.0.0"
+	config.MergeStrategy = "prefix"
+	config.ServiceTagOnly = true
+	logger := newTestLogger()
+	rm := &mockRouteRegistry{}
+
+	aggr := NewAggregator(config, logger, rm, nil)
+
+	specs := map[string]*ServiceOpenAPISpec{
+		"service-a": {
+			ServiceName: "service-a",
+			Version:     "1.0.0",
+			Healthy:     true,
+			Spec: map[string]any{
+				"openapi": "3.1.0",
+				"paths": map[string]any{
+					"/users": map[string]any{
+						"get": map[string]any{
+							"summary": "List users",
+							"tags":    []any{"users", "admin"},
+						},
+						"post": map[string]any{
+							"summary": "Create user",
+							"tags":    []any{"users"},
+						},
+					},
+				},
+			},
+		},
+		"service-b": {
+			ServiceName: "service-b",
+			Version:     "2.0.0",
+			Healthy:     true,
+			Spec: map[string]any{
+				"openapi": "3.1.0",
+				"paths": map[string]any{
+					"/products": map[string]any{
+						"get": map[string]any{
+							"summary": "List products",
+							"tags":    []any{"catalog"},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	merged := aggr.buildMergedSpec(specs)
+
+	if merged == nil {
+		t.Fatal("expected merged spec, got nil")
+	}
+
+	// Top-level tags should only contain service tags
+	tags, _ := merged["tags"].([]any)
+	for _, tag := range tags {
+		tagMap, ok := tag.(map[string]any)
+		if !ok {
+			continue
+		}
+		tagName, _ := tagMap["name"].(string)
+		if tagName != "service-a" && tagName != "service-b" {
+			t.Errorf("unexpected non-service tag %q in top-level tags", tagName)
+		}
+	}
+
+	paths, ok := merged["paths"].(map[string]any)
+	if !ok {
+		t.Fatal("expected paths object")
+	}
+
+	// Each operation should have exactly one tag: the service name
+	for pathStr, pathItem := range paths {
+		pathItemMap, ok := pathItem.(map[string]any)
+		if !ok {
+			continue
+		}
+		for _, method := range []string{"get", "post", "put", "delete", "patch"} {
+			op, ok := pathItemMap[method]
+			if !ok {
+				continue
+			}
+			opMap, ok := op.(map[string]any)
+			if !ok {
+				continue
+			}
+			opTags, _ := opMap["tags"].([]any)
+			if len(opTags) != 1 {
+				t.Errorf("operation %s %s: expected exactly 1 tag, got %d: %v", method, pathStr, len(opTags), opTags)
+				continue
+			}
+			tagStr, _ := opTags[0].(string)
+			if tagStr != "service-a" && tagStr != "service-b" {
+				t.Errorf("operation %s %s: expected service tag, got %q", method, pathStr, tagStr)
+			}
+		}
+	}
+
+	// Upstream tags like "users", "admin", "catalog" should be gone
+	usersPath := paths["/service-a/users"].(map[string]any)
+	getOp := usersPath["get"].(map[string]any)
+	getTags := getOp["tags"].([]any)
+	for _, tag := range getTags {
+		tagStr, _ := tag.(string)
+		if tagStr == "users" || tagStr == "admin" {
+			t.Errorf("upstream tag %q should have been stripped", tagStr)
+		}
+	}
+}
+
+func TestAggregator_Refresh_RetainsCachedSpecWhenNewHasFewerPaths(t *testing.T) {
+	// Simulate a service that initially returns a full spec, then a partial one.
+	callCount := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		var spec map[string]any
+		if callCount == 1 {
+			// Full spec with 3 paths
+			spec = map[string]any{
+				"openapi": "3.1.0",
+				"info":    map[string]any{"title": "Full", "version": "1.0.0"},
+				"paths": map[string]any{
+					"/users":    map[string]any{"get": map[string]any{"summary": "List users"}},
+					"/products": map[string]any{"get": map[string]any{"summary": "List products"}},
+					"/orders":   map[string]any{"get": map[string]any{"summary": "List orders"}},
+				},
+			}
+		} else {
+			// Partial spec (service mid-restart)
+			spec = map[string]any{
+				"openapi": "3.1.0",
+				"info":    map[string]any{"title": "Partial", "version": "1.0.0"},
+				"paths": map[string]any{
+					"/users": map[string]any{"get": map[string]any{"summary": "List users"}},
+				},
+			}
+		}
+		_ = json.NewEncoder(w).Encode(spec)
+	}))
+	defer server.Close()
+
+	config := DefaultOpenAPIConfig()
+	config.FetchTimeout = 5 * time.Second
+	config.MergeStrategy = "flat"
+	logger := newTestLogger()
+	rm := &mockRouteRegistry{
+		routes: []*Route{
+			{
+				ServiceName: "test-svc",
+				Targets: []*Target{{
+					URL:      server.URL,
+					Metadata: map[string]string{"openapi": server.URL},
+				}},
+			},
+		},
+	}
+
+	aggr := NewAggregator(config, logger, rm, nil)
+
+	// First refresh — fetches full spec
+	aggr.Refresh(context.Background())
+
+	spec1 := aggr.MergedSpecMap()
+	paths1, _ := spec1["paths"].(map[string]any)
+	if len(paths1) != 3 {
+		t.Fatalf("first refresh: expected 3 paths, got %d", len(paths1))
+	}
+
+	// Second refresh — server returns partial spec, but aggregator should retain cached
+	aggr.Refresh(context.Background())
+
+	spec2 := aggr.MergedSpecMap()
+	paths2, _ := spec2["paths"].(map[string]any)
+	if len(paths2) != 3 {
+		t.Errorf("second refresh: expected 3 paths (retained), got %d", len(paths2))
+	}
+}
+
+func TestAggregator_Refresh_RetainsCachedSpecOnFetchFailure(t *testing.T) {
+	callCount := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		if callCount == 1 {
+			spec := map[string]any{
+				"openapi": "3.1.0",
+				"info":    map[string]any{"title": "OK", "version": "1.0.0"},
+				"paths": map[string]any{
+					"/users": map[string]any{"get": map[string]any{"summary": "List users"}},
+				},
+			}
+			_ = json.NewEncoder(w).Encode(spec)
+		} else {
+			w.WriteHeader(http.StatusServiceUnavailable)
+		}
+	}))
+	defer server.Close()
+
+	config := DefaultOpenAPIConfig()
+	config.FetchTimeout = 5 * time.Second
+	config.MergeStrategy = "flat"
+	logger := newTestLogger()
+	rm := &mockRouteRegistry{
+		routes: []*Route{
+			{
+				ServiceName: "test-svc",
+				Targets: []*Target{{
+					URL:      server.URL,
+					Metadata: map[string]string{"openapi": server.URL},
+				}},
+			},
+		},
+	}
+
+	aggr := NewAggregator(config, logger, rm, nil)
+
+	// First refresh — success
+	aggr.Refresh(context.Background())
+
+	spec1 := aggr.MergedSpecMap()
+	paths1, _ := spec1["paths"].(map[string]any)
+	if len(paths1) != 1 {
+		t.Fatalf("first refresh: expected 1 path, got %d", len(paths1))
+	}
+
+	// Second refresh — server returns 503, aggregator should retain cached spec
+	aggr.Refresh(context.Background())
+
+	spec2 := aggr.MergedSpecMap()
+	paths2, _ := spec2["paths"].(map[string]any)
+	if len(paths2) != 1 {
+		t.Errorf("second refresh: expected 1 path (retained), got %d", len(paths2))
 	}
 }

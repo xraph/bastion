@@ -111,11 +111,7 @@ func (rm *Manager) AddRoute(route *bastion.Route) error {
 
 	// Sort by priority (descending)
 	sort.Slice(newTable.routes, func(i, j int) bool {
-		if newTable.routes[i].Priority != newTable.routes[j].Priority {
-			return newTable.routes[i].Priority > newTable.routes[j].Priority
-		}
-		// Manual routes take precedence over auto-discovered
-		return sourceWeight(newTable.routes[i].Source) > sourceWeight(newTable.routes[j].Source)
+		return routeLess(newTable.routes[i], newTable.routes[j])
 	})
 
 	// Atomic swap
@@ -240,11 +236,7 @@ func (rm *Manager) UpdateRoute(route *bastion.Route) error {
 
 	// Re-sort
 	sort.Slice(newTable.routes, func(i, j int) bool {
-		if newTable.routes[i].Priority != newTable.routes[j].Priority {
-			return newTable.routes[i].Priority > newTable.routes[j].Priority
-		}
-
-		return sourceWeight(newTable.routes[i].Source) > sourceWeight(newTable.routes[j].Source)
+		return routeLess(newTable.routes[i], newTable.routes[j])
 	})
 
 	rm.routeTable.Store(newTable)
@@ -447,6 +439,42 @@ func containsMethod(methods []string, method string) bool {
 	}
 
 	return false
+}
+
+// routeLess defines the canonical route ordering used by the route table.
+// Routes are ordered so that more specific routes match before less specific ones:
+//  1. Higher priority first
+//  2. Manual routes before FARP before discovery (at same priority)
+//  3. More specific paths first (longer prefix) — ensures /portal/* matches
+//     before /* when both have the same priority and source
+func routeLess(a, b *bastion.Route) bool {
+	if a.Priority != b.Priority {
+		return a.Priority > b.Priority
+	}
+
+	sw := sourceWeight(a.Source) - sourceWeight(b.Source)
+	if sw != 0 {
+		return sw > 0
+	}
+
+	// More specific paths first: a longer path pattern is more specific.
+	// This prevents a root catch-all (/*) from shadowing /service/* routes.
+	return pathSpecificity(a.Path) > pathSpecificity(b.Path)
+}
+
+// pathSpecificity returns a score indicating how specific a route path is.
+// Longer static prefixes are more specific. Pure wildcards (/* or /) are
+// least specific.
+func pathSpecificity(pattern string) int {
+	if pattern == "/*" || pattern == "/" || pattern == "" {
+		return 0
+	}
+
+	// Strip trailing wildcard to get the static prefix length.
+	prefix := strings.TrimSuffix(pattern, "/*")
+	prefix = strings.TrimSuffix(prefix, "/*")
+
+	return len(prefix)
 }
 
 func sourceWeight(source bastion.RouteSource) int {

@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	farpdiscovery "github.com/xraph/farp/discovery"
 )
 
 // RouteProtocol defines the protocol type for a gateway route.
@@ -54,6 +56,39 @@ type Route struct {
 	Priority    int           `json:"priority"`
 	Enabled     bool          `json:"enabled"`
 	UpdatedAt   time.Time     `json:"updatedAt"`
+
+	// Per-route overrides from FARP RouteDescriptor (nil = use global defaults).
+	Timeout   *TimeoutOverride   `json:"timeout,omitempty"`
+	RateLimit *RateLimitOverride `json:"rateLimit,omitempty"`
+	Cache     *CacheOverride     `json:"cache,omitempty"`
+	Auth      *AuthOverride      `json:"auth,omitempty"`
+	Metadata  map[string]any     `json:"metadata,omitempty"`
+}
+
+// TimeoutOverride holds per-route timeout overrides from FARP RouteDescriptor.
+type TimeoutOverride struct {
+	Read  time.Duration `json:"read,omitempty"`
+	Write time.Duration `json:"write,omitempty"`
+}
+
+// RateLimitOverride holds per-route rate limit overrides from FARP RouteDescriptor.
+type RateLimitOverride struct {
+	RequestsPerSec float64 `json:"requestsPerSec,omitempty"`
+	Burst          int     `json:"burst,omitempty"`
+	PerClient      bool    `json:"perClient,omitempty"`
+}
+
+// CacheOverride holds per-route cache overrides from FARP RouteDescriptor.
+type CacheOverride struct {
+	Enabled bool          `json:"enabled"`
+	TTL     time.Duration `json:"ttl,omitempty"`
+	VaryBy  []string      `json:"varyBy,omitempty"`
+}
+
+// AuthOverride holds per-route auth overrides from FARP RouteDescriptor.
+type AuthOverride struct {
+	SkipAuth bool     `json:"skipAuth,omitempty"`
+	Scopes   []string `json:"scopes,omitempty"`
 }
 
 // Target represents an upstream service endpoint (local copy of the root type).
@@ -110,6 +145,12 @@ type DiscoveryConfig struct {
 	// disappeared from ListServices before actually removing them. This
 	// handles transient mDNS/discovery backend issues. Defaults to 60s.
 	RemovalGracePeriod time.Duration `json:"removalGracePeriod,omitempty" yaml:"removal_grace_period"`
+
+	// PushInstanceTTL is the time-to-live for push-registered service instances.
+	// If a pushed instance does not re-register within this duration, it is
+	// automatically evicted. Set to 0 to disable TTL (instances persist until
+	// explicitly deregistered). Defaults to 0 (disabled).
+	PushInstanceTTL time.Duration `json:"pushInstanceTTL,omitempty" yaml:"push_instance_ttl"`
 }
 
 // ServiceFilter defines a filter for discovered services.
@@ -120,6 +161,13 @@ type ServiceFilter struct {
 	ExcludeTags     []string          `json:"excludeTags,omitempty" yaml:"exclude_tags"`
 	RequireMetadata map[string]string `json:"requireMetadata,omitempty" yaml:"require_metadata"`
 }
+
+// FARPServiceDiscovery is FARP's native service discovery interface.
+// This is the preferred way to provide discovery backends to the gateway.
+type FARPServiceDiscovery = farpdiscovery.ServiceDiscovery
+
+// FARPServiceInstance is FARP's native service instance type.
+type FARPServiceInstance = farpdiscovery.ServiceInstance
 
 // DiscoveryService is the interface that the gateway requires from a discovery provider.
 type DiscoveryService interface {
@@ -154,6 +202,20 @@ func (si *ServiceInstanceInfo) URL(scheme string) string {
 // IsHealthy returns whether the instance is healthy.
 func (si *ServiceInstanceInfo) IsHealthy() bool {
 	return si.Healthy
+}
+
+// FARPInstanceToInfo converts a FARP ServiceInstance to bastion's ServiceInstanceInfo.
+func FARPInstanceToInfo(inst farpdiscovery.ServiceInstance) *ServiceInstanceInfo {
+	return &ServiceInstanceInfo{
+		ID:       inst.ID,
+		Name:     inst.ServiceName,
+		Version:  inst.Version,
+		Address:  inst.Address,
+		Port:     inst.Port,
+		Tags:     inst.Tags,
+		Metadata: inst.Metadata,
+		Healthy:  inst.Status == "healthy",
+	}
 }
 
 // RouteRegistry is the interface for route management operations used
@@ -237,6 +299,19 @@ type OpenAPIConfig struct {
 	// at the dashboard-prefixed swagger path (e.g., /gateway/swagger).
 	// Disabled by default.
 	EnableGatewayDocs bool `json:"enableGatewayDocs" yaml:"enable_gateway_docs"`
+
+	// DisableServiceTags disables automatic per-service tag creation and
+	// per-operation tag injection in the merged spec. When true, the
+	// aggregator will not add service-name tags to operations or create
+	// top-level service tags. Existing tags from upstream specs are preserved.
+	DisableServiceTags bool `json:"disableServiceTags,omitempty" yaml:"disable_service_tags"`
+
+	// ServiceTagOnly replaces all upstream operation tags with just the
+	// service-name tag. When true, existing tags from upstream specs are
+	// stripped and only the service-level tag remains on each operation.
+	// The top-level tags array will only contain service tags.
+	// This option is ignored when DisableServiceTags is true.
+	ServiceTagOnly bool `json:"serviceTagOnly,omitempty" yaml:"service_tag_only"`
 
 	// ExtensionFilters defines per-service extension path filtering rules.
 	// When a service loads Forge extensions, their paths appear as
@@ -323,6 +398,46 @@ func (f *ExtensionPathFilter) AllServiceNames() []string {
 		}
 	}
 	return names
+}
+
+// AsyncAPIConfig holds configuration for the AsyncAPI aggregation feature.
+type AsyncAPIConfig struct {
+	// Enabled turns on/off the AsyncAPI aggregation feature
+	Enabled bool `json:"enabled" yaml:"enabled"`
+
+	// Path is the endpoint path to serve the aggregated AsyncAPI spec
+	Path string `json:"path" yaml:"path"`
+
+	// Title is the title for the aggregated spec
+	Title string `json:"title" yaml:"title"`
+
+	// Description is the description for the aggregated spec
+	Description string `json:"description" yaml:"description"`
+
+	// Version is the version for the aggregated spec
+	Version string `json:"version" yaml:"version"`
+
+	// RefreshInterval is how often to re-fetch upstream specs
+	RefreshInterval time.Duration `json:"refreshInterval" yaml:"refresh_interval"`
+
+	// FetchTimeout is the timeout for fetching a single upstream spec
+	FetchTimeout time.Duration `json:"fetchTimeout" yaml:"fetch_timeout"`
+
+	// ExcludeServices is a list of service names to exclude from aggregation
+	ExcludeServices []string `json:"excludeServices,omitempty" yaml:"exclude_services"`
+}
+
+// DefaultAsyncAPIConfig returns defaults for AsyncAPI aggregation.
+func DefaultAsyncAPIConfig() AsyncAPIConfig {
+	return AsyncAPIConfig{
+		Enabled:         true,
+		Path:            "/asyncapi.json",
+		Title:           "API Gateway - Async APIs",
+		Description:     "Aggregated AsyncAPI specification from all upstream services",
+		Version:         "1.0.0",
+		RefreshInterval: 30 * time.Second,
+		FetchTimeout:    10 * time.Second,
+	}
 }
 
 // DefaultOpenAPIConfig returns defaults for OpenAPI aggregation.

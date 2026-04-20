@@ -132,6 +132,11 @@ func DefaultOpenAPIConfig() OpenAPIConfig {
 	return disc.DefaultOpenAPIConfig()
 }
 
+// DefaultAsyncAPIConfig returns defaults for AsyncAPI aggregation.
+func DefaultAsyncAPIConfig() AsyncAPIConfig {
+	return disc.DefaultAsyncAPIConfig()
+}
+
 // ServiceOpenAPISpec holds a cached OpenAPI spec for a single upstream service.
 //
 // Canonical definition: discovery.ServiceOpenAPISpec
