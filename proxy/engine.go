@@ -526,6 +526,16 @@ func (pe *Engine) modifyResponse(route *bastion.Route, target *bastion.Target, s
 		// Add gateway headers
 		resp.Header.Set("X-Gateway-Route", route.ID)
 
+		// SSE responses must not be buffered by intermediaries. nginx
+		// honours X-Accel-Buffering: no; other proxies (Apache, some
+		// CDNs) check the same header. FlushInterval=-1 already covers
+		// our own ReverseProxy; this header tells anything downstream of
+		// us to do the same.
+		if strings.HasPrefix(resp.Header.Get("Content-Type"), "text/event-stream") {
+			resp.Header.Set("X-Accel-Buffering", "no")
+			resp.Header.Set("Cache-Control", "no-cache")
+		}
+
 		// Run OnResponse hooks
 		if pe.hooks != nil {
 			pe.hooks.RunOnResponse(resp, route)
