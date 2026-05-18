@@ -28,9 +28,9 @@ type Manager struct {
 
 	mu               sync.RWMutex
 	discoveredSvcs   map[string]*DiscoveredService
-	servicePrefixes  map[string]string              // FARP-resolved prefix per service name
-	serviceManifests map[string]*farp.SchemaManifest // cached FARP manifests per service
-	serviceLastSeen  map[string]time.Time            // tracks when each service was last seen in ListServices
+	servicePrefixes  map[string]string                          // FARP-resolved prefix per service name
+	serviceManifests map[string]*farp.SchemaManifest            // cached FARP manifests per service
+	serviceLastSeen  map[string]time.Time                       // tracks when each service was last seen in ListServices
 	pushInstances    map[string]map[string]*ServiceInstanceInfo // aggregated push-registered instances per service
 	stopCh           chan struct{}
 	stopOnce         sync.Once
@@ -40,9 +40,9 @@ type Manager struct {
 	serviceListenersMu sync.RWMutex
 	serviceListeners   []ServiceChangeHook
 
-	serviceLocksMu        sync.Mutex
-	serviceLocks          map[string]*sync.Mutex
-	pushInstanceTimes     map[string]map[string]time.Time // service -> instanceID -> registered-at
+	serviceLocksMu         sync.Mutex
+	serviceLocks           map[string]*sync.Mutex
+	pushInstanceTimes      map[string]map[string]time.Time // service -> instanceID -> registered-at
 	serviceRoutesChecksums map[string]string               // cached routes_checksum per service
 }
 
@@ -59,20 +59,20 @@ func NewManager(
 	}
 
 	return &Manager{
-		config:           config,
-		logger:           logger,
-		rm:               rm,
-		service:          discService,
-		httpClient:       &http.Client{Timeout: fetchTimeout},
-		discoveredSvcs:   make(map[string]*DiscoveredService),
-		servicePrefixes:  make(map[string]string),
-		serviceManifests: make(map[string]*farp.SchemaManifest),
-		serviceLastSeen:  make(map[string]time.Time),
-		pushInstances:    make(map[string]map[string]*ServiceInstanceInfo),
-		serviceLocks:          make(map[string]*sync.Mutex),
-		pushInstanceTimes:     make(map[string]map[string]time.Time),
+		config:                 config,
+		logger:                 logger,
+		rm:                     rm,
+		service:                discService,
+		httpClient:             &http.Client{Timeout: fetchTimeout},
+		discoveredSvcs:         make(map[string]*DiscoveredService),
+		servicePrefixes:        make(map[string]string),
+		serviceManifests:       make(map[string]*farp.SchemaManifest),
+		serviceLastSeen:        make(map[string]time.Time),
+		pushInstances:          make(map[string]map[string]*ServiceInstanceInfo),
+		serviceLocks:           make(map[string]*sync.Mutex),
+		pushInstanceTimes:      make(map[string]map[string]time.Time),
 		serviceRoutesChecksums: make(map[string]string),
-		stopCh:                make(chan struct{}),
+		stopCh:                 make(chan struct{}),
 	}
 }
 

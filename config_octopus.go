@@ -14,17 +14,17 @@ import (
 // OctopusConfig mirrors the octopus gateway YAML configuration format.
 // Use FromOctopusConfig to convert to bastion's native Config type.
 type OctopusConfig struct {
-	Gateway       OctopusGatewayConfig               `yaml:"gateway" json:"gateway"`
-	Upstreams     []OctopusUpstreamConfig             `yaml:"upstreams" json:"upstreams"`
-	Routes        []OctopusRouteConfig                `yaml:"routes" json:"routes"`
-	Plugins       []OctopusPluginConfig               `yaml:"plugins" json:"plugins"`
-	FARP          OctopusFARPConfig                   `yaml:"farp" json:"farp"`
+	Gateway       OctopusGatewayConfig                 `yaml:"gateway" json:"gateway"`
+	Upstreams     []OctopusUpstreamConfig              `yaml:"upstreams" json:"upstreams"`
+	Routes        []OctopusRouteConfig                 `yaml:"routes" json:"routes"`
+	Plugins       []OctopusPluginConfig                `yaml:"plugins" json:"plugins"`
+	FARP          OctopusFARPConfig                    `yaml:"farp" json:"farp"`
 	Observability OctopusObservabilityConfig           `yaml:"observability" json:"observability"`
 	AuthProviders map[string]OctopusAuthProviderConfig `yaml:"auth_providers" json:"auth_providers"`
-	Auth          OctopusAuthConfig                   `yaml:"auth" json:"auth"`
-	CORS          *OctopusCORSConfig                  `yaml:"cors" json:"cors"`
-	Admin         OctopusAdminConfig                  `yaml:"admin" json:"admin"`
-	GRPC          OctopusGRPCConfig                   `yaml:"grpc" json:"grpc"`
+	Auth          OctopusAuthConfig                    `yaml:"auth" json:"auth"`
+	CORS          *OctopusCORSConfig                   `yaml:"cors" json:"cors"`
+	Admin         OctopusAdminConfig                   `yaml:"admin" json:"admin"`
+	GRPC          OctopusGRPCConfig                    `yaml:"grpc" json:"grpc"`
 }
 
 // OctopusGatewayConfig mirrors octopus gateway.* settings.
@@ -60,9 +60,9 @@ type OctopusCompressionConfig struct {
 
 // OctopusUpstreamConfig mirrors octopus upstream definitions.
 type OctopusUpstreamConfig struct {
-	Name           string                   `yaml:"name" json:"name"`
-	Instances      []OctopusInstanceConfig  `yaml:"instances" json:"instances"`
-	LBPolicy       string                   `yaml:"lb_policy" json:"lb_policy"`
+	Name           string                    `yaml:"name" json:"name"`
+	Instances      []OctopusInstanceConfig   `yaml:"instances" json:"instances"`
+	LBPolicy       string                    `yaml:"lb_policy" json:"lb_policy"`
 	HealthCheck    *OctopusHealthCheckConfig `yaml:"health_check" json:"health_check"`
 	CircuitBreaker *OctopusCBConfig          `yaml:"circuit_breaker" json:"circuit_breaker"`
 }
@@ -202,9 +202,9 @@ type OctopusAuthProviderConfig struct {
 	FallbackProvider    string   `yaml:"fallback_provider,omitempty" json:"fallback_provider,omitempty"`
 
 	// API Key fields
-	QueryParam        string              `yaml:"query_param,omitempty" json:"query_param,omitempty"`
+	QueryParam        string               `yaml:"query_param,omitempty" json:"query_param,omitempty"`
 	Keys              []OctopusAPIKeyEntry `yaml:"keys,omitempty" json:"keys,omitempty"`
-	ExternalValidator string              `yaml:"external_validator,omitempty" json:"external_validator,omitempty"`
+	ExternalValidator string               `yaml:"external_validator,omitempty" json:"external_validator,omitempty"`
 
 	// Forward Auth fields
 	Endpoint        string   `yaml:"endpoint,omitempty" json:"endpoint,omitempty"`

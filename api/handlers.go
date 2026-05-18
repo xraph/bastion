@@ -308,7 +308,7 @@ type serviceRegistrationPayload struct {
 // farpV1PushPayload is the FARP v1 push protocol payload (spec section 17.4).
 // Services POST this to /_farp/v1/register.
 type farpV1PushPayload struct {
-	Instance farpV1Instance `json:"instance"`
+	Instance farpV1Instance  `json:"instance"`
 	Manifest json.RawMessage `json:"manifest,omitempty"`
 }
 
@@ -388,9 +388,9 @@ func (h *Handlers) HandleFARPRegister(ctx forge.Context) error {
 	h.gw.AccessLog().LogAdminAction("farp_register", inst.ServiceName, "success", ctx.Request())
 
 	return ctx.JSON(http.StatusOK, map[string]any{
-		"status":     "registered",
-		"service":    inst.ServiceName,
-		"instance":   inst.ID,
+		"status":   "registered",
+		"service":  inst.ServiceName,
+		"instance": inst.ID,
 	})
 }
 

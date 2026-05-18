@@ -554,7 +554,6 @@ func (oa *OpenAPIAggregator) discoverOpenAPIServices() []discoveredOpenAPIServic
 	return services
 }
 
-
 // buildMergedSpec builds a unified OpenAPI 3.1.0 spec from all service specs
 // using the FARP merger package for proper conflict resolution, component
 // prefixing, and routing strategy application.
