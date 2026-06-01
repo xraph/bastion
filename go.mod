@@ -9,8 +9,8 @@ require (
 	github.com/gorilla/websocket v1.5.4-0.20250319132907-e064f32e3674
 	github.com/xraph/farp v1.3.0
 	github.com/xraph/farp/discovery v1.2.0
-	github.com/xraph/forge v1.6.4
-	github.com/xraph/forge/extensions/discovery v1.6.4
+	github.com/xraph/forge v1.6.5
+	github.com/xraph/forge/extensions/discovery v1.6.5
 	github.com/xraph/go-utils v1.1.1
 	github.com/xraph/grove v1.5.2
 	github.com/xraph/grove/drivers/mongodriver v1.5.2
