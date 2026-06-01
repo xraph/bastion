@@ -428,9 +428,9 @@ func FromOctopusConfig(oc OctopusConfig) Config {
 		cfg.Routes = append(cfg.Routes, rc)
 	}
 
-	// --- Load balancing from first upstream ---
-	for _, u := range oc.Upstreams {
-		switch u.LBPolicy {
+	// --- Load balancing from first upstream's policy as global default ---
+	if len(oc.Upstreams) > 0 {
+		switch oc.Upstreams[0].LBPolicy {
 		case "round_robin", "":
 			cfg.LoadBalancing.Strategy = LBRoundRobin
 		case "least_connections":
@@ -438,7 +438,6 @@ func FromOctopusConfig(oc OctopusConfig) Config {
 		case "random":
 			cfg.LoadBalancing.Strategy = LBRandom
 		}
-		break // use first upstream's policy as global default
 	}
 
 	// --- FARP ---

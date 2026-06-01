@@ -84,7 +84,7 @@ func TestSSEThroughReverseProxy(t *testing.T) {
 		flusher.Flush()
 
 		for i := 0; i < eventCount; i++ {
-			fmt.Fprintf(w, "event: message\ndata: {\"n\":%d}\n\n", i)
+			_, _ = fmt.Fprintf(w, "event: message\ndata: {\"n\":%d}\n\n", i)
 			flusher.Flush()
 			time.Sleep(50 * time.Millisecond)
 		}
@@ -108,7 +108,7 @@ func TestSSEThroughReverseProxy(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if !upstreamHit {
 		t.Fatal("upstream was never reached")
@@ -164,7 +164,7 @@ func TestSSEPostThroughReverseProxy(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 		flusher.Flush()
 
-		fmt.Fprintf(w, "event: snapshot\ndata: {\"type\":\"snapshot\",\"body\":%q}\n\n", receivedBody)
+		_, _ = fmt.Fprintf(w, "event: snapshot\ndata: {\"type\":\"snapshot\",\"body\":%q}\n\n", receivedBody)
 		flusher.Flush()
 	}))
 	defer upstream.Close()
@@ -188,7 +188,7 @@ func TestSSEPostThroughReverseProxy(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if receivedMethod != http.MethodPost {
 		t.Fatalf("upstream received %s, expected POST", receivedMethod)
@@ -233,7 +233,7 @@ func TestSSEStreamingLatency(t *testing.T) {
 		flusher.Flush()
 
 		for i := 0; i < 3; i++ {
-			fmt.Fprintf(w, "event: tick\ndata: %d\n\n", i)
+			_, _ = fmt.Fprintf(w, "event: tick\ndata: %d\n\n", i)
 			flusher.Flush()
 			if i < 2 {
 				time.Sleep(200 * time.Millisecond)
@@ -259,7 +259,7 @@ func TestSSEStreamingLatency(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	scanner := bufio.NewScanner(resp.Body)
 	var timestamps []time.Time
@@ -310,7 +310,7 @@ func TestSSEWithFullProxyStack(t *testing.T) {
 		flusher.Flush()
 
 		for i := 0; i < eventCount; i++ {
-			fmt.Fprintf(w, "event: message\ndata: {\"n\":%d}\n\n", i)
+			_, _ = fmt.Fprintf(w, "event: message\ndata: {\"n\":%d}\n\n", i)
 			flusher.Flush()
 			time.Sleep(100 * time.Millisecond)
 		}
@@ -337,7 +337,7 @@ func TestSSEWithFullProxyStack(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("expected 200, got %d", resp.StatusCode)

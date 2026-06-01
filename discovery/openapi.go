@@ -350,12 +350,8 @@ func (oa *OpenAPIAggregator) Refresh(ctx context.Context) {
 
 	// Collect results.
 	newSpecs := make(map[string]*ServiceOpenAPISpec)
-	var mergerInputs []fetchResult
 	for r := range resultCh {
 		newSpecs[r.source.ServiceName] = r.spec
-		if r.spec.Healthy && r.schema != nil {
-			mergerInputs = append(mergerInputs, r)
-		}
 	}
 
 	// Retain previously cached specs when a fresh fetch returns fewer paths.
