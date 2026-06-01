@@ -6,6 +6,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 func TestRequestCoalescer_Disabled(t *testing.T) {
@@ -79,6 +80,16 @@ func TestRequestCoalescer_CoalescesRequests(t *testing.T) {
 		}(i)
 	}
 
+	// Wait until all 4 followers have registered as coalesced waiters on the
+	// in-flight call. This guarantees they observed the first call before the
+	// barrier is released. Otherwise releasing the barrier could let the first
+	// call complete and leave the flight map, causing a late follower to start
+	// a second (non-coalesced) call and invoke doFn again — closing the already
+	// closed started channel.
+	for waiterCount(rc, "same-key") < 4 {
+		time.Sleep(time.Millisecond)
+	}
+
 	// Release the barrier so the single call completes
 	close(barrier)
 	wg.Wait()
@@ -103,6 +114,20 @@ func TestRequestCoalescer_CoalescesRequests(t *testing.T) {
 			t.Errorf("goroutine %d got status %d", i, resp.StatusCode)
 		}
 	}
+}
+
+// waiterCount returns the number of coalesced followers currently waiting on
+// the in-flight call for key. It lets the test deterministically coordinate
+// with the coalescer's internal state instead of relying on goroutine timing.
+func waiterCount(rc *RequestCoalescer, key string) int {
+	rc.mu.Lock()
+	defer rc.mu.Unlock()
+
+	if c, ok := rc.flight[key]; ok {
+		return c.waiters
+	}
+
+	return 0
 }
 
 func TestCoalesceKey_GETOnly(t *testing.T) {

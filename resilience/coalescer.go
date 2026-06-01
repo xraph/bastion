@@ -23,9 +23,10 @@ type RequestCoalescer struct {
 }
 
 type call struct {
-	wg  sync.WaitGroup
-	val *CoalescedResponse
-	err error
+	wg      sync.WaitGroup
+	val     *CoalescedResponse
+	err     error
+	waiters int // number of coalesced followers waiting on this call (guarded by RequestCoalescer.mu)
 }
 
 // CoalescedResponse holds a captured HTTP response for coalescing.
@@ -58,6 +59,7 @@ func (rc *RequestCoalescer) Do(key string, doFn func() (*http.Response, error)) 
 
 	rc.mu.Lock()
 	if c, ok := rc.flight[key]; ok {
+		c.waiters++
 		rc.mu.Unlock()
 		c.wg.Wait()
 
