@@ -65,6 +65,7 @@ func (re *RetryExecutor) Delay(attempt int, routeConfig *bastion.RetryConfig) ti
 	// Apply jitter (+/- 25%)
 	if config.Jitter && delay > 0 {
 		jitterRange := float64(delay) * 0.25
+		// #nosec G404 -- retry backoff jitter. math/rand is the right tool here: the value is a statistical choice, not a secret, and nothing about it needs to be unpredictable to an attacker.
 		jitter := (rand.Float64() * 2 * jitterRange) - jitterRange
 		delay = time.Duration(float64(delay) + jitter)
 

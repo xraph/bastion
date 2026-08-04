@@ -59,6 +59,7 @@ func (ts *TrafficSplitter) applyCanary(_ *http.Request, targets []*bastion.Targe
 	for _, rule := range policy.Rules {
 		if rule.Match.Type == bastion.MatchWeight {
 			// Random roll to decide canary vs stable
+			// #nosec G404 -- canary percentage rollout. math/rand is the right tool here: the value is a statistical choice, not a secret, and nothing about it needs to be unpredictable to an attacker.
 			if rand.Intn(100) < rule.Weight {
 				return filterByTags(targets, rule.TargetTags)
 			}
@@ -117,6 +118,7 @@ func (ts *TrafficSplitter) applyWeighted(_ *http.Request, targets []*bastion.Tar
 		return targets
 	}
 
+	// #nosec G404 -- weighted route selection. math/rand is the right tool here: the value is a statistical choice, not a secret, and nothing about it needs to be unpredictable to an attacker.
 	roll := rand.Intn(totalWeight)
 
 	for _, rule := range policy.Rules {
@@ -147,6 +149,7 @@ func matchTrafficRule(r *http.Request, match bastion.TrafficMatch) bool {
 		}
 
 	case bastion.MatchWeight:
+		// #nosec G404 -- weight-based traffic split. math/rand is the right tool here: the value is a statistical choice, not a secret, and nothing about it needs to be unpredictable to an attacker.
 		matched = rand.Intn(100) < 50 // Generic weight-based
 
 	case bastion.MatchIPRange:

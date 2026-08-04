@@ -270,6 +270,7 @@ type OctopusGRPCConfig struct {
 
 // LoadOctopusConfig reads and parses an octopus-format YAML config file.
 func LoadOctopusConfig(path string) (OctopusConfig, error) {
+	// #nosec G304 -- path is the operator-supplied config file location.
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return OctopusConfig{}, fmt.Errorf("read octopus config: %w", err)

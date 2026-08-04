@@ -131,16 +131,16 @@ func (cw *compressWriter) startCompression() {
 	cw.gz.Reset(cw.ResponseWriter)
 
 	if len(cw.buf) > 0 {
-		cw.gz.Write(cw.buf) //nolint:errcheck
+		_, _ = cw.gz.Write(cw.buf)
 		cw.buf = nil
 	}
 }
 
 func (cw *compressWriter) Close() {
 	if cw.compressed {
-		cw.gz.Close() //nolint:errcheck
+		_ = cw.gz.Close()
 	} else if len(cw.buf) > 0 {
-		cw.ResponseWriter.Write(cw.buf) //nolint:errcheck
+		_, _ = cw.ResponseWriter.Write(cw.buf)
 	}
 }
 

@@ -105,6 +105,7 @@ func (lb *randomLB) Select(targets []*bastion.Target, _ string) *bastion.Target 
 		return nil
 	}
 
+	// #nosec G404 -- load-balancer backend pick. math/rand is the right tool here: the value is a statistical choice, not a secret, and nothing about it needs to be unpredictable to an attacker.
 	return healthy[rand.Intn(len(healthy))]
 }
 

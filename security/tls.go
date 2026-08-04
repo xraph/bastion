@@ -156,8 +156,11 @@ func (tm *TLSManager) reloadLoop() {
 // buildGlobalTLSConfig creates a tls.Config from the global configuration.
 func (tm *TLSManager) buildGlobalTLSConfig() *tls.Config {
 	cfg := &tls.Config{
-		MinVersion:         tlsVersionFromString(tm.config.MinVersion),
-		InsecureSkipVerify: tm.config.InsecureSkipVerify, //nolint:gosec // user-configured
+		MinVersion: tlsVersionFromString(tm.config.MinVersion),
+		// #nosec G402 -- operator-configured. Verification is on unless the
+		// deployment explicitly disables it, which is a supported choice for
+		// upstreams presenting self-signed certificates.
+		InsecureSkipVerify: tm.config.InsecureSkipVerify,
 	}
 
 	// Load CA certificate for server verification

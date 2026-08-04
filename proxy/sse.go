@@ -78,6 +78,10 @@ func ProxySSE(
 	// Create upstream request preserving the original method and body.
 	// SSE endpoints may use POST (e.g., to send a subscription payload)
 	// rather than GET.
+	// #nosec G704 -- not SSRF: scheme and host come from target.URL, the matched
+	// route's configured upstream. The client influences only the path and query
+	// appended to it, which is what a reverse proxy is for. A request cannot
+	// redirect this to a host the operator did not configure.
 	upstreamReq, err := http.NewRequestWithContext(r.Context(), r.Method, upstreamURL, r.Body)
 	if err != nil {
 		http.Error(w, `{"error":"failed to create upstream request"}`, http.StatusBadGateway)
@@ -126,6 +130,7 @@ func ProxySSE(
 		Transport: sseTransport,
 	}
 
+	// #nosec G704 -- upstreamReq targets the route's configured upstream; see above.
 	resp, err := client.Do(upstreamReq)
 	if err != nil {
 		logger.Warn("SSE upstream connect failed",

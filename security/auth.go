@@ -296,6 +296,9 @@ func NewForwardAuthProvider(name, endpoint string, headers []string) *ForwardAut
 func (p *ForwardAuthProvider) Name() string { return p.name }
 
 func (p *ForwardAuthProvider) Authenticate(ctx context.Context, r *http.Request) (*AuthContext, error) {
+	// #nosec G704 -- p.endpoint is the forward-auth service configured at
+	// construction, not anything derived from r. Only header values are
+	// forwarded from the incoming request, and those cannot change the target.
 	authReq, err := http.NewRequestWithContext(ctx, http.MethodGet, p.endpoint, nil)
 	if err != nil {
 		return nil, &AuthError{Code: http.StatusInternalServerError, Message: "failed to create auth request"}
@@ -312,6 +315,7 @@ func (p *ForwardAuthProvider) Authenticate(ctx context.Context, r *http.Request)
 	authReq.Header.Set("X-Original-URI", r.RequestURI)
 	authReq.Header.Set("X-Original-Method", r.Method)
 
+	// #nosec G704 -- authReq targets the configured endpoint; see above.
 	resp, err := p.client.Do(authReq)
 	if err != nil {
 		return nil, &AuthError{Code: http.StatusBadGateway, Message: "auth service unavailable"}

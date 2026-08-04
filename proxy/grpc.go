@@ -27,9 +27,10 @@ type GRPCProxy struct {
 // NewGRPCProxy creates a new gRPC reverse proxy engine.
 func NewGRPCProxy(config bastion.Config, logger forge.Logger) *GRPCProxy {
 	tlsConfig := &tls.Config{
-		MinVersion:         tls.VersionTLS12,
-		InsecureSkipVerify: config.TLS.InsecureSkipVerify, //nolint:gosec // user-configured
-		NextProtos:         []string{"h2"},                // Force HTTP/2 for gRPC
+		MinVersion: tls.VersionTLS12,
+		// #nosec G402 -- operator-configured, as in security/tls.go.
+		InsecureSkipVerify: config.TLS.InsecureSkipVerify,
+		NextProtos:         []string{"h2"}, // Force HTTP/2 for gRPC
 	}
 
 	transport := &http.Transport{
@@ -109,6 +110,8 @@ func (gp *GRPCProxy) ServeHTTP(w http.ResponseWriter, r *http.Request, route *ba
 		defer cancel()
 	}
 
+	// #nosec G704 -- targetURL is the configured upstream with the request path
+	// appended; the client cannot change the host. Same shape as proxy/sse.go.
 	upstreamReq, err := http.NewRequestWithContext(ctx, r.Method, targetURL, r.Body)
 	if err != nil {
 		gp.logger.Error("failed to create gRPC upstream request",

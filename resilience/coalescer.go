@@ -126,5 +126,6 @@ func WriteCoalescedResponse(w http.ResponseWriter, cr *CoalescedResponse) {
 	}
 
 	w.WriteHeader(cr.StatusCode)
-	w.Write(cr.Body) //nolint:errcheck
+	// Write errors to a client that has gone away are not actionable here.
+	_, _ = w.Write(cr.Body)
 }
