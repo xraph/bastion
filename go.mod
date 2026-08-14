@@ -2,6 +2,8 @@ module github.com/xraph/bastion
 
 go 1.26.0
 
+toolchain go1.26.6
+
 require (
 	github.com/a-h/templ v0.3.1001
 	github.com/gobwas/ws v1.4.0
