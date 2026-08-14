@@ -8,9 +8,9 @@ require (
 	github.com/google/uuid v1.6.0
 	github.com/gorilla/websocket v1.5.4-0.20250319132907-e064f32e3674
 	github.com/xraph/farp v1.3.1
-	github.com/xraph/farp/discovery v1.2.0
-	github.com/xraph/forge v1.9.2
-	github.com/xraph/forge/extensions/discovery v1.6.5
+	github.com/xraph/farp/discovery v1.3.1
+	github.com/xraph/forge v1.9.7
+	github.com/xraph/forge/extensions/discovery v1.7.2
 	github.com/xraph/go-utils v1.1.6
 	github.com/xraph/grove v1.6.0
 	github.com/xraph/grove/drivers/mongodriver v1.6.0
@@ -91,6 +91,7 @@ require (
 	github.com/modern-go/reflect2 v1.0.3-0.20250322232337-35a7c28c31ee // indirect
 	github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822 // indirect
 	github.com/ncruces/go-strftime v1.0.0 // indirect
+	github.com/pmezard/go-difflib v1.0.1-0.20181226105442-5d4384ee4fb2 // indirect
 	github.com/prometheus/client_golang v1.24.1 // indirect
 	github.com/prometheus/client_model v0.6.2 // indirect
 	github.com/prometheus/common v0.70.1 // indirect
