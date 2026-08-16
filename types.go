@@ -286,8 +286,8 @@ type TrafficMatch struct {
 
 // TransformConfig defines request/response transformation.
 type TransformConfig struct {
-	RequestHeaders  HeaderPolicy `json:"requestHeaders,omitempty"`
-	ResponseHeaders HeaderPolicy `json:"responseHeaders,omitempty"`
+	RequestHeaders  HeaderPolicy `json:"requestHeaders"`
+	ResponseHeaders HeaderPolicy `json:"responseHeaders"`
 }
 
 // TargetTLSConfig holds per-target TLS configuration.

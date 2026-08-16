@@ -351,7 +351,7 @@ func (e *Gateway) SetCacheStore(store CacheStore) {
 // SetStore sets a composite store that provides persistence for all gateway
 // subsystems (routes, circuit breakers, health checks, cache, rate limits, audit).
 // The store is decomposed into subsystem-specific interfaces.
-func (e *Gateway) SetStore(s interface{}) {
+func (e *Gateway) SetStore(s any) {
 	if s == nil {
 		return
 	}
