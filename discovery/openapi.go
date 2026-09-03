@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"reflect"
 	"sort"
 	"strings"
 	"sync"
@@ -806,6 +807,15 @@ func (oa *OpenAPIAggregator) buildMergedSpec(specs map[string]*ServiceOpenAPISpe
 		}
 		oa.addGatewayRoutes(paths, &tags, tagSet)
 		merged["tags"] = tags
+	}
+
+	// 6. Drop schemas nothing reaches. This runs last because every step above
+	//    can change what is reachable: step 1 deletes paths, and step 5 adds
+	//    them.
+	if removed := pruneUnreferencedSchemas(merged); removed > 0 {
+		oa.logger.Debug("pruned unreferenced OpenAPI schemas",
+			forge.F("removed", removed),
+		)
 	}
 
 	return merged
@@ -1977,4 +1987,247 @@ func (oa *OpenAPIAggregator) serveSwaggerUI(ctx forge.Context, specURL string) e
 	_, err := ctx.Response().Write([]byte(html))
 
 	return err
+}
+
+// pruneUnreferencedSchemas removes component schemas that nothing in the
+// published document can reach, and reports how many it dropped.
+//
+// The merger routes paths through each service's FARP manifest but copies that
+// service's components wholesale, and bastion's own post-processing deletes
+// further paths on top of that (extension filters, step 1 above). A service
+// that mounts routes the gateway does not aggregate therefore leaves its entire
+// schema set behind with no operation pointing at it: portal serves /relay,
+// /dashboard, /herald and /keysmith next to the /api surface published here,
+// and every schema behind those 135 unaggregated paths still ships.
+//
+// Dead components are not merely noise. A client generator that strips the
+// per-service name prefixes compares each name it filters out against the names
+// it keeps, so an unreachable `Portal_Event` collides with a live `TwinOS_Event`
+// and fails the build over a record this gateway never serves.
+//
+// Every part of the document EXCEPT components.schemas is a root. The other
+// component sections are retained in full, so a schema only one of them mentions
+// is still live; walking paths alone would publish a document whose own
+// components dangle.
+func pruneUnreferencedSchemas(merged map[string]any) int {
+	components, _ := merged["components"].(map[string]any)
+	if components == nil {
+		return 0
+	}
+
+	schemas, _ := components["schemas"].(map[string]any)
+	if len(schemas) == 0 {
+		return 0
+	}
+
+	reachable := make(map[string]struct{}, len(schemas))
+
+	var mark func(name string)
+
+	mark = func(name string) {
+		if name == "" {
+			return
+		}
+
+		if _, seen := reachable[name]; seen {
+			return
+		}
+
+		schema, declared := schemas[name]
+		if !declared {
+			// A pointer at a component no service declared. It has no body to
+			// walk, and the document is already broken there -- reporting that
+			// is not this pass's job, and marking it would not make it whole.
+			return
+		}
+
+		reachable[name] = struct{}{}
+
+		collectSchemaRefs(schema, mark)
+	}
+
+	for key, value := range merged {
+		if key == "components" {
+			continue
+		}
+
+		collectSchemaRefs(value, mark)
+	}
+
+	for section, value := range components {
+		if section == "schemas" {
+			continue
+		}
+
+		collectSchemaRefs(value, mark)
+	}
+
+	removed := 0
+
+	for name := range schemas {
+		if _, live := reachable[name]; !live {
+			delete(schemas, name)
+
+			removed++
+		}
+	}
+
+	return removed
+}
+
+// collectSchemaRefs walks a node and hands mark the component schema named by
+// every pointer it carries.
+//
+// The walk is reflective because the merged document is not a decoded-JSON tree.
+// pathItemToMap keeps the merger's own types under each path -- []merger.Parameter,
+// *merger.RequestBody, map[string]merger.Response -- and only the innermost
+// Schema is a map[string]any. A walk that understood map[string]any and []any
+// alone would cross none of those and so reach no $ref at all, marking nothing
+// and pruning every schema in a document that still references them.
+//
+// Two forms name a schema. A "$ref" string is the ordinary one. A
+// discriminator's "mapping" is the other, and for the variants of a oneOf it is
+// frequently the only pointer to them; OpenAPI lets a mapping value be either a
+// full pointer or a bare schema name, and both appear upstream.
+func collectSchemaRefs(node any, mark func(string)) {
+	collectRefsValue(reflect.ValueOf(node), mark)
+}
+
+func collectRefsValue(value reflect.Value, mark func(string)) {
+	value = indirect(value)
+	if !value.IsValid() {
+		return
+	}
+
+	switch value.Kind() {
+	case reflect.Map:
+		stringKeyed := value.Type().Key().Kind() == reflect.String
+
+		for _, key := range value.MapKeys() {
+			entry := value.MapIndex(key)
+
+			if stringKeyed {
+				markNamedField(key.String(), entry, mark)
+			}
+
+			collectRefsValue(entry, mark)
+		}
+
+	case reflect.Slice, reflect.Array:
+		for i := range value.Len() {
+			collectRefsValue(value.Index(i), mark)
+		}
+
+	case reflect.Struct:
+		structType := value.Type()
+
+		for i := range value.NumField() {
+			field := structType.Field(i)
+			if !field.IsExported() {
+				continue
+			}
+
+			markNamedField(jsonFieldName(field), value.Field(i), mark)
+			collectRefsValue(value.Field(i), mark)
+		}
+	}
+}
+
+// markNamedField applies the two pointer forms to a map entry or struct field
+// that carries the name they are spelled under.
+func markNamedField(name string, value reflect.Value, mark func(string)) {
+	switch name {
+	case "$ref":
+		if ref, ok := stringValue(value); ok {
+			mark(schemaRefName(ref))
+		}
+
+	case "discriminator":
+		markDiscriminatorMapping(value, mark)
+	}
+}
+
+// markDiscriminatorMapping marks every variant a discriminator's mapping names.
+func markDiscriminatorMapping(discriminator reflect.Value, mark func(string)) {
+	discriminator = indirect(discriminator)
+	if !discriminator.IsValid() || discriminator.Kind() != reflect.Map {
+		return
+	}
+
+	if discriminator.Type().Key().Kind() != reflect.String {
+		return
+	}
+
+	mapping := indirect(discriminator.MapIndex(reflect.ValueOf("mapping")))
+	if !mapping.IsValid() || mapping.Kind() != reflect.Map {
+		return
+	}
+
+	for _, key := range mapping.MapKeys() {
+		target, ok := stringValue(mapping.MapIndex(key))
+		if !ok {
+			continue
+		}
+
+		// A pointer resolves as one; a bare value names the schema directly.
+		if strings.Contains(target, "/") {
+			mark(schemaRefName(target))
+
+			continue
+		}
+
+		mark(target)
+	}
+}
+
+// indirect unwraps interfaces and pointers down to the value they hold.
+func indirect(value reflect.Value) reflect.Value {
+	for value.IsValid() && (value.Kind() == reflect.Interface || value.Kind() == reflect.Pointer) {
+		if value.IsNil() {
+			return reflect.Value{}
+		}
+
+		value = value.Elem()
+	}
+
+	return value
+}
+
+// stringValue reports the string a value holds, through any interface or
+// pointer wrapping it.
+func stringValue(value reflect.Value) (string, bool) {
+	value = indirect(value)
+	if !value.IsValid() || value.Kind() != reflect.String {
+		return "", false
+	}
+
+	return value.String(), true
+}
+
+// jsonFieldName returns the name a struct field serializes under, so a field
+// tagged `json:"$ref"` is recognized the same as the map key would be.
+func jsonFieldName(field reflect.StructField) string {
+	tag, ok := field.Tag.Lookup("json")
+	if !ok {
+		return field.Name
+	}
+
+	name, _, _ := strings.Cut(tag, ",")
+	if name == "" || name == "-" {
+		return field.Name
+	}
+
+	return name
+}
+
+// schemaRefName returns the component name a pointer addresses, or "" when it
+// addresses anything else -- another component section, or an external file.
+func schemaRefName(ref string) string {
+	const prefix = "#/components/schemas/"
+
+	if !strings.HasPrefix(ref, prefix) {
+		return ""
+	}
+
+	return strings.TrimPrefix(ref, prefix)
 }

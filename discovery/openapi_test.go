@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/xraph/farp/merger"
 	"github.com/xraph/forge"
 	"github.com/xraph/go-utils/log"
 )
@@ -1101,5 +1102,245 @@ func TestAggregator_Refresh_RetainsCachedSpecOnFetchFailure(t *testing.T) {
 	paths2, _ := spec2["paths"].(map[string]any)
 	if len(paths2) != 1 {
 		t.Errorf("second refresh: expected 1 path (retained), got %d", len(paths2))
+	}
+}
+
+// The merger routes paths through the service manifest but copies every
+// component the upstream declared, so a service that mounts routes the gateway
+// does not aggregate (portal's /relay, /dashboard, /herald) leaves its schemas
+// behind with nothing pointing at them. These guard that the published document
+// only carries schemas something can actually reach, and -- more importantly --
+// that the walk treats every part of the document except components.schemas as
+// a root, so pruning can never remove a schema that is still referenced.
+
+func TestPruneUnreferencedSchemas_DropsOrphansKeepsReachable(t *testing.T) {
+	merged := map[string]any{
+		"paths": map[string]any{
+			"/users": map[string]any{
+				"get": map[string]any{
+					"responses": map[string]any{
+						"200": map[string]any{
+							"content": map[string]any{
+								"application/json": map[string]any{
+									"schema": map[string]any{
+										"$ref": "#/components/schemas/User",
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+		"components": map[string]any{
+			"schemas": map[string]any{
+				// Reached from the path, and pulls Address in transitively.
+				"User": map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"address": map[string]any{"$ref": "#/components/schemas/Address"},
+					},
+				},
+				"Address": map[string]any{"type": "object"},
+				// Declared by an upstream whose routes were never aggregated.
+				"RelayEvent": map[string]any{"type": "object"},
+				// An orphan referencing a live schema must not keep itself alive.
+				"OrphanHolder": map[string]any{
+					"properties": map[string]any{
+						"other": map[string]any{"$ref": "#/components/schemas/AlsoOrphan"},
+					},
+				},
+				"AlsoOrphan": map[string]any{"type": "object"},
+			},
+		},
+	}
+
+	removed := pruneUnreferencedSchemas(merged)
+
+	if removed != 3 {
+		t.Fatalf("expected 3 schemas pruned, got %d", removed)
+	}
+
+	schemas := merged["components"].(map[string]any)["schemas"].(map[string]any)
+	for _, name := range []string{"User", "Address"} {
+		if _, ok := schemas[name]; !ok {
+			t.Errorf("%s is reachable and must survive the prune", name)
+		}
+	}
+	for _, name := range []string{"RelayEvent", "OrphanHolder", "AlsoOrphan"} {
+		if _, ok := schemas[name]; ok {
+			t.Errorf("%s is unreachable and must be pruned", name)
+		}
+	}
+}
+
+func TestPruneUnreferencedSchemas_NonSchemaComponentsAreRoots(t *testing.T) {
+	// A shared response, parameter, requestBody or securityScheme is retained
+	// wholesale, so anything it points at is still live even with no path
+	// mentioning it. Walking only paths would delete these and publish a
+	// document whose own components dangle.
+	merged := map[string]any{
+		"paths": map[string]any{},
+		"components": map[string]any{
+			"responses": map[string]any{
+				"NotFound": map[string]any{
+					"content": map[string]any{
+						"application/json": map[string]any{
+							"schema": map[string]any{"$ref": "#/components/schemas/Problem"},
+						},
+					},
+				},
+			},
+			"parameters": map[string]any{
+				"PageParam": map[string]any{
+					"schema": map[string]any{"$ref": "#/components/schemas/Page"},
+				},
+			},
+			"schemas": map[string]any{
+				"Problem": map[string]any{"type": "object"},
+				"Page":    map[string]any{"type": "integer"},
+				"Unused":  map[string]any{"type": "object"},
+			},
+		},
+	}
+
+	if removed := pruneUnreferencedSchemas(merged); removed != 1 {
+		t.Fatalf("expected only Unused pruned, got %d removed", removed)
+	}
+
+	schemas := merged["components"].(map[string]any)["schemas"].(map[string]any)
+	if _, ok := schemas["Problem"]; !ok {
+		t.Error("Problem is held by a retained response and must survive")
+	}
+	if _, ok := schemas["Page"]; !ok {
+		t.Error("Page is held by a retained parameter and must survive")
+	}
+}
+
+func TestPruneUnreferencedSchemas_FollowsDiscriminatorMapping(t *testing.T) {
+	// A oneOf discriminator names its variants in a mapping whose values are
+	// refs. They are the only pointer to those variants, so a walk that only
+	// understands "$ref" keys would prune a schema the document still resolves.
+	merged := map[string]any{
+		"paths": map[string]any{
+			"/pets": map[string]any{
+				"get": map[string]any{
+					"responses": map[string]any{
+						"200": map[string]any{
+							"content": map[string]any{
+								"application/json": map[string]any{
+									"schema": map[string]any{"$ref": "#/components/schemas/Pet"},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+		"components": map[string]any{
+			"schemas": map[string]any{
+				"Pet": map[string]any{
+					"discriminator": map[string]any{
+						"propertyName": "kind",
+						"mapping": map[string]any{
+							"cat": "#/components/schemas/Cat",
+							"dog": "Dog",
+						},
+					},
+				},
+				"Cat":   map[string]any{"type": "object"},
+				"Dog":   map[string]any{"type": "object"},
+				"Gecko": map[string]any{"type": "object"},
+			},
+		},
+	}
+
+	if removed := pruneUnreferencedSchemas(merged); removed != 1 {
+		t.Fatalf("expected only Gecko pruned, got %d removed", removed)
+	}
+
+	schemas := merged["components"].(map[string]any)["schemas"].(map[string]any)
+	for _, name := range []string{"Cat", "Dog"} {
+		if _, ok := schemas[name]; !ok {
+			t.Errorf("%s is named by the discriminator mapping and must survive", name)
+		}
+	}
+}
+
+func TestPruneUnreferencedSchemas_ToleratesMissingSections(t *testing.T) {
+	// Refresh can hand this a spec built before any service reported, and a
+	// prune that panicked on an absent components block would take the whole
+	// gateway's /openapi.json down with it.
+	for name, merged := range map[string]map[string]any{
+		"no components": {"paths": map[string]any{}},
+		"no schemas":    {"paths": map[string]any{}, "components": map[string]any{}},
+		"empty":         {},
+	} {
+		if removed := pruneUnreferencedSchemas(merged); removed != 0 {
+			t.Errorf("%s: expected 0 removed, got %d", name, removed)
+		}
+	}
+}
+
+func TestPruneUnreferencedSchemas_WalksTypedMergerStructs(t *testing.T) {
+	// pathItemToMap does not flatten the document: it stores op.Responses,
+	// op.RequestBody and op.Parameters as the merger's own Go types, and only
+	// the innermost Schema is a map[string]any. A walk that understands
+	// map[string]any and []any alone therefore reaches no $ref at all and
+	// prunes every schema in the document while the paths still reference them.
+	// This builds the merged map the way buildMergedSpec does, through the real
+	// pathItemToMap, so the walk has to cross those types to pass.
+	item := merger.PathItem{
+		Get: &merger.Operation{
+			OperationID: "listUsers",
+			Parameters: []merger.Parameter{{
+				Name:   "page",
+				In:     "query",
+				Schema: map[string]any{"$ref": "#/components/schemas/Page"},
+			}},
+			Responses: map[string]merger.Response{
+				"200": {
+					Description: "ok",
+					Content: map[string]merger.MediaType{
+						"application/json": {
+							Schema: map[string]any{"$ref": "#/components/schemas/User"},
+						},
+					},
+				},
+			},
+		},
+		Post: &merger.Operation{
+			OperationID: "createUser",
+			RequestBody: &merger.RequestBody{
+				Content: map[string]merger.MediaType{
+					"application/json": {
+						Schema: map[string]any{"$ref": "#/components/schemas/NewUser"},
+					},
+				},
+			},
+		},
+	}
+
+	merged := map[string]any{
+		"paths": map[string]any{"/users": pathItemToMap(item)},
+		"components": map[string]any{
+			"schemas": map[string]any{
+				"User":    map[string]any{"type": "object"},
+				"NewUser": map[string]any{"type": "object"},
+				"Page":    map[string]any{"type": "integer"},
+				"Orphan":  map[string]any{"type": "object"},
+			},
+		},
+	}
+
+	if removed := pruneUnreferencedSchemas(merged); removed != 1 {
+		t.Fatalf("expected only Orphan pruned, got %d removed", removed)
+	}
+
+	schemas := merged["components"].(map[string]any)["schemas"].(map[string]any)
+	for _, name := range []string{"User", "NewUser", "Page"} {
+		if _, ok := schemas[name]; !ok {
+			t.Errorf("%s is referenced through the merger's typed structs and must survive", name)
+		}
 	}
 }
