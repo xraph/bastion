@@ -108,7 +108,20 @@ func (a *routeRegistryAdapter) UpdateRoute(route *disc.Route) error {
 	if route.Timeout != nil {
 		updated.Timeout = &TimeoutConfig{Read: route.Timeout.Read, Write: route.Timeout.Write}
 	}
-	if route.RateLimit != nil {
+	// A discovery override carrying no usable rate OR no burst is not a rate
+	// limit, it is
+	// a zero-valued struct that nobody filled in. Honouring it anyway built
+	// newTokenBucket(0, 0): no tokens to begin with and no refill, since the
+	// bucket only ever gains `elapsed * rate`. Burst alone is enough to do it:
+	// it sets maxTokens, and every refill is clamped to maxTokens, so a burst of
+	// zero pins the bucket at zero no matter how generous the rate. The route
+	// then answered 429 to
+	// every request for the life of the process, survived restarts because
+	// re-registration restores the same override, and never recovered with
+	// time. Skipping it leaves the route unlimited, which is what it was
+	// before the empty override arrived.
+	if route.RateLimit != nil && route.RateLimit.RequestsPerSec > 0 &&
+		route.RateLimit.Burst > 0 {
 		updated.RateLimit = &middleware.RateLimitConfig{
 			Enabled:        true,
 			RequestsPerSec: route.RateLimit.RequestsPerSec,
@@ -206,7 +219,20 @@ func discRouteToRoot(r *disc.Route) *Route {
 	if r.Timeout != nil {
 		route.Timeout = &TimeoutConfig{Read: r.Timeout.Read, Write: r.Timeout.Write}
 	}
-	if r.RateLimit != nil {
+	// A discovery override carrying no usable rate OR no burst is not a rate
+	// limit, it is
+	// a zero-valued struct that nobody filled in. Honouring it anyway built
+	// newTokenBucket(0, 0): no tokens to begin with and no refill, since the
+	// bucket only ever gains `elapsed * rate`. Burst alone is enough to do it:
+	// it sets maxTokens, and every refill is clamped to maxTokens, so a burst of
+	// zero pins the bucket at zero no matter how generous the rate. The route
+	// then answered 429 to
+	// every request for the life of the process, survived restarts because
+	// re-registration restores the same override, and never recovered with
+	// time. Skipping it leaves the route unlimited, which is what it was
+	// before the empty override arrived.
+	if r.RateLimit != nil && r.RateLimit.RequestsPerSec > 0 &&
+		r.RateLimit.Burst > 0 {
 		route.RateLimit = &middleware.RateLimitConfig{
 			Enabled:        true,
 			RequestsPerSec: r.RateLimit.RequestsPerSec,

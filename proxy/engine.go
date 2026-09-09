@@ -287,7 +287,14 @@ func (pe *Engine) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Rate limiting
 	if !pe.rl.Allow(r) {
 		pe.stats.RecordRateLimited()
-		http.Error(w, `{"error":"rate limit exceeded"}`, http.StatusTooManyRequests)
+		// Name the limiter and show its numbers. Both 429 sites in this file
+		// used to emit a byte-identical body, so an operator could not tell a
+		// global cap from a per-route one, and a zero-valued config looked
+		// exactly like a busy service.
+		http.Error(w, fmt.Sprintf(
+			`{"error":"rate limit exceeded","limiter":"global","rps":%v,"burst":%v,"perClient":%v}`,
+			pe.rl.Config().RequestsPerSec, pe.rl.Config().Burst, pe.rl.Config().PerClient,
+		), http.StatusTooManyRequests)
 
 		return
 	}
@@ -315,7 +322,10 @@ func (pe *Engine) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Per-route rate limiting
 	if route.RateLimit != nil && !pe.rl.AllowWithConfig(r, route.RateLimit) {
 		pe.stats.RecordRateLimited()
-		http.Error(w, `{"error":"rate limit exceeded"}`, http.StatusTooManyRequests)
+		http.Error(w, fmt.Sprintf(
+			`{"error":"rate limit exceeded","limiter":"route","route":%q,"rps":%v,"burst":%v,"perClient":%v}`,
+			route.Path, route.RateLimit.RequestsPerSec, route.RateLimit.Burst, route.RateLimit.PerClient,
+		), http.StatusTooManyRequests)
 
 		return
 	}
