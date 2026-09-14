@@ -91,6 +91,10 @@ func GatewayMiddleware(config Config, next http.Handler) http.Handler {
 }
 
 func handleCORS(w http.ResponseWriter, r *http.Request, config CORSConfig) {
+	// Even absent or disallowed origins produce a different CORS response.
+	// Append so other middleware's cache dimensions remain intact.
+	w.Header().Add("Vary", "Origin")
+
 	origin := r.Header.Get("Origin")
 	if origin == "" {
 		return
