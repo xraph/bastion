@@ -481,7 +481,21 @@ func (e *Gateway) wireCallbacks() {
 						e.healthMon.Register(event.Route.ID, target)
 					}
 				case RouteEventRemoved:
+					// Another route may still use the same target id (legacy
+					// REST ids, config routes, FARP routes sharing an instance).
+					inUse := map[string]struct{}{}
+
+					for _, r := range e.routeManager.ListRoutes() {
+						for _, t := range r.Targets {
+							inUse[t.GetID()] = struct{}{}
+						}
+					}
+
 					for _, target := range event.Route.Targets {
+						if _, ok := inUse[target.GetID()]; ok {
+							continue
+						}
+
 						e.healthMon.Deregister(target.GetID())
 					}
 				}

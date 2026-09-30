@@ -94,6 +94,16 @@ func (hm *Monitor) Deregister(targetID string) {
 	delete(hm.targets, targetID)
 }
 
+// Tracks reports whether a target is currently registered for monitoring.
+func (hm *Monitor) Tracks(targetID string) bool {
+	hm.mu.RLock()
+	defer hm.mu.RUnlock()
+
+	_, ok := hm.targets[targetID]
+
+	return ok
+}
+
 // RecordPassiveFailure records a passive health check failure.
 func (hm *Monitor) RecordPassiveFailure(targetID string) {
 	if !hm.config.EnablePassive {
