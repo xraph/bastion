@@ -12,6 +12,7 @@ import (
 	"github.com/xraph/vessel"
 
 	"github.com/xraph/bastion"
+	"github.com/xraph/bastion/admin"
 	"github.com/xraph/bastion/api"
 	bastionDash "github.com/xraph/bastion/dashboard"
 	"github.com/xraph/bastion/proxy"
@@ -33,8 +34,9 @@ var (
 // DashboardAware integration, auto-wiring of the discovery service, and
 // grove-based persistent store support.
 type Extension struct {
-	gw   *bastion.Gateway
-	opts []bastion.ConfigOption
+	gw    *bastion.Gateway
+	admin *admin.Service
+	opts  []bastion.ConfigOption
 
 	// Grove store integration
 	useGrove       bool
@@ -114,6 +116,18 @@ func (e *Extension) Register(app forge.App) error {
 	stats := proxy.NewStatsCollector()
 	gw.SetStatsRecorder(stats)
 
+	svc, err := admin.New(admin.Deps{
+		Routes:    rm,
+		Health:    gw.HealthMonitor(),
+		Breakers:  cbm,
+		BasePath:  cfg.BasePath,
+		Persisted: gw.RoutesPersisted,
+	})
+	if err != nil {
+		return fmt.Errorf("bastion: build admin service: %w", err)
+	}
+	e.admin = svc
+
 	lb := routing.NewLoadBalancer(cfg.LoadBalancing.Strategy)
 
 	pe := proxy.NewEngine(cfg, gw.Logger(), rm, gw.HealthMonitor(), cbm, gw.RateLimiter(), stats, gw.Hooks(), lb)
@@ -131,7 +145,7 @@ func (e *Extension) Register(app forge.App) error {
 
 	gw.SetAdminHandlerSetup(func(gw *bastion.Gateway, router forge.Router) {
 		adminBase := cfg.Dashboard.BasePath + "/api"
-		h := api.NewHandlers(gw, hub)
+		h := api.NewHandlers(gw, hub, svc)
 
 		mustReg := func(err error) {
 			if err != nil {

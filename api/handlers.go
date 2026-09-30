@@ -2,15 +2,16 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
-	"strings"
 
 	"github.com/gorilla/websocket"
 	"github.com/xraph/farp"
 	"github.com/xraph/forge"
 
 	bastion "github.com/xraph/bastion"
+	"github.com/xraph/bastion/admin"
 	"github.com/xraph/bastion/health"
 	"github.com/xraph/bastion/observability"
 )
@@ -31,11 +32,12 @@ type Gateway interface {
 type Handlers struct {
 	gw  Gateway
 	hub *Hub
+	svc *admin.Service
 }
 
 // NewHandlers creates new admin API handlers.
-func NewHandlers(gw Gateway, hub *Hub) *Handlers {
-	return &Handlers{gw: gw, hub: hub}
+func NewHandlers(gw Gateway, hub *Hub, svc *admin.Service) *Handlers {
+	return &Handlers{gw: gw, hub: hub, svc: svc}
 }
 
 var wsUpgrader = websocket.Upgrader{
@@ -88,6 +90,24 @@ func (h *Handlers) HandleGetRoute(ctx forge.Context) error {
 	return ctx.JSON(http.StatusOK, route)
 }
 
+// writeAdminError maps an admin service error to the REST status and body
+// the handlers have always used.
+func writeAdminError(ctx forge.Context, err error, discovered string) error {
+	var ve *admin.ValidationError
+	switch {
+	case errors.As(err, &ve):
+		return ctx.JSON(http.StatusBadRequest, map[string]string{"error": ve.Error(), "field": ve.Field})
+	case errors.Is(err, admin.ErrNotFound):
+		return ctx.JSON(http.StatusNotFound, map[string]string{"error": "route not found"})
+	case errors.Is(err, admin.ErrNotManual):
+		return ctx.JSON(http.StatusBadRequest, map[string]string{"error": discovered})
+	case errors.Is(err, admin.ErrConflict):
+		return ctx.JSON(http.StatusConflict, map[string]string{"error": err.Error()})
+	default:
+		return ctx.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
+	}
+}
+
 // HandleCreateRoute creates a new manual route.
 func (h *Handlers) HandleCreateRoute(ctx forge.Context) error {
 	var dto bastion.RouteDTO
@@ -95,14 +115,9 @@ func (h *Handlers) HandleCreateRoute(ctx forge.Context) error {
 		return ctx.JSON(http.StatusBadRequest, map[string]string{"error": "invalid request body"})
 	}
 
-	route := dtoToRoute(dto, h.gw.Config().BasePath)
-
-	if err := h.gw.RouteManager().AddRoute(route); err != nil {
-		return ctx.JSON(http.StatusConflict, map[string]string{"error": err.Error()})
-	}
-
-	for _, target := range route.Targets {
-		h.gw.HealthMonitor().Register(route.ID, target)
+	route, err := h.svc.CreateRoute(dto)
+	if err != nil {
+		return writeAdminError(ctx, err, "")
 	}
 
 	h.gw.AccessLog().LogAdminAction("create_route", route.ID, "success", ctx.Request())
@@ -114,26 +129,14 @@ func (h *Handlers) HandleCreateRoute(ctx forge.Context) error {
 func (h *Handlers) HandleUpdateRoute(ctx forge.Context) error {
 	id := ctx.Param("id")
 
-	existing, ok := h.gw.RouteManager().GetRoute(id)
-	if !ok {
-		return ctx.JSON(http.StatusNotFound, map[string]string{"error": "route not found"})
-	}
-
-	if existing.Source != bastion.SourceManual {
-		return ctx.JSON(http.StatusBadRequest, map[string]string{"error": "cannot update auto-discovered routes"})
-	}
-
 	var dto bastion.RouteDTO
 	if err := json.NewDecoder(ctx.Request().Body).Decode(&dto); err != nil {
 		return ctx.JSON(http.StatusBadRequest, map[string]string{"error": "invalid request body"})
 	}
 
-	updated := dtoToRoute(dto, h.gw.Config().BasePath)
-	updated.ID = id
-	updated.Source = bastion.SourceManual
-
-	if err := h.gw.RouteManager().UpdateRoute(updated); err != nil {
-		return ctx.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
+	updated, err := h.svc.UpdateRoute(id, dto)
+	if err != nil {
+		return writeAdminError(ctx, err, "cannot update auto-discovered routes")
 	}
 
 	h.gw.AccessLog().LogAdminAction("update_route", id, "success", ctx.Request())
@@ -145,21 +148,8 @@ func (h *Handlers) HandleUpdateRoute(ctx forge.Context) error {
 func (h *Handlers) HandleDeleteRoute(ctx forge.Context) error {
 	id := ctx.Param("id")
 
-	route, ok := h.gw.RouteManager().GetRoute(id)
-	if !ok {
-		return ctx.JSON(http.StatusNotFound, map[string]string{"error": "route not found"})
-	}
-
-	if route.Source != bastion.SourceManual {
-		return ctx.JSON(http.StatusBadRequest, map[string]string{"error": "cannot delete auto-discovered routes"})
-	}
-
-	for _, target := range route.Targets {
-		h.gw.HealthMonitor().Deregister(target.ID)
-	}
-
-	if err := h.gw.RouteManager().RemoveRoute(id); err != nil {
-		return ctx.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
+	if err := h.svc.DeleteRoute(id); err != nil {
+		return writeAdminError(ctx, err, "cannot delete auto-discovered routes")
 	}
 
 	h.gw.AccessLog().LogAdminAction("delete_route", id, "success", ctx.Request())
@@ -169,38 +159,24 @@ func (h *Handlers) HandleDeleteRoute(ctx forge.Context) error {
 
 // HandleEnableRoute enables a route.
 func (h *Handlers) HandleEnableRoute(ctx forge.Context) error {
-	id := ctx.Param("id")
-
-	route, ok := h.gw.RouteManager().GetRoute(id)
-	if !ok {
-		return ctx.JSON(http.StatusNotFound, map[string]string{"error": "route not found"})
-	}
-
-	route.Enabled = true
-
-	if err := h.gw.RouteManager().UpdateRoute(route); err != nil {
-		return ctx.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
-	}
-
-	return ctx.JSON(http.StatusOK, map[string]string{"status": "enabled"})
+	return h.setEnabled(ctx, true, "enabled")
 }
 
 // HandleDisableRoute disables a route.
 func (h *Handlers) HandleDisableRoute(ctx forge.Context) error {
+	return h.setEnabled(ctx, false, "disabled")
+}
+
+func (h *Handlers) setEnabled(ctx forge.Context, enabled bool, status string) error {
 	id := ctx.Param("id")
 
-	route, ok := h.gw.RouteManager().GetRoute(id)
-	if !ok {
-		return ctx.JSON(http.StatusNotFound, map[string]string{"error": "route not found"})
+	if _, err := h.svc.SetEnabled(id, enabled); err != nil {
+		return writeAdminError(ctx, err, "cannot change auto-discovered routes: the next discovery update would undo it")
 	}
 
-	route.Enabled = false
+	h.gw.AccessLog().LogAdminAction(status+"_route", id, "success", ctx.Request())
 
-	if err := h.gw.RouteManager().UpdateRoute(route); err != nil {
-		return ctx.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
-	}
-
-	return ctx.JSON(http.StatusOK, map[string]string{"status": "disabled"})
+	return ctx.JSON(http.StatusOK, map[string]string{"status": status})
 }
 
 // HandleListUpstreams returns all targets with health status.
@@ -540,56 +516,4 @@ func (h *Handlers) HandleWebSocket(ctx forge.Context) error {
 	client.Start()
 
 	return nil
-}
-
-// dtoToRoute converts a RouteDTO to a Route.
-func dtoToRoute(dto bastion.RouteDTO, basePath string) *bastion.Route {
-	path := strings.TrimRight(basePath, "/") + dto.Path
-
-	targets := make([]*bastion.Target, 0, len(dto.Targets))
-	for _, td := range dto.Targets {
-		t := &bastion.Target{
-			ID:       "target-" + strings.ReplaceAll(td.URL, "://", "-"),
-			URL:      td.URL,
-			Weight:   td.Weight,
-			Healthy:  true,
-			Tags:     td.Tags,
-			Metadata: td.Metadata,
-			TLS:      td.TLS,
-		}
-
-		if t.Weight <= 0 {
-			t.Weight = 1
-		}
-
-		targets = append(targets, t)
-	}
-
-	protocol := dto.Protocol
-	if protocol == "" {
-		protocol = bastion.ProtocolHTTP
-	}
-
-	return &bastion.Route{
-		Path:           path,
-		Methods:        dto.Methods,
-		Targets:        targets,
-		StripPrefix:    dto.StripPrefix,
-		AddPrefix:      dto.AddPrefix,
-		RewritePath:    dto.RewritePath,
-		Headers:        dto.Headers,
-		Protocol:       protocol,
-		Source:         bastion.SourceManual,
-		Priority:       dto.Priority + 100,
-		Enabled:        dto.Enabled,
-		Retry:          dto.Retry,
-		Timeout:        dto.Timeout,
-		RateLimit:      dto.RateLimit,
-		Auth:           dto.Auth,
-		CircuitBreaker: dto.CircuitBreaker,
-		Cache:          dto.Cache,
-		TrafficPolicy:  dto.TrafficPolicy,
-		Transform:      dto.Transform,
-		Metadata:       dto.Metadata,
-	}
 }
