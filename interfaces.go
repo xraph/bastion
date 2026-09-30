@@ -46,6 +46,9 @@ type Breaker interface {
 	Allow() bool
 	RecordSuccess()
 	RecordFailure()
+	// ReleaseProbe returns a half-open probe slot for a request that
+	// neither succeeded nor failed.
+	ReleaseProbe()
 	State() CircuitState
 	Reset()
 }

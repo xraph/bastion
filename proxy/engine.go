@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -441,20 +442,20 @@ func (pe *Engine) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Select target via load balancer
-	target := pe.selectTarget(r, route)
+	// Select a target whose breaker admits the request. A half-open breaker
+	// with every probe slot in flight refuses; the next candidate gets the
+	// request instead of the client getting a 503.
+	target, cb, refused := pe.admitTarget(r, route)
 	if target == nil {
+		if refused {
+			pe.stats.RecordCircuitBreak()
+			http.Error(w, `{"error":"circuit breaker open"}`, http.StatusServiceUnavailable)
+
+			return
+		}
+
 		pe.stats.RecordError(route.ID)
 		http.Error(w, `{"error":"no healthy upstream"}`, http.StatusServiceUnavailable)
-
-		return
-	}
-
-	// Circuit breaker check
-	cb := pe.cbm.Get(target.ID)
-	if !cb.Allow() {
-		pe.stats.RecordCircuitBreak()
-		http.Error(w, `{"error":"circuit breaker open"}`, http.StatusServiceUnavailable)
 
 		return
 	}
@@ -477,7 +478,7 @@ func (pe *Engine) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	proxy := &httputil.ReverseProxy{
 		Director:       pe.director(r, route, targetURL),
 		Transport:      pe.transport,
-		ModifyResponse: pe.modifyResponse(route, target, start),
+		ModifyResponse: pe.modifyResponse(route, target, cb, start),
 		ErrorHandler:   pe.errorHandler(route, target, cb, tw),
 		BufferPool:     &proxyBufferPool{pool: &pe.bufPool},
 		// FlushInterval enables streaming for chunked/SSE responses that
@@ -546,7 +547,7 @@ func (pe *Engine) director(origReq *http.Request, route *bastion.Route, target *
 	}
 }
 
-func (pe *Engine) modifyResponse(route *bastion.Route, target *bastion.Target, start time.Time) func(*http.Response) error {
+func (pe *Engine) modifyResponse(route *bastion.Route, target *bastion.Target, cb bastion.Breaker, start time.Time) func(*http.Response) error {
 	return func(resp *http.Response) error {
 		latency := time.Since(start)
 		isError := resp.StatusCode >= 500
@@ -554,13 +555,17 @@ func (pe *Engine) modifyResponse(route *bastion.Route, target *bastion.Target, s
 		pe.stats.RecordLatency(route.ID, latency)
 
 		if isError {
+			// A 5xx neither trips nor heals the breaker: only transport
+			// errors trip it (see errorHandler). It does hand back a
+			// half-open probe slot, or a warming upstream answering 503
+			// would leave the breaker refusing forever.
+			cb.ReleaseProbe()
 			pe.stats.RecordError(route.ID)
 			pe.hm.RecordPassiveFailure(target.ID)
 		} else {
-			// A 5xx leaves the breaker alone: only transport errors trip it
-			// (see errorHandler). An answer below 500 closes a half-open
-			// breaker and resets a closed one's consecutive failure count.
-			pe.cbm.Get(target.ID).RecordSuccess()
+			// An answer below 500 closes a half-open breaker and resets a
+			// closed one's consecutive failure count.
+			cb.RecordSuccess()
 			pe.hm.RecordPassiveSuccess(target.ID)
 		}
 
@@ -646,7 +651,37 @@ func (pe *Engine) errorHandler(route *bastion.Route, target *bastion.Target, cb 
 }
 
 func (pe *Engine) selectTarget(r *http.Request, route *bastion.Route) *bastion.Target {
+	return pe.pick(r, pe.closedCircuits(route.Targets))
+}
+
+// admitTarget picks a target and asks its breaker to admit the request,
+// moving on to the remaining candidates when a breaker refuses. refused
+// reports whether any breaker refused, so the caller can tell "circuit
+// breaker open" from "no healthy upstream".
+func (pe *Engine) admitTarget(r *http.Request, route *bastion.Route) (*bastion.Target, bastion.Breaker, bool) {
 	candidates := pe.closedCircuits(route.Targets)
+	refused := false
+
+	for len(candidates) > 0 {
+		t := pe.pick(r, candidates)
+		if t == nil {
+			break
+		}
+
+		cb := pe.cbm.Get(t.ID)
+		if cb.Allow() {
+			return t, cb, refused
+		}
+
+		refused = true
+		candidates = slices.DeleteFunc(candidates, func(c *bastion.Target) bool { return c == t })
+	}
+
+	return nil, nil, refused
+}
+
+// pick asks the load balancer for one of candidates.
+func (pe *Engine) pick(r *http.Request, candidates []*bastion.Target) *bastion.Target {
 	if len(candidates) == 0 {
 		return nil
 	}

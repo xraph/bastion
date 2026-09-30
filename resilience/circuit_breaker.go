@@ -107,6 +107,22 @@ func (cb *CircuitBreaker) RecordSuccess() {
 	}
 }
 
+// ReleaseProbe hands back a half-open probe slot for a request that neither
+// succeeded nor failed, such as one answered with a 5xx. Without it the
+// slot stays spent and a half-open breaker can end up refusing forever.
+func (cb *CircuitBreaker) ReleaseProbe() {
+	if !cb.config.Enabled {
+		return
+	}
+
+	cb.mu.Lock()
+	defer cb.mu.Unlock()
+
+	if cb.state == bastion.CircuitHalfOpen && cb.halfOpenReqs > 0 {
+		cb.halfOpenReqs--
+	}
+}
+
 // RecordFailure records a failed request.
 func (cb *CircuitBreaker) RecordFailure() {
 	if !cb.config.Enabled {
