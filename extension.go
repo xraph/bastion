@@ -57,6 +57,7 @@ type Gateway struct {
 
 	// Lifecycle
 	draining         atomic.Bool
+	startedAt        atomic.Int64 // unix nanoseconds when Start completed; 0 before
 	routesRegistered bool
 }
 
@@ -213,6 +214,7 @@ func (e *Gateway) Start(ctx context.Context) error {
 	// Start rate limiter cleanup
 	go e.rateLimiterCleanup(ctx)
 
+	e.startedAt.Store(time.Now().UnixNano())
 	e.MarkStarted()
 	routeCount := 0
 	if e.routeManager != nil {
@@ -317,12 +319,31 @@ func (e *Gateway) Hub() WSBroadcaster { return e.hub }
 // App returns the Forge app instance.
 func (e *Gateway) App() forge.App { return e.app }
 
-// Snapshot returns current gateway statistics.
+// Snapshot returns current gateway statistics. Uptime counts from the
+// moment Start completed and is zero before it. Cache counters come from
+// the response cache, so they count real lookups only.
 func (e *Gateway) Snapshot() *GatewayStats {
 	if e.stats == nil || e.routeManager == nil {
 		return &GatewayStats{}
 	}
-	return e.stats.Snapshot(e.routeManager.ListRoutes())
+
+	s := e.stats.Snapshot(e.routeManager.ListRoutes())
+
+	s.StartedAt = time.Time{}
+	s.Uptime = 0
+
+	if ns := e.startedAt.Load(); ns != 0 {
+		s.StartedAt = time.Unix(0, ns)
+		s.Uptime = int64(time.Since(s.StartedAt).Seconds())
+	}
+
+	if e.respCache != nil {
+		cs := e.respCache.Stats()
+		s.CacheHits = cs.Hits()
+		s.CacheMisses = cs.Misses()
+	}
+
+	return s
 }
 
 // SetDiscoveryService sets the discovery service adapter and initializes

@@ -104,3 +104,44 @@ func TestStatsCollector_ConcurrentRecordAndSnapshot(t *testing.T) {
 		t.Errorf("total requests = %d, want 4000", s.TotalRequests)
 	}
 }
+
+func TestStatsCollector_DropsStatsForRemovedRoutes(t *testing.T) {
+	sc := NewStatsCollector()
+	sc.RecordRequest("gone", "/gone")
+	sc.RecordRequest("live", "/live")
+
+	s := sc.Snapshot(routes("live"))
+	if _, ok := s.RouteStats["gone"]; ok {
+		t.Error("stats for a removed route were reported")
+	}
+	if _, ok := s.RouteStats["live"]; !ok {
+		t.Error("stats for a live route are missing")
+	}
+	// Gateway totals still include traffic the removed route served.
+	if s.TotalRequests != 2 {
+		t.Errorf("total requests = %d, want 2", s.TotalRequests)
+	}
+}
+
+func TestStatsCollector_CountsUpstreamsByURL(t *testing.T) {
+	sc := NewStatsCollector()
+	shared := "http://orders:8080"
+	rs := []*bastion.Route{
+		{ID: "a", Targets: []*bastion.Target{
+			{ID: "a/0", URL: shared, Healthy: true},
+			{ID: "a/1", URL: "http://users:8080", Healthy: true},
+		}},
+		{ID: "b", Targets: []*bastion.Target{
+			{ID: "b/0", URL: shared, Healthy: false},
+		}},
+	}
+
+	s := sc.Snapshot(rs)
+	if s.TotalUpstreams != 2 {
+		t.Errorf("total upstreams = %d, want 2 distinct URLs", s.TotalUpstreams)
+	}
+	// orders is unhealthy on route b, so it is not counted healthy.
+	if s.HealthyUpstreams != 1 {
+		t.Errorf("healthy upstreams = %d, want 1", s.HealthyUpstreams)
+	}
+}

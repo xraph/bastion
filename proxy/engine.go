@@ -88,8 +88,18 @@ func (sc *StatsCollector) Snapshot(routes []*bastion.Route) *bastion.GatewayStat
 		LatencySamples: sc.latency.samples(),
 	}
 
-	// Copy route stats
+	// Copy route stats, for routes that still exist. Gateway totals keep the
+	// traffic removed routes served.
+	live := make(map[string]struct{}, len(routes))
+	for _, r := range routes {
+		live[r.ID] = struct{}{}
+	}
+
 	for k, v := range sc.routeStats {
+		if _, ok := live[k]; !ok {
+			continue
+		}
+
 		rs := &bastion.RouteStats{
 			RouteID:       v.RouteID,
 			Path:          v.Path,
@@ -108,14 +118,22 @@ func (sc *StatsCollector) Snapshot(routes []*bastion.Route) *bastion.GatewayStat
 		stats.RouteStats[k] = rs
 	}
 
-	// Count healthy upstreams
-	for _, route := range routes {
-		stats.TotalUpstreams += len(route.Targets)
+	// Count upstreams by URL. Two routes proxying to one service are one
+	// upstream. A URL counts healthy only if every entry for it is healthy.
+	urlHealthy := make(map[string]bool)
 
+	for _, route := range routes {
 		for _, t := range route.Targets {
-			if t.Healthy {
-				stats.HealthyUpstreams++
-			}
+			prev, seen := urlHealthy[t.URL]
+			urlHealthy[t.URL] = t.Healthy && (!seen || prev)
+		}
+	}
+
+	stats.TotalUpstreams = len(urlHealthy)
+
+	for _, ok := range urlHealthy {
+		if ok {
+			stats.HealthyUpstreams++
 		}
 	}
 
