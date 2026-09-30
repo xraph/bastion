@@ -1,0 +1,50 @@
+schemaVersion: 1
+contributor:
+  name: bastion
+  envelope:
+    supports: [v1]
+    preferred: v1
+  capabilities: [bastion.read, bastion.write]
+
+# No app block and no graph: the React plugin owns routes, this manifest only
+# declares intents and their cache hints. One gateway per process, so no
+# intent takes a tenant or app id. Commands arrive in slice 3.
+intents:
+  - { name: overview.stats,  kind: query, version: 1, capability: read }
+  - { name: traffic.stats,   kind: query, version: 1, capability: read }
+  - { name: circuits.list,   kind: query, version: 1, capability: read }
+  - { name: routes.list,     kind: query, version: 1, capability: read }
+  - { name: routes.detail,   kind: query, version: 1, capability: read }
+  - { name: upstreams.list,  kind: query, version: 1, capability: read }
+  - { name: services.list,   kind: query, version: 1, capability: read }
+  - { name: openapi.summary, kind: query, version: 1, capability: read }
+  - { name: config.detail,   kind: query, version: 1, capability: read }
+
+queries:
+  overviewStats:
+    intent: overview.stats
+    cache: { staleTime: 5s }
+  trafficStats:
+    intent: traffic.stats
+    cache: { staleTime: 5s }
+  circuitsList:
+    intent: circuits.list
+    cache: { staleTime: 5s }
+  routesList:
+    intent: routes.list
+    cache: { staleTime: 30s }
+  routesDetail:
+    intent: routes.detail
+    cache: { staleTime: 30s }
+  upstreamsList:
+    intent: upstreams.list
+    cache: { staleTime: 15s }
+  servicesList:
+    intent: services.list
+    cache: { staleTime: 30s }
+  openapiSummary:
+    intent: openapi.summary
+    cache: { staleTime: 30s }
+  configDetail:
+    intent: config.detail
+    cache: { staleTime: 60s }

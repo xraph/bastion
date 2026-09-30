@@ -6,6 +6,8 @@ import (
 
 	"github.com/xraph/forge"
 	"github.com/xraph/forge/extensions/dashboard"
+	dashcontract "github.com/xraph/forge/extensions/dashboard/contract"
+	"github.com/xraph/forge/extensions/dashboard/contract/dispatcher"
 	"github.com/xraph/forge/extensions/dashboard/contributor"
 	"github.com/xraph/forge/extensions/discovery"
 	"github.com/xraph/grove"
@@ -15,6 +17,7 @@ import (
 	"github.com/xraph/bastion/admin"
 	"github.com/xraph/bastion/api"
 	bastionDash "github.com/xraph/bastion/dashboard"
+	bastioncontract "github.com/xraph/bastion/extension/contract"
 	"github.com/xraph/bastion/proxy"
 	"github.com/xraph/bastion/resilience"
 	"github.com/xraph/bastion/routing"
@@ -230,6 +233,33 @@ func (e *Extension) Health(ctx context.Context) error {
 func (e *Extension) DashboardContributor() contributor.LocalContributor {
 	manifest := bastionDash.NewManifest()
 	return bastionDash.New(manifest, e.gateway())
+}
+
+// RegisterContractContributor implements dashboard.ContractContributorAware.
+// It registers the bastion contract contributor, which is what the React
+// shell reads.
+func (e *Extension) RegisterContractContributor(
+	disp *dispatcher.Dispatcher,
+	reg dashcontract.Registry,
+	wreg dashcontract.WardenRegistry,
+) error {
+	if e.gw == nil || e.admin == nil {
+		// Register never ran, or the gateway is disabled: nothing to answer.
+		return nil
+	}
+
+	deps := bastioncontract.Deps{Gateway: e.gw, Admin: e.admin}
+	// Logger is nil until Register runs; a typed-nil guard keeps Deps.Logger
+	// a true nil interface so mapError skips logging.
+	if l := e.gw.Logger(); l != nil {
+		deps.Logger = l
+	}
+
+	if err := bastioncontract.Register(disp, reg, wreg, deps); err != nil {
+		return fmt.Errorf("bastion: register contract contributor: %w", err)
+	}
+
+	return nil
 }
 
 // --- Accessor ---
