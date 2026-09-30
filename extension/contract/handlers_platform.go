@@ -10,18 +10,19 @@ import (
 	"github.com/xraph/forge/extensions/dashboard/contract"
 
 	bastion "github.com/xraph/bastion"
+	"github.com/xraph/bastion/admin"
 )
 
 type serviceView struct {
-	Name         string    `json:"name"`
-	Version      string    `json:"version"`
-	Address      string    `json:"address"`
-	Port         int       `json:"port"`
-	Protocols    []string  `json:"protocols"`
-	Healthy      bool      `json:"healthy"`
-	RouteCount   int       `json:"routeCount"`
-	DiscoveredAt time.Time `json:"discoveredAt"`
-	MetadataKeys []string  `json:"metadataKeys"`
+	Name         string     `json:"name"`
+	Version      string     `json:"version"`
+	Address      string     `json:"address"`
+	Port         int        `json:"port"`
+	Protocols    []string   `json:"protocols"`
+	Healthy      bool       `json:"healthy"`
+	RouteCount   int        `json:"routeCount"`
+	DiscoveredAt *time.Time `json:"discoveredAt"`
+	MetadataKeys []string   `json:"metadataKeys"`
 }
 
 type servicesListRequest struct{}
@@ -69,6 +70,27 @@ type configDetailResponse struct {
 	Sections []configSection `json:"sections"`
 }
 
+// toServiceView copies field by field: discovery mutates these pointers later.
+func toServiceView(s *bastion.DiscoveredService) serviceView {
+	protocols := slices.Clone(s.Protocols)
+	if protocols == nil {
+		protocols = []string{}
+	}
+
+	return serviceView{
+		Name: s.Name, Version: s.Version, Address: s.Address, Port: s.Port,
+		Protocols: protocols, Healthy: s.Healthy, RouteCount: s.RouteCount,
+		DiscoveredAt: nonZeroTime(s.DiscoveredAt), MetadataKeys: sortedKeys(s.Metadata),
+	}
+}
+
+func toSpecView(s *bastion.ServiceOpenAPISpec) specView {
+	return specView{
+		ServiceName: s.ServiceName, Version: s.Version, SpecURL: admin.RedactURL(s.SpecURL), Healthy: s.Healthy,
+		PathCount: s.PathCount, Error: s.Error, FetchedAt: nonZeroTime(s.FetchedAt),
+	}
+}
+
 func servicesListHandler(deps Deps) func(context.Context, servicesListRequest, contract.Principal) (servicesListResponse, error) {
 	return func(context.Context, servicesListRequest, contract.Principal) (servicesListResponse, error) {
 		out := servicesListResponse{
@@ -78,12 +100,7 @@ func servicesListHandler(deps Deps) func(context.Context, servicesListRequest, c
 
 		if disc := deps.Gateway.Discovery(); disc != nil {
 			for _, s := range disc.DiscoveredServices() {
-				// Copied field by field: discovery mutates these pointers later.
-				out.Services = append(out.Services, serviceView{
-					Name: s.Name, Version: s.Version, Address: s.Address, Port: s.Port,
-					Protocols: slices.Clone(s.Protocols), Healthy: s.Healthy, RouteCount: s.RouteCount,
-					DiscoveredAt: s.DiscoveredAt, MetadataKeys: sortedKeys(s.Metadata),
-				})
+				out.Services = append(out.Services, toServiceView(s))
 			}
 		}
 
@@ -113,10 +130,7 @@ func openapiSummaryHandler(deps Deps) func(context.Context, openapiSummaryReques
 		}
 
 		for _, s := range oa.ServiceSpecs() {
-			out.Services = append(out.Services, specView{
-				ServiceName: s.ServiceName, Version: s.Version, SpecURL: s.SpecURL, Healthy: s.Healthy,
-				PathCount: s.PathCount, Error: s.Error, FetchedAt: nonZeroTime(s.FetchedAt),
-			})
+			out.Services = append(out.Services, toSpecView(s))
 		}
 
 		slices.SortFunc(out.Services, func(a, b specView) int { return strings.Compare(a.ServiceName, b.ServiceName) })

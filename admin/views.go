@@ -195,7 +195,7 @@ func (s *Service) input(r *bastion.Route) RouteInput {
 func targetView(t *bastion.Target, states map[string]bastion.CircuitState) TargetView {
 	return TargetView{
 		ID:              t.ID,
-		URL:             t.URL,
+		URL:             RedactURL(t.URL),
 		Weight:          t.Weight,
 		Tags:            nonNil(t.Tags),
 		Healthy:         t.Healthy,
@@ -229,7 +229,7 @@ func (s *Service) GetRoute(id string) (RouteDetail, error) {
 		Auth:           r.Auth,
 		CircuitBreaker: r.CircuitBreaker,
 		Cache:          r.Cache,
-		TrafficPolicy:  r.TrafficPolicy,
+		TrafficPolicy:  redactTraffic(r.TrafficPolicy),
 		Transform:      RedactTransform(r.Transform),
 		MetadataKeys:   sortedKeys(r.Metadata),
 		Version:        r.Version,
@@ -281,6 +281,9 @@ func (s *Service) Upstreams() []Upstream {
 			u.AvgLatencyMs = weighted[url] / float64(u.TotalRequests)
 		}
 
+		// The key stays raw so two credentials for one host do not merge; only
+		// the emitted URL is redacted.
+		u.URL = RedactURL(u.URL)
 		out = append(out, *u)
 	}
 
@@ -297,7 +300,7 @@ func (s *Service) Targets() map[string]TargetRef {
 	for _, r := range s.d.Routes.ListRoutes() {
 		for _, t := range r.Targets {
 			ref := out[t.ID]
-			ref.URL = t.URL
+			ref.URL = RedactURL(t.URL)
 			ref.Routes = append(ref.Routes, UpstreamRoute{RouteID: r.ID, Path: r.Path, TargetID: t.ID})
 			out[t.ID] = ref
 		}

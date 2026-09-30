@@ -2,6 +2,7 @@ package admin
 
 import (
 	"maps"
+	"net/url"
 	"slices"
 	"strings"
 
@@ -21,6 +22,43 @@ func SensitiveHeader(name string) bool {
 	}
 
 	return strings.Contains(n, "key") || strings.Contains(n, "token") || strings.Contains(n, "secret")
+}
+
+// RedactURL hides the password in a URL's userinfo. A URL without userinfo,
+// or one that does not parse, comes back unchanged.
+func RedactURL(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil || u.User == nil {
+		return raw
+	}
+
+	return u.Redacted()
+}
+
+// redactTraffic returns a copy of p without values that may carry a
+// credential: header rules keyed by a sensitive header, every cookie rule,
+// and userinfo in the mirror target.
+func redactTraffic(p *bastion.TrafficPolicy) *bastion.TrafficPolicy {
+	if p == nil {
+		return nil
+	}
+
+	out := *p
+	out.MirrorTarget = RedactURL(p.MirrorTarget)
+	out.Rules = slices.Clone(p.Rules)
+
+	for i := range out.Rules {
+		m := &out.Rules[i].Match
+
+		switch {
+		case m.Type == bastion.MatchCookie && m.Value != "":
+			m.Value = Redacted
+		case m.Type == bastion.MatchHeader && SensitiveHeader(m.Key) && m.Value != "":
+			m.Value = Redacted
+		}
+	}
+
+	return &out
 }
 
 // RedactHeaders returns a copy of p with sensitive values replaced.

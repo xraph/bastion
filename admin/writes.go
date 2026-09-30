@@ -178,8 +178,15 @@ func (s *Service) build(id string, dto bastion.RouteDTO, existing *bastion.Route
 		protocol = bastion.ProtocolHTTP
 	}
 
+	// A config route carries a service name the editor does not show.
+	serviceName := ""
+	if existing != nil {
+		serviceName = existing.ServiceName
+	}
+
 	return &bastion.Route{
 		ID:             id,
+		ServiceName:    serviceName,
 		Path:           strings.TrimRight(s.d.BasePath, "/") + dto.Path,
 		Methods:        upper(dto.Methods),
 		Targets:        targets,
