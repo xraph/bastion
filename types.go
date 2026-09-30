@@ -244,7 +244,32 @@ func (t *Target) IsDraining() bool { return t.draining.Load() }
 // SetDraining sets the draining state.
 func (t *Target) SetDraining(v bool) { t.draining.Store(v) }
 
-// Snapshot populates the exported stats fields from atomics.
+// TargetStats is a point-in-time copy of a target's counters.
+type TargetStats struct {
+	ActiveConns   int64   `json:"activeConns"`
+	TotalRequests int64   `json:"totalRequests"`
+	TotalErrors   int64   `json:"totalErrors"`
+	AvgLatencyMs  float64 `json:"avgLatencyMs"`
+}
+
+// Stats reads the target's counters without writing to the target, unlike
+// Snapshot, which fills the exported fields in place and races the proxy.
+func (t *Target) Stats() TargetStats {
+	s := TargetStats{
+		ActiveConns:   t.activeConns.Load(),
+		TotalRequests: t.totalReqs.Load(),
+		TotalErrors:   t.totalErrs.Load(),
+	}
+
+	if s.TotalRequests > 0 {
+		s.AvgLatencyMs = float64(t.latencySum.Load()) / float64(s.TotalRequests) / 1e6
+	}
+
+	return s
+}
+
+// Snapshot populates the exported stats fields from atomics. It writes to
+// the shared target and races the proxy; new code uses Stats.
 func (t *Target) Snapshot() {
 	t.ActiveConns = t.activeConns.Load()
 	t.TotalRequests = t.totalReqs.Load()
