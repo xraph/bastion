@@ -371,6 +371,10 @@ func (e *Gateway) ResetCircuit(targetID string) error {
 	return nil
 }
 
+// RoutesPersisted reports whether a route store is wired, so a route created
+// through the admin API survives a restart.
+func (e *Gateway) RoutesPersisted() bool { return e.routeStore != nil }
+
 // SetDiscoveryService sets the discovery service adapter and initializes
 // the ServiceDiscovery integration. This is called by the extension adapter
 // to inject the concrete discovery.Service dependency.
