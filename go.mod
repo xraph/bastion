@@ -11,9 +11,9 @@ require (
 	github.com/gorilla/websocket v1.5.4-0.20250319132907-e064f32e3674
 	github.com/xraph/farp v1.3.1
 	github.com/xraph/farp/discovery v1.3.1
-	github.com/xraph/forge v1.10.0
-	github.com/xraph/forge/extensions/discovery v1.10.0
-	github.com/xraph/go-utils v1.2.2
+	github.com/xraph/forge v1.11.2
+	github.com/xraph/forge/extensions/discovery v1.11.2
+	github.com/xraph/go-utils v1.3.0
 	github.com/xraph/grove v1.6.3
 	github.com/xraph/grove/drivers/mongodriver v1.6.3
 	github.com/xraph/grove/drivers/pgdriver v1.6.3
@@ -109,7 +109,7 @@ require (
 	github.com/xdg-go/pbkdf2 v1.0.0 // indirect
 	github.com/xdg-go/scram v1.2.0 // indirect
 	github.com/xdg-go/stringprep v1.0.4 // indirect
-	github.com/xraph/confy v1.0.2 // indirect
+	github.com/xraph/confy v1.0.3 // indirect
 	github.com/xraph/forgeui v1.4.1 // indirect
 	github.com/youmark/pkcs8 v0.0.0-20240726163527-a2c0da244d78 // indirect
 	go.etcd.io/etcd/api/v3 v3.5.17 // indirect
