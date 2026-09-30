@@ -392,3 +392,81 @@ func TestCircuitBreaker_StateTransitions(t *testing.T) {
 		t.Errorf("expected state closed after successes, got %s", cb.State())
 	}
 }
+
+func recoverCfg() bastion.CircuitBreakerConfig {
+	return bastion.CircuitBreakerConfig{
+		Enabled:          true,
+		FailureThreshold: 2,
+		ResetTimeout:     10 * time.Millisecond,
+		HalfOpenMax:      2,
+	}
+}
+
+func TestCircuitBreaker_HalfOpenClosesAfterSuccessfulProbes(t *testing.T) {
+	cb := NewCircuitBreaker("t1", recoverCfg())
+	cb.RecordFailure()
+	cb.RecordFailure()
+	if cb.State() != bastion.CircuitOpen {
+		t.Fatalf("state = %s, want open", cb.State())
+	}
+
+	time.Sleep(20 * time.Millisecond)
+
+	for i := 0; i < 2; i++ {
+		if !cb.Allow() {
+			t.Fatalf("probe %d refused", i)
+		}
+		cb.RecordSuccess()
+	}
+	if cb.State() != bastion.CircuitClosed {
+		t.Errorf("state = %s, want closed after 2 successful probes", cb.State())
+	}
+	if !cb.Allow() {
+		t.Error("closed breaker refused a request")
+	}
+}
+
+func TestCircuitBreaker_HalfOpenFailureReopens(t *testing.T) {
+	cb := NewCircuitBreaker("t1", recoverCfg())
+	cb.RecordFailure()
+	cb.RecordFailure()
+	time.Sleep(20 * time.Millisecond)
+
+	if !cb.Allow() {
+		t.Fatal("first probe refused")
+	}
+	cb.RecordFailure()
+
+	snap := cb.Snapshot()
+	if snap.State != bastion.CircuitOpen {
+		t.Errorf("state = %s, want open", snap.State)
+	}
+	if snap.LastFailure.IsZero() {
+		t.Error("last failure not recorded")
+	}
+}
+
+func TestCBManager_SnapshotsAndReset(t *testing.T) {
+	m := NewCBManager(recoverCfg())
+	m.Get("b").RecordFailure()
+	m.Get("b").RecordFailure()
+	m.Get("a")
+
+	snaps := m.Snapshots()
+	if len(snaps) != 2 || snaps[0].TargetID != "a" || snaps[1].TargetID != "b" {
+		t.Fatalf("snapshots = %+v, want a then b", snaps)
+	}
+	if snaps[1].State != bastion.CircuitOpen || snaps[1].FailureCount != 2 {
+		t.Errorf("b = %+v, want open with 2 failures", snaps[1])
+	}
+
+	if !m.Reset("b") {
+		t.Fatal("reset of a known breaker returned false")
+	}
+	if got := m.Get("b").State(); got != bastion.CircuitClosed {
+		t.Errorf("after reset state = %s, want closed", got)
+	}
+	if m.Reset("nope") {
+		t.Error("reset of an unknown breaker returned true")
+	}
+}

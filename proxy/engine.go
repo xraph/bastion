@@ -557,6 +557,10 @@ func (pe *Engine) modifyResponse(route *bastion.Route, target *bastion.Target, s
 			pe.stats.RecordError(route.ID)
 			pe.hm.RecordPassiveFailure(target.ID)
 		} else {
+			// A 5xx leaves the breaker alone: only transport errors trip it
+			// (see errorHandler). An answer below 500 closes a half-open
+			// breaker and resets a closed one's consecutive failure count.
+			pe.cbm.Get(target.ID).RecordSuccess()
 			pe.hm.RecordPassiveSuccess(target.ID)
 		}
 
@@ -642,7 +646,8 @@ func (pe *Engine) errorHandler(route *bastion.Route, target *bastion.Target, cb 
 }
 
 func (pe *Engine) selectTarget(r *http.Request, route *bastion.Route) *bastion.Target {
-	if len(route.Targets) == 0 {
+	candidates := pe.closedCircuits(route.Targets)
+	if len(candidates) == 0 {
 		return nil
 	}
 
@@ -659,7 +664,23 @@ func (pe *Engine) selectTarget(r *http.Request, route *bastion.Route) *bastion.T
 		}
 	}
 
-	return pe.lb.Select(route.Targets, key)
+	return pe.lb.Select(candidates, key)
+}
+
+// closedCircuits drops targets whose breaker is open. A breaker past its
+// reset timeout reports half_open and stays eligible, so probes still reach
+// it. The proxy asks the breaker rather than reading Target.CircuitState,
+// which nothing assigns on live targets.
+func (pe *Engine) closedCircuits(targets []*bastion.Target) []*bastion.Target {
+	out := make([]*bastion.Target, 0, len(targets))
+
+	for _, t := range targets {
+		if pe.cbm.Get(t.ID).State() != bastion.CircuitOpen {
+			out = append(out, t)
+		}
+	}
+
+	return out
 }
 
 // proxyWebSocket handles WebSocket upgrade requests.

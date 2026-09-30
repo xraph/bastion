@@ -2,6 +2,7 @@ package bastion
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -344,6 +345,30 @@ func (e *Gateway) Snapshot() *GatewayStats {
 	}
 
 	return s
+}
+
+// ErrCircuitNotFound is returned by ResetCircuit for a target id with no
+// breaker. Breakers are created on a target's first proxied request, so a
+// target that has never served traffic has none.
+var ErrCircuitNotFound = errors.New("bastion: no circuit breaker for target")
+
+// Circuits returns a snapshot of every circuit breaker, sorted by target id.
+// It is nil when circuit control is not wired.
+func (e *Gateway) Circuits() []CircuitBreakerSnapshot {
+	if e.cbManager == nil {
+		return nil
+	}
+
+	return e.cbManager.Snapshots()
+}
+
+// ResetCircuit closes the breaker for targetID.
+func (e *Gateway) ResetCircuit(targetID string) error {
+	if e.cbManager == nil || !e.cbManager.Reset(targetID) {
+		return ErrCircuitNotFound
+	}
+
+	return nil
 }
 
 // SetDiscoveryService sets the discovery service adapter and initializes

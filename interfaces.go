@@ -56,6 +56,8 @@ type CircuitControl interface {
 	GetWithConfig(targetID string, cfg *CBConfig) Breaker
 	Remove(targetID string)
 	SetOnStateChange(fn func(targetID string, from, to CircuitState))
+	Snapshots() []CircuitBreakerSnapshot
+	Reset(targetID string) bool
 }
 
 // RequestLimiter handles request rate limiting.

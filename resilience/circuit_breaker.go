@@ -1,6 +1,8 @@
 package resilience
 
 import (
+	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -163,6 +165,28 @@ func (cb *CircuitBreaker) Reset() {
 	cb.halfOpenReqs = 0
 }
 
+// Snapshot returns a copy of the breaker's state. An open breaker whose
+// reset timeout has elapsed reports half_open, matching State().
+func (cb *CircuitBreaker) Snapshot() bastion.CircuitBreakerSnapshot {
+	cb.mu.RLock()
+	defer cb.mu.RUnlock()
+
+	state := cb.state
+	if state == bastion.CircuitOpen && time.Since(cb.lastStateChange) > cb.config.ResetTimeout {
+		state = bastion.CircuitHalfOpen
+	}
+
+	return bastion.CircuitBreakerSnapshot{
+		TargetID:        cb.targetID,
+		State:           state,
+		FailureCount:    cb.failureCount,
+		SuccessCount:    cb.successCount,
+		LastFailure:     cb.lastFailure,
+		LastStateChange: cb.lastStateChange,
+		UpdatedAt:       time.Now(),
+	}
+}
+
 // transitionTo changes state (must be called with lock held).
 func (cb *CircuitBreaker) transitionTo(newState bastion.CircuitState) {
 	oldState := cb.state
@@ -273,6 +297,44 @@ func (m *CBManager) GetWithConfig(targetID string, cfg *bastion.CBConfig) bastio
 	m.breakers[key] = cb
 
 	return cb
+}
+
+// Snapshots returns every breaker's state, sorted by target id.
+func (m *CBManager) Snapshots() []bastion.CircuitBreakerSnapshot {
+	m.mu.RLock()
+	breakers := make([]*CircuitBreaker, 0, len(m.breakers))
+
+	for _, cb := range m.breakers {
+		breakers = append(breakers, cb)
+	}
+	m.mu.RUnlock()
+
+	out := make([]bastion.CircuitBreakerSnapshot, 0, len(breakers))
+	for _, cb := range breakers {
+		out = append(out, cb.Snapshot())
+	}
+
+	slices.SortFunc(out, func(a, b bastion.CircuitBreakerSnapshot) int {
+		return strings.Compare(a.TargetID, b.TargetID)
+	})
+
+	return out
+}
+
+// Reset closes the breaker for targetID. It reports false when no breaker
+// exists for that id, so a caller can tell a reset from a typo.
+func (m *CBManager) Reset(targetID string) bool {
+	m.mu.RLock()
+	cb, ok := m.breakers[targetID]
+	m.mu.RUnlock()
+
+	if !ok {
+		return false
+	}
+
+	cb.Reset()
+
+	return true
 }
 
 // Remove removes a circuit breaker for a target.
