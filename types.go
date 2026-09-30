@@ -314,13 +314,17 @@ type CBConfig struct {
 
 // GatewayStats holds aggregated gateway traffic statistics.
 type GatewayStats struct {
-	TotalRequests    int64                  `json:"totalRequests"`
-	TotalErrors      int64                  `json:"totalErrors"`
-	ActiveConns      int64                  `json:"activeConns"`
-	ActiveWSConns    int64                  `json:"activeWsConns"`
-	ActiveSSEConns   int64                  `json:"activeSseConns"`
-	AvgLatencyMs     float64                `json:"avgLatencyMs"`
-	P99LatencyMs     float64                `json:"p99LatencyMs"`
+	TotalRequests  int64 `json:"totalRequests"`
+	TotalErrors    int64 `json:"totalErrors"`
+	ActiveConns    int64 `json:"activeConns"`
+	ActiveWSConns  int64 `json:"activeWsConns"`
+	ActiveSSEConns int64 `json:"activeSseConns"`
+	// AvgLatencyMs is the mean over every answered upstream request since start.
+	AvgLatencyMs float64 `json:"avgLatencyMs"`
+	// P99LatencyMs is the nearest-rank p99 over the most recent LatencySamples responses.
+	P99LatencyMs float64 `json:"p99LatencyMs"`
+	// LatencySamples is how many recent responses P99LatencyMs covers.
+	LatencySamples   int                    `json:"latencySamples"`
 	RequestsPerSec   float64                `json:"requestsPerSec"`
 	CacheHits        int64                  `json:"cacheHits"`
 	CacheMisses      int64                  `json:"cacheMisses"`
@@ -337,15 +341,19 @@ type GatewayStats struct {
 
 // RouteStats holds per-route traffic statistics.
 type RouteStats struct {
-	RouteID       string  `json:"routeId"`
-	Path          string  `json:"path"`
-	TotalRequests int64   `json:"totalRequests"`
-	TotalErrors   int64   `json:"totalErrors"`
-	AvgLatencyMs  float64 `json:"avgLatencyMs"`
-	P99LatencyMs  float64 `json:"p99LatencyMs"`
-	CacheHits     int64   `json:"cacheHits"`
-	CacheMisses   int64   `json:"cacheMisses"`
-	RateLimited   int64   `json:"rateLimited"`
+	RouteID       string `json:"routeId"`
+	Path          string `json:"path"`
+	TotalRequests int64  `json:"totalRequests"`
+	TotalErrors   int64  `json:"totalErrors"`
+	// AvgLatencyMs is the mean over every answered upstream request since start.
+	AvgLatencyMs float64 `json:"avgLatencyMs"`
+	// P99LatencyMs is the nearest-rank p99 over the most recent LatencySamples responses.
+	P99LatencyMs float64 `json:"p99LatencyMs"`
+	// LatencySamples is how many recent responses P99LatencyMs covers.
+	LatencySamples int   `json:"latencySamples"`
+	CacheHits      int64 `json:"cacheHits"`
+	CacheMisses    int64 `json:"cacheMisses"`
+	RateLimited    int64 `json:"rateLimited"`
 }
 
 // RouteEvent represents a change in the route table.

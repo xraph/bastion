@@ -70,6 +70,7 @@ type StatsRecorder interface {
 	Snapshot(routes []*Route) *GatewayStats
 	RecordRequest(routeID, path string)
 	RecordError(routeID string)
+	RecordLatency(routeID string, d time.Duration)
 	RecordRateLimited()
 	RecordCircuitBreak()
 	RecordRetryAttempt()

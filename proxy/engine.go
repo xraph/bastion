@@ -51,13 +51,17 @@ type StatsCollector struct {
 	retryAttempts int64
 	startedAt     time.Time
 	routeStats    map[string]*bastion.RouteStats
+	latency       *latencyTrack
+	routeLatency  map[string]*latencyTrack
 }
 
 // NewStatsCollector creates a new stats collector.
 func NewStatsCollector() *StatsCollector {
 	return &StatsCollector{
-		startedAt:  time.Now(),
-		routeStats: make(map[string]*bastion.RouteStats),
+		startedAt:    time.Now(),
+		routeStats:   make(map[string]*bastion.RouteStats),
+		latency:      newLatencyTrack(GatewayLatencyWindow),
+		routeLatency: make(map[string]*latencyTrack),
 	}
 }
 
@@ -74,24 +78,34 @@ func (sc *StatsCollector) Snapshot(routes []*bastion.Route) *bastion.GatewayStat
 		RateLimited:   sc.rateLimited,
 		CircuitBreaks: sc.circuitBreaks,
 		RetryAttempts: sc.retryAttempts,
+		AvgLatencyMs:  sc.latency.avgMs(),
+		P99LatencyMs:  sc.latency.p99Ms(),
 		TotalRoutes:   len(routes),
 		StartedAt:     sc.startedAt,
 		Uptime:        int64(time.Since(sc.startedAt).Seconds()),
 		RouteStats:    make(map[string]*bastion.RouteStats),
+
+		LatencySamples: sc.latency.samples(),
 	}
 
 	// Copy route stats
 	for k, v := range sc.routeStats {
-		stats.RouteStats[k] = &bastion.RouteStats{
+		rs := &bastion.RouteStats{
 			RouteID:       v.RouteID,
 			Path:          v.Path,
 			TotalRequests: v.TotalRequests,
 			TotalErrors:   v.TotalErrors,
-			AvgLatencyMs:  v.AvgLatencyMs,
 			CacheHits:     v.CacheHits,
 			CacheMisses:   v.CacheMisses,
 			RateLimited:   v.RateLimited,
 		}
+		if lt, ok := sc.routeLatency[k]; ok {
+			rs.AvgLatencyMs = lt.avgMs()
+			rs.P99LatencyMs = lt.p99Ms()
+			rs.LatencySamples = lt.samples()
+		}
+
+		stats.RouteStats[k] = rs
 	}
 
 	// Count healthy upstreams
@@ -123,6 +137,24 @@ func (sc *StatsCollector) RecordRequest(routeID, path string) {
 	}
 
 	sc.routeStats[routeID].TotalRequests++
+}
+
+// RecordLatency records how long an upstream took to answer a proxied HTTP
+// request. Cache hits, transport errors and streaming protocols are not
+// recorded, so latency describes answered upstream requests only.
+func (sc *StatsCollector) RecordLatency(routeID string, d time.Duration) {
+	sc.mu.Lock()
+	defer sc.mu.Unlock()
+
+	sc.latency.record(d)
+
+	lt, ok := sc.routeLatency[routeID]
+	if !ok {
+		lt = newLatencyTrack(RouteLatencyWindow)
+		sc.routeLatency[routeID] = lt
+	}
+
+	lt.record(d)
 }
 
 // RecordError records an error for a route.
@@ -501,6 +533,7 @@ func (pe *Engine) modifyResponse(route *bastion.Route, target *bastion.Target, s
 		latency := time.Since(start)
 		isError := resp.StatusCode >= 500
 		target.RecordRequest(latency, isError)
+		pe.stats.RecordLatency(route.ID, latency)
 
 		if isError {
 			pe.stats.RecordError(route.ID)
