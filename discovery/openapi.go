@@ -1889,7 +1889,9 @@ func (oa *OpenAPIAggregator) HandleServiceList(ctx forge.Context) error {
 
 // HandleRefresh triggers an immediate spec refresh.
 func (oa *OpenAPIAggregator) HandleRefresh(ctx forge.Context) error {
-	go oa.Refresh(ctx.Request().Context())
+	// Detached: the request context ends when this handler returns, which
+	// used to cancel the refresh before it fetched anything.
+	go oa.Refresh(context.WithoutCancel(ctx.Request().Context()))
 
 	return ctx.JSON(http.StatusOK, map[string]string{
 		"status": "refresh initiated",

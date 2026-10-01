@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -54,5 +55,32 @@ func TestQueriesOverTheWire(t *testing.T) {
 	overview := post("overview.stats", `{}`)
 	if _, ok := overview["errorRate"]; !ok || overview["errorRate"] != nil {
 		t.Errorf("overview.errorRate must be present and null on an idle gateway: %v", overview)
+	}
+}
+
+func TestCommandOverTheWireCarriesInvalidates(t *testing.T) {
+	deps, rm, _, _ := newTestDeps(t)
+	addRoute(t, rm, &bastion.Route{ID: "manual-/users", Path: "/gw/users", Source: bastion.SourceManual, Enabled: true})
+
+	reg := dashcontract.NewRegistry()
+	wreg := dashcontract.NewWardenRegistry()
+	d := dispatcher.New(nil)
+	if err := Register(d, reg, wreg, deps); err != nil {
+		t.Fatal(err)
+	}
+
+	body := `{"envelope":"v1","kind":"command","contributor":"bastion","intent":"routes.setEnabled",` +
+		`"csrf":"test","idempotencyKey":"test","payload":{"id":"manual-/users","enabled":false}}`
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/api/dashboard/v1", strings.NewReader(body))
+	rec := httptest.NewRecorder()
+	transport.NewHandler(reg, wreg, d, nil).ServeHTTP(rec, req)
+
+	var resp dashcontract.Response
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil || !resp.OK {
+		t.Fatalf("response: %s", rec.Body)
+	}
+	want := []string{"routes.list", "routes.detail", "overview.stats"}
+	if !reflect.DeepEqual(resp.Meta.Invalidates, want) {
+		t.Errorf("meta.invalidates = %v, want %v", resp.Meta.Invalidates, want)
 	}
 }

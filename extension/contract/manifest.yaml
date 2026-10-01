@@ -23,6 +23,9 @@ intents:
   - { name: routes.update,     kind: command, version: 1, capability: write, invalidates: [routes.list, routes.detail, upstreams.list, overview.stats, traffic.stats, circuits.list] }
   - { name: routes.delete,     kind: command, version: 1, capability: write, invalidates: [routes.list, routes.detail, upstreams.list, overview.stats, traffic.stats, circuits.list] }
   - { name: routes.setEnabled, kind: command, version: 1, capability: write, invalidates: [routes.list, routes.detail, overview.stats] }
+  - { name: discovery.refresh, kind: command, version: 1, capability: write, invalidates: [services.list, routes.list, routes.detail, upstreams.list, overview.stats, openapi.summary] }
+  - { name: openapi.refresh,   kind: command, version: 1, capability: write, invalidates: [openapi.summary] }
+  - { name: circuits.reset,    kind: command, version: 1, capability: write, invalidates: [circuits.list, upstreams.list, routes.detail, overview.stats] }
 
 queries:
   overviewStats:

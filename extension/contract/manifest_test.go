@@ -32,8 +32,8 @@ func TestManifest_IntentsNamedBastion(t *testing.T) {
 			commands++
 		}
 	}
-	if queries != 9 || commands != 4 {
-		t.Errorf("queries/commands = %d/%d, want 9/4", queries, commands)
+	if queries != 9 || commands != 7 {
+		t.Errorf("queries/commands = %d/%d, want 9/7", queries, commands)
 	}
 }
 
@@ -44,6 +44,9 @@ func TestManifest_CommandsInvalidateExactly(t *testing.T) {
 		"routes.update":     routeWrite,
 		"routes.delete":     routeWrite,
 		"routes.setEnabled": {"routes.list", "routes.detail", "overview.stats"},
+		"discovery.refresh": {"services.list", "routes.list", "routes.detail", "upstreams.list", "overview.stats", "openapi.summary"},
+		"openapi.refresh":   {"openapi.summary"},
+		"circuits.reset":    {"circuits.list", "upstreams.list", "routes.detail", "overview.stats"},
 	}
 	seen := 0
 	for _, in := range loadManifest(t).Intents {

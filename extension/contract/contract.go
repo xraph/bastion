@@ -78,6 +78,15 @@ func Register(d *dispatcher.Dispatcher, reg contract.Registry, wreg contract.War
 		{"routes.setEnabled", func() error {
 			return dispatcher.RegisterCommand(d, c, "routes.setEnabled", 1, routesSetEnabledHandler(deps))
 		}},
+		{"discovery.refresh", func() error {
+			return dispatcher.RegisterCommand(d, c, "discovery.refresh", 1, discoveryRefreshHandler(deps))
+		}},
+		{"openapi.refresh", func() error {
+			return dispatcher.RegisterCommand(d, c, "openapi.refresh", 1, openapiRefreshHandler(deps))
+		}},
+		{"circuits.reset", func() error {
+			return dispatcher.RegisterCommand(d, c, "circuits.reset", 1, circuitsResetHandler(deps))
+		}},
 	} {
 		if err := bind.fn(); err != nil {
 			return fmt.Errorf("bastion/contract: register %s: %w", bind.intent, err)
