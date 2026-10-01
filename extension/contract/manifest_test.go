@@ -2,6 +2,7 @@ package contract
 
 import (
 	"bytes"
+	"reflect"
 	"testing"
 
 	dashcontract "github.com/xraph/forge/extensions/dashboard/contract"
@@ -17,18 +18,44 @@ func loadManifest(t *testing.T) *dashcontract.ContractManifest {
 	return m
 }
 
-func TestManifest_NineQueriesNamedBastion(t *testing.T) {
+func TestManifest_IntentsNamedBastion(t *testing.T) {
 	m := loadManifest(t)
 	if m.Contributor.Name != ContributorName {
-		t.Errorf("contributor = %q, want %q", m.Contributor.Name, ContributorName)
+		t.Errorf("contributor = %q", m.Contributor.Name)
 	}
-	if len(m.Intents) != 9 {
-		t.Errorf("intents = %d, want 9", len(m.Intents))
-	}
+	queries, commands := 0, 0
 	for _, in := range m.Intents {
-		if in.Kind != dashcontract.IntentKindQuery {
-			t.Errorf("%s kind = %q, want query", in.Name, in.Kind)
+		switch in.Kind {
+		case dashcontract.IntentKindQuery:
+			queries++
+		case dashcontract.IntentKindCommand:
+			commands++
 		}
+	}
+	if queries != 9 || commands != 4 {
+		t.Errorf("queries/commands = %d/%d, want 9/4", queries, commands)
+	}
+}
+
+func TestManifest_CommandsInvalidateExactly(t *testing.T) {
+	routeWrite := []string{"routes.list", "routes.detail", "upstreams.list", "overview.stats", "traffic.stats", "circuits.list"}
+	want := map[string][]string{
+		"routes.create":     routeWrite,
+		"routes.update":     routeWrite,
+		"routes.delete":     routeWrite,
+		"routes.setEnabled": {"routes.list", "routes.detail", "overview.stats"},
+	}
+	seen := 0
+	for _, in := range loadManifest(t).Intents {
+		if w, ok := want[in.Name]; ok {
+			seen++
+			if !reflect.DeepEqual(in.Invalidates, w) {
+				t.Errorf("%s invalidates %v, want %v", in.Name, in.Invalidates, w)
+			}
+		}
+	}
+	if seen != len(want) {
+		t.Errorf("found %d of %d commands", seen, len(want))
 	}
 }
 
@@ -43,7 +70,7 @@ func TestManifest_EveryIntentHasACacheHint(t *testing.T) {
 		cached[q.Intent] = true
 	}
 	for _, in := range m.Intents {
-		if !cached[in.Name] {
+		if in.Kind == dashcontract.IntentKindQuery && !cached[in.Name] {
 			t.Errorf("%s has no queries entry", in.Name)
 		}
 	}

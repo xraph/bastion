@@ -72,6 +72,12 @@ func Register(d *dispatcher.Dispatcher, reg contract.Registry, wreg contract.War
 		{"services.list", func() error { return dispatcher.RegisterQuery(d, c, "services.list", 1, servicesListHandler(deps)) }},
 		{"openapi.summary", func() error { return dispatcher.RegisterQuery(d, c, "openapi.summary", 1, openapiSummaryHandler(deps)) }},
 		{"config.detail", func() error { return dispatcher.RegisterQuery(d, c, "config.detail", 1, configDetailHandler(deps)) }},
+		{"routes.create", func() error { return dispatcher.RegisterCommand(d, c, "routes.create", 1, routesCreateHandler(deps)) }},
+		{"routes.update", func() error { return dispatcher.RegisterCommand(d, c, "routes.update", 1, routesUpdateHandler(deps)) }},
+		{"routes.delete", func() error { return dispatcher.RegisterCommand(d, c, "routes.delete", 1, routesDeleteHandler(deps)) }},
+		{"routes.setEnabled", func() error {
+			return dispatcher.RegisterCommand(d, c, "routes.setEnabled", 1, routesSetEnabledHandler(deps))
+		}},
 	} {
 		if err := bind.fn(); err != nil {
 			return fmt.Errorf("bastion/contract: register %s: %w", bind.intent, err)

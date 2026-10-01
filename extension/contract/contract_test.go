@@ -2,6 +2,7 @@ package contract
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 	"testing"
 
@@ -24,13 +25,17 @@ func TestEveryDeclaredIntentIsRegistered(t *testing.T) {
 	}
 
 	for _, intent := range loadManifest(t).Intents {
+		kind := dashcontract.KindQuery
+		if intent.Kind == dashcontract.IntentKindCommand {
+			kind = dashcontract.KindCommand
+		}
 		req := dashcontract.Request{
-			Envelope:      "v1",
-			Kind:          dashcontract.KindQuery,
-			Contributor:   ContributorName,
-			Intent:        intent.Name,
-			IntentVersion: 1,
-			Params:        map[string]any{},
+			Envelope: "v1", Kind: kind, Contributor: ContributorName, Intent: intent.Name, IntentVersion: 1,
+		}
+		if kind == dashcontract.KindQuery {
+			req.Params = map[string]any{}
+		} else {
+			req.Payload = json.RawMessage(`{}`)
 		}
 		_, _, err := d.Dispatch(context.Background(), req, dashcontract.Principal{})
 		if err != nil && strings.Contains(strings.ToLower(err.Error()), "not registered") {

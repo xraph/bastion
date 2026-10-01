@@ -54,6 +54,27 @@ func (d Deps) mapError(intent string, err error) error {
 	return mapped
 }
 
+// audit records a dashboard write. The contract has no HTTP request for
+// the gateway's access log, and bastion's audit sink is never written, so
+// one Info line per write is the trail there is.
+func (d Deps) audit(intent, subject string, p contract.Principal) {
+	if d.Logger == nil {
+		return
+	}
+
+	operator := ""
+	if p.User != nil {
+		operator = p.User.Subject
+	}
+
+	d.Logger.Info("bastion: dashboard write", forge.F("intent", intent), forge.F("subject", subject), forge.F("operator", operator))
+}
+
+// fieldError is a BAD_REQUEST about one input field.
+func fieldError(field, msg string) error {
+	return &contract.Error{Code: contract.CodeBadRequest, Message: msg, Details: map[string]any{"field": field}}
+}
+
 func badRequest(msg string) error {
 	return &contract.Error{Code: contract.CodeBadRequest, Message: msg}
 }

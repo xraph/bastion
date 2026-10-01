@@ -8,7 +8,7 @@ contributor:
 
 # No app block and no graph: the React plugin owns routes, this manifest only
 # declares intents and their cache hints. One gateway per process, so no
-# intent takes a tenant or app id. Commands arrive in slice 3.
+# intent takes a tenant or app id. Commands invalidate exactly what they change.
 intents:
   - { name: overview.stats,  kind: query, version: 1, capability: read }
   - { name: traffic.stats,   kind: query, version: 1, capability: read }
@@ -19,6 +19,10 @@ intents:
   - { name: services.list,   kind: query, version: 1, capability: read }
   - { name: openapi.summary, kind: query, version: 1, capability: read }
   - { name: config.detail,   kind: query, version: 1, capability: read }
+  - { name: routes.create,     kind: command, version: 1, capability: write, invalidates: [routes.list, routes.detail, upstreams.list, overview.stats, traffic.stats, circuits.list] }
+  - { name: routes.update,     kind: command, version: 1, capability: write, invalidates: [routes.list, routes.detail, upstreams.list, overview.stats, traffic.stats, circuits.list] }
+  - { name: routes.delete,     kind: command, version: 1, capability: write, invalidates: [routes.list, routes.detail, upstreams.list, overview.stats, traffic.stats, circuits.list] }
+  - { name: routes.setEnabled, kind: command, version: 1, capability: write, invalidates: [routes.list, routes.detail, overview.stats] }
 
 queries:
   overviewStats:
