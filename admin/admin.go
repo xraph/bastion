@@ -6,6 +6,7 @@ package admin
 
 import (
 	"errors"
+	"sync"
 
 	bastion "github.com/xraph/bastion"
 	"github.com/xraph/bastion/health"
@@ -36,6 +37,10 @@ type Deps struct {
 // Service answers operator reads and performs operator writes.
 type Service struct {
 	d Deps
+
+	// mu serialises writes. A conflict check and the write it guards must
+	// see the same route table, or two concurrent creates both pass.
+	mu sync.Mutex
 }
 
 // New builds a Service.

@@ -2,6 +2,7 @@ package admin_test
 
 import (
 	"errors"
+	"sync"
 	"testing"
 
 	bastion "github.com/xraph/bastion"
@@ -182,5 +183,123 @@ func TestSetEnabledDurability(t *testing.T) {
 	}
 	if durable, _ := svc.SetEnabled("manual-/users", false); durable {
 		t.Error("a config-file route change is never durable")
+	}
+}
+
+func TestConcurrentCreatesOfOnePathMakeOneRoute(t *testing.T) {
+	f := newFixture(t)
+
+	var wg sync.WaitGroup
+	results := make(chan error, 8)
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, err := f.svc.CreateRoute(ordersDTO())
+			results <- err
+		}()
+	}
+	wg.Wait()
+	close(results)
+
+	ok := 0
+	for err := range results {
+		if err == nil {
+			ok++
+		} else if !errors.Is(err, admin.ErrConflict) {
+			t.Errorf("unexpected error: %v", err)
+		}
+	}
+	if ok != 1 {
+		t.Errorf("%d creates succeeded, want exactly 1", ok)
+	}
+}
+
+func TestChangedTargetKeepsItsHealth(t *testing.T) {
+	f := newFixture(t)
+	r, _ := f.svc.CreateRoute(ordersDTO())
+	r.Targets[0].SetHealthy(false)
+
+	dto := ordersDTO()
+	dto.Targets[0].Weight = 9
+	up, err := f.svc.UpdateRoute(r.ID, dto)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if up.Targets[0].Healthy {
+		t.Error("a weight edit reported a known-unhealthy upstream healthy")
+	}
+}
+
+func TestStoredRouteDoesNotAliasTheDTO(t *testing.T) {
+	f := newFixture(t)
+	dto := ordersDTO()
+	dto.Headers = bastion.HeaderPolicy{Set: map[string]string{"X-Env": "prod"}}
+	dto.Metadata = map[string]any{"owner": "a"}
+	dto.RateLimit = &bastion.RateLimitConfig{Enabled: true, RequestsPerSec: 5, Burst: 10}
+
+	r, err := f.svc.CreateRoute(dto)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dto.Headers.Set["X-Env"] = "changed"
+	dto.Metadata["owner"] = "b"
+	dto.RateLimit.Burst = 99
+
+	got, _ := f.rm.GetRoute(r.ID)
+	if got.Headers.Set["X-Env"] != "prod" || got.Metadata["owner"] != "a" || got.RateLimit.Burst != 10 {
+		t.Errorf("stored route changed with the caller's DTO: %+v %+v %+v", got.Headers, got.Metadata, got.RateLimit)
+	}
+}
+
+func TestEntryRoundTripsEverything(t *testing.T) {
+	f := newFixture(t)
+	f.add(t, &bastion.Route{
+		ID: "r1", Path: "/gw/orders", Source: bastion.SourceManual, Priority: 105, Enabled: true,
+		Methods:   []string{"GET"},
+		Headers:   bastion.HeaderPolicy{Set: map[string]string{"Authorization": "Bearer real"}},
+		Transform: &bastion.TransformConfig{RequestHeaders: bastion.HeaderPolicy{Add: map[string]string{"X-A": "1"}}},
+		Timeout:   &bastion.TimeoutConfig{Read: 5},
+		Metadata:  map[string]any{"owner": "a"},
+		Targets: []*bastion.Target{{ID: "r1/0", URL: "http://u:secret@orders:8080", Weight: 2,
+			Metadata: map[string]string{"health_check_path": "/healthz"}}},
+	})
+	before, _ := f.rm.GetRoute("r1")
+
+	dto, err := f.svc.Entry("r1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dto.Path != "/orders" || dto.Priority != 5 {
+		t.Errorf("entry path/priority = %q/%d, want /orders/5", dto.Path, dto.Priority)
+	}
+	if dto.Headers.Set["Authorization"] != "Bearer real" {
+		t.Error("Entry redacted a header; it must not")
+	}
+	if dto.Targets[0].URL != "http://u:secret@orders:8080" {
+		t.Error("Entry masked a URL; it must not")
+	}
+
+	if _, err := f.svc.UpdateRoute("r1", dto); err != nil {
+		t.Fatal(err)
+	}
+	after, _ := f.rm.GetRoute("r1")
+	if after.Path != before.Path || after.Priority != before.Priority ||
+		after.Headers.Set["Authorization"] != "Bearer real" ||
+		after.Transform.RequestHeaders.Add["X-A"] != "1" ||
+		after.Timeout.Read != 5 || after.Metadata["owner"] != "a" ||
+		after.Targets[0] != before.Targets[0] {
+		t.Errorf("Entry then UpdateRoute changed the route:\nbefore %+v\nafter  %+v", before, after)
+	}
+}
+
+func TestEntryRefusesDiscoveredRoutes(t *testing.T) {
+	f := newFixture(t)
+	f.add(t, &bastion.Route{ID: "farp-x", Path: "/x", Source: bastion.SourceFARP})
+	if _, err := f.svc.Entry("farp-x"); !errors.Is(err, admin.ErrNotManual) {
+		t.Errorf("err = %v, want ErrNotManual", err)
+	}
+	if _, err := f.svc.Entry("nope"); !errors.Is(err, admin.ErrNotFound) {
+		t.Errorf("err = %v, want ErrNotFound", err)
 	}
 }

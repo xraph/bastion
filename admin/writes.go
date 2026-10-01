@@ -158,7 +158,11 @@ func (s *Service) build(id string, dto bastion.RouteDTO, existing *bastion.Route
 			if sameTarget(t, td, weight) {
 				targets = append(targets, t)
 			} else {
-				targets = append(targets, newTarget(t.ID, td, weight))
+				nt := newTarget(t.ID, td, weight)
+				// What the health checker last learned about this upstream
+				// still holds after a weight or tag edit.
+				nt.Healthy = t.Healthy
+				targets = append(targets, nt)
 			}
 
 			continue
@@ -193,20 +197,20 @@ func (s *Service) build(id string, dto bastion.RouteDTO, existing *bastion.Route
 		StripPrefix:    dto.StripPrefix,
 		AddPrefix:      dto.AddPrefix,
 		RewritePath:    dto.RewritePath,
-		Headers:        dto.Headers,
+		Headers:        cloneHeaders(dto.Headers),
 		Protocol:       protocol,
 		Source:         bastion.SourceManual,
 		Priority:       dto.Priority + ManualPriorityOffset,
 		Enabled:        dto.Enabled,
-		Retry:          dto.Retry,
-		Timeout:        dto.Timeout,
-		RateLimit:      dto.RateLimit,
-		Auth:           dto.Auth,
-		CircuitBreaker: dto.CircuitBreaker,
-		Cache:          dto.Cache,
-		TrafficPolicy:  dto.TrafficPolicy,
-		Transform:      dto.Transform,
-		Metadata:       dto.Metadata,
+		Retry:          cloneRetry(dto.Retry),
+		Timeout:        clonePtr(dto.Timeout),
+		RateLimit:      cloneRateLimit(dto.RateLimit),
+		Auth:           cloneAuth(dto.Auth),
+		CircuitBreaker: clonePtr(dto.CircuitBreaker),
+		Cache:          cloneCache(dto.Cache),
+		TrafficPolicy:  cloneTraffic(dto.TrafficPolicy),
+		Transform:      cloneTransform(dto.Transform),
+		Metadata:       maps.Clone(dto.Metadata),
 	}
 }
 
@@ -248,8 +252,51 @@ func (s *Service) manual(id string) (*bastion.Route, error) {
 	return r, nil
 }
 
+// Entry returns a manual route's values as the operator entered them, with
+// nothing redacted. It is for merging a partial update, never for display.
+func (s *Service) Entry(id string) (bastion.RouteDTO, error) {
+	r, err := s.manual(id)
+	if err != nil {
+		return bastion.RouteDTO{}, err
+	}
+
+	in := s.input(r)
+	dto := bastion.RouteDTO{
+		Path:           in.Path,
+		Methods:        slices.Clone(r.Methods),
+		StripPrefix:    r.StripPrefix,
+		AddPrefix:      r.AddPrefix,
+		RewritePath:    r.RewritePath,
+		Headers:        cloneHeaders(r.Headers),
+		Protocol:       r.Protocol,
+		Priority:       in.Priority,
+		Enabled:        r.Enabled,
+		Retry:          cloneRetry(r.Retry),
+		Timeout:        clonePtr(r.Timeout),
+		RateLimit:      cloneRateLimit(r.RateLimit),
+		Auth:           cloneAuth(r.Auth),
+		CircuitBreaker: clonePtr(r.CircuitBreaker),
+		Cache:          cloneCache(r.Cache),
+		TrafficPolicy:  cloneTraffic(r.TrafficPolicy),
+		Transform:      cloneTransform(r.Transform),
+		Metadata:       maps.Clone(r.Metadata),
+		Targets:        make([]bastion.TargetDTO, 0, len(r.Targets)),
+	}
+
+	for _, t := range r.Targets {
+		dto.Targets = append(dto.Targets, bastion.TargetDTO{
+			URL: t.URL, Weight: t.Weight, Tags: slices.Clone(t.Tags), Metadata: maps.Clone(t.Metadata), TLS: t.TLS,
+		})
+	}
+
+	return dto, nil
+}
+
 // CreateRoute adds a manual route from entered values.
 func (s *Service) CreateRoute(dto bastion.RouteDTO) (*bastion.Route, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	if err := validate(dto); err != nil {
 		return nil, err
 	}
@@ -268,6 +315,9 @@ func (s *Service) CreateRoute(dto bastion.RouteDTO) (*bastion.Route, error) {
 
 // UpdateRoute replaces a manual route from entered values.
 func (s *Service) UpdateRoute(id string, dto bastion.RouteDTO) (*bastion.Route, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	existing, err := s.manual(id)
 	if err != nil {
 		return nil, err
@@ -305,6 +355,9 @@ func (s *Service) UpdateRoute(id string, dto bastion.RouteDTO) (*bastion.Route, 
 
 // DeleteRoute removes a manual route.
 func (s *Service) DeleteRoute(id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	existing, err := s.manual(id)
 	if err != nil {
 		return err
@@ -322,6 +375,9 @@ func (s *Service) DeleteRoute(id string) error {
 // SetEnabled turns a manual route on or off. It writes a copy: the live route
 // is read by the proxy without a lock.
 func (s *Service) SetEnabled(id string, enabled bool) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	existing, err := s.manual(id)
 	if err != nil {
 		return false, err
