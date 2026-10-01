@@ -42,6 +42,10 @@ func validate(dto bastion.RouteDTO) error {
 			return &ValidationError{Field: "targets", Message: fmt.Sprintf("upstream %d: %q is not an http, https, ws or wss URL", i+1, t.URL)}
 		}
 
+		if pw, ok := u.User.Password(); ok && pw == RedactedPassword {
+			return &ValidationError{Field: "targets", Message: fmt.Sprintf("upstream %d: re-enter the password; the masked one cannot be saved", i+1)}
+		}
+
 		if seen[t.URL] {
 			return &ValidationError{Field: "targets", Message: fmt.Sprintf("upstream %d: %s is listed twice", i+1, t.URL)}
 		}
@@ -51,6 +55,11 @@ func validate(dto bastion.RouteDTO) error {
 		if t.Weight < 0 {
 			return &ValidationError{Field: "targets", Message: fmt.Sprintf("upstream %d: weight cannot be negative", i+1)}
 		}
+	}
+
+	// A limit that never allows a request would blackhole the route.
+	if rl := dto.RateLimit; rl != nil && rl.Enabled && (rl.RequestsPerSec <= 0 || rl.Burst < 1) {
+		return &ValidationError{Field: "rateLimit", Message: "a rate limit needs requests per second above 0 and a burst of at least 1"}
 	}
 
 	if dto.Protocol != "" && !validProtocols[dto.Protocol] {

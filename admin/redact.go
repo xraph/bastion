@@ -13,6 +13,9 @@ import (
 // operator can see that it is set.
 const Redacted = "[redacted]"
 
+// RedactedPassword is what url.URL.Redacted shows in place of a password.
+const RedactedPassword = "xxxxx"
+
 // SensitiveHeader reports whether a header's value may carry a credential.
 func SensitiveHeader(name string) bool {
 	n := strings.ToLower(name)
