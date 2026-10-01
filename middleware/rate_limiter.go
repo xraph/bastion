@@ -41,6 +41,11 @@ func newTokenBucket(rate float64, burst int) *tokenBucket {
 	}
 }
 
+// matches reports whether the bucket was built for this rate and burst.
+func (tb *tokenBucket) matches(rate float64, burst int) bool {
+	return tb.rate == rate && tb.maxTokens == float64(burst)
+}
+
 func (tb *tokenBucket) allow() bool {
 	tb.mu.Lock()
 	defer tb.mu.Unlock()
@@ -112,10 +117,11 @@ func (rl *RateLimiter) AllowWithConfig(r *http.Request, config *RateLimitConfig)
 	bucket, ok := rl.buckets[key]
 	rl.mu.RUnlock()
 
-	if !ok {
+	// An edited rate limit must not wait for the old bucket to idle out.
+	if !ok || !bucket.matches(config.RequestsPerSec, config.Burst) {
 		rl.mu.Lock()
 		bucket, ok = rl.buckets[key]
-		if !ok {
+		if !ok || !bucket.matches(config.RequestsPerSec, config.Burst) {
 			bucket = newTokenBucket(config.RequestsPerSec, config.Burst)
 			rl.buckets[key] = bucket
 		}
