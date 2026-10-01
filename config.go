@@ -273,12 +273,19 @@ type TracingConfig struct {
 // The canonical definition lives in the observability subpackage.
 type AccessLogConfig = observability.AccessLogConfig
 
-// DashboardConfig holds admin dashboard settings.
+// DashboardConfig holds admin surface settings. The Go-rendered dashboard has
+// been retired; the React plugin reads the bastion contract contributor.
 type DashboardConfig struct {
-	Enabled  bool   `json:"enabled" yaml:"enabled"`
+	// Enabled gates the admin REST API, the WebSocket hub, and the
+	// OpenAPI/AsyncAPI endpoints.
+	Enabled bool `json:"enabled" yaml:"enabled"`
+	// BasePath prefixes the admin REST API, the WebSocket hub, and the
+	// OpenAPI/AsyncAPI endpoints.
 	BasePath string `json:"basePath" yaml:"base_path"`
-	Title    string `json:"title,omitempty" yaml:"title"`
-	Realtime bool   `json:"realtime" yaml:"realtime"`
+	// Title is unused. It is kept so existing configuration still parses.
+	Title string `json:"title,omitempty" yaml:"title"`
+	// Realtime gates the WebSocket hub.
+	Realtime bool `json:"realtime" yaml:"realtime"`
 }
 
 // WebSocketConfig holds WebSocket proxy settings.

@@ -5,10 +5,8 @@ import (
 	"fmt"
 
 	"github.com/xraph/forge"
-	"github.com/xraph/forge/extensions/dashboard"
 	dashcontract "github.com/xraph/forge/extensions/dashboard/contract"
 	"github.com/xraph/forge/extensions/dashboard/contract/dispatcher"
-	"github.com/xraph/forge/extensions/dashboard/contributor"
 	"github.com/xraph/forge/extensions/discovery"
 	"github.com/xraph/grove"
 	"github.com/xraph/vessel"
@@ -16,7 +14,6 @@ import (
 	"github.com/xraph/bastion"
 	"github.com/xraph/bastion/admin"
 	"github.com/xraph/bastion/api"
-	bastionDash "github.com/xraph/bastion/dashboard"
 	bastioncontract "github.com/xraph/bastion/extension/contract"
 	"github.com/xraph/bastion/proxy"
 	"github.com/xraph/bastion/resilience"
@@ -27,15 +24,13 @@ import (
 	sqlitestore "github.com/xraph/bastion/store/sqlite"
 )
 
-// Ensure Extension implements forge.Extension and dashboard.DashboardAware.
-var (
-	_ forge.Extension          = (*Extension)(nil)
-	_ dashboard.DashboardAware = (*Extension)(nil)
-)
+// Ensure Extension implements forge.Extension.
+var _ forge.Extension = (*Extension)(nil)
 
-// Extension wraps the Bastion gateway as a Forge extension, providing
-// DashboardAware integration, auto-wiring of the discovery service, and
-// grove-based persistent store support.
+// Extension wraps the Bastion gateway as a Forge extension, registering the
+// bastion contract contributor that the React dashboard shell reads,
+// auto-wiring the discovery service, and providing grove-based persistent
+// store support.
 type Extension struct {
 	gw    *bastion.Gateway
 	admin *admin.Service
@@ -224,15 +219,6 @@ func (e *Extension) Stop(ctx context.Context) error {
 
 func (e *Extension) Health(ctx context.Context) error {
 	return e.gateway().Health(ctx)
-}
-
-// --- dashboard.DashboardAware ---
-
-// DashboardContributor returns a LocalContributor that renders bastion
-// pages, widgets, and settings in the Forge dashboard.
-func (e *Extension) DashboardContributor() contributor.LocalContributor {
-	manifest := bastionDash.NewManifest()
-	return bastionDash.New(manifest, e.gateway())
 }
 
 // RegisterContractContributor implements dashboard.ContractContributorAware.

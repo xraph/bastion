@@ -5,7 +5,6 @@ go 1.26.0
 toolchain go1.26.6
 
 require (
-	github.com/a-h/templ v0.3.1001
 	github.com/gobwas/ws v1.4.0
 	github.com/google/uuid v1.6.0
 	github.com/gorilla/websocket v1.5.4-0.20250319132907-e064f32e3674
@@ -26,6 +25,7 @@ require (
 require (
 	github.com/BurntSushi/toml v1.6.0 // indirect
 	github.com/Oudwins/tailwind-merge-go v0.2.1 // indirect
+	github.com/a-h/templ v0.3.1001 // indirect
 	github.com/armon/go-metrics v0.4.1 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/cenkalti/backoff v2.2.1+incompatible // indirect
