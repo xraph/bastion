@@ -125,7 +125,7 @@ func newTarget(id string, td bastion.TargetDTO, weight int) *bastion.Target {
 		Healthy:  true,
 		Tags:     slices.Clone(td.Tags),
 		Metadata: maps.Clone(td.Metadata),
-		TLS:      td.TLS,
+		TLS:      clonePtr(td.TLS),
 	}
 }
 
@@ -285,7 +285,7 @@ func (s *Service) Entry(id string) (bastion.RouteDTO, error) {
 
 	for _, t := range r.Targets {
 		dto.Targets = append(dto.Targets, bastion.TargetDTO{
-			URL: t.URL, Weight: t.Weight, Tags: slices.Clone(t.Tags), Metadata: maps.Clone(t.Metadata), TLS: t.TLS,
+			URL: t.URL, Weight: t.Weight, Tags: slices.Clone(t.Tags), Metadata: maps.Clone(t.Metadata), TLS: clonePtr(t.TLS),
 		})
 	}
 

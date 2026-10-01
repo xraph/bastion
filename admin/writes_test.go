@@ -4,9 +4,11 @@ import (
 	"errors"
 	"sync"
 	"testing"
+	"time"
 
 	bastion "github.com/xraph/bastion"
 	"github.com/xraph/bastion/admin"
+	"github.com/xraph/bastion/routing"
 )
 
 func ordersDTO() bastion.RouteDTO {
@@ -186,19 +188,35 @@ func TestSetEnabledDurability(t *testing.T) {
 	}
 }
 
+// slowAdd widens the gap between a conflict check and its write, so a missing
+// lock shows up as more than one route on the path.
+type slowAdd struct{ *routing.Manager }
+
+func (s slowAdd) AddRoute(r *bastion.Route) error {
+	time.Sleep(5 * time.Millisecond)
+
+	return s.Manager.AddRoute(r)
+}
+
 func TestConcurrentCreatesOfOnePathMakeOneRoute(t *testing.T) {
-	f := newFixture(t)
+	svc, err := admin.New(admin.Deps{Routes: slowAdd{routing.NewManager()}, BasePath: "/gw"})
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	var wg sync.WaitGroup
+	start := make(chan struct{})
 	results := make(chan error, 8)
 	for i := 0; i < 8; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			_, err := f.svc.CreateRoute(ordersDTO())
+			<-start
+			_, err := svc.CreateRoute(ordersDTO())
 			results <- err
 		}()
 	}
+	close(start)
 	wg.Wait()
 	close(results)
 
@@ -249,6 +267,30 @@ func TestStoredRouteDoesNotAliasTheDTO(t *testing.T) {
 	got, _ := f.rm.GetRoute(r.ID)
 	if got.Headers.Set["X-Env"] != "prod" || got.Metadata["owner"] != "a" || got.RateLimit.Burst != 10 {
 		t.Errorf("stored route changed with the caller's DTO: %+v %+v %+v", got.Headers, got.Metadata, got.RateLimit)
+	}
+}
+
+func TestTargetTLSIsNotShared(t *testing.T) {
+	f := newFixture(t)
+	dto := ordersDTO()
+	dto.Targets[0].TLS = &bastion.TargetTLSConfig{Enabled: true, ServerName: "orders"}
+
+	r, err := f.svc.CreateRoute(dto)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dto.Targets[0].TLS.ServerName = "changed"
+	if got := r.Targets[0].TLS.ServerName; got != "orders" {
+		t.Errorf("stored TLS followed the caller's DTO: %q", got)
+	}
+
+	entry, err := f.svc.Entry(r.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry.Targets[0].TLS.ServerName = "edited"
+	if got := r.Targets[0].TLS.ServerName; got != "orders" {
+		t.Errorf("live TLS followed Entry's copy: %q", got)
 	}
 }
 
