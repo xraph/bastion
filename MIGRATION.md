@@ -19,15 +19,12 @@ Status is one of:
 
 - Migrated: it exists in the React plugin today. The row says where, and which
   contract intent feeds it.
-- Pending slice 4: the page is not built yet. The contract intent that will serve
-  it already exists and is named in the row.
 - Dropped: gone on purpose, with the reason.
 
-Slice 4 is traffic, health, circuits, services, the API explorer and config. Until
-it lands, the plugin's sidebar has three entries (Overview, Routes, Upstreams) and
-the other six old pages have no React home. If you rely on one of them today,
-read the Pending rows. The admin REST API is unchanged apart from what the REST
-section below lists, so it still answers the same data in the meantime.
+Every old page now has a React home. The last six (traffic, health, circuits,
+services, the API explorer and config) landed in the last slice, so the plugin's
+sidebar has nine entries, the same nine the old dashboard had. Nothing is left to do.
+The admin REST API is unchanged apart from what the REST section below lists.
 
 ## There was no templ in the templ dashboard
 
@@ -163,13 +160,13 @@ problem: `routes.detail` carries both values (`priority` and `input.priority`,
   React shell's own overview replaces them, and nothing else mounts a widget.
   What each one showed is in the Widgets section below.
 - The settings panel `bastion-config`. `config.detail` covers every field in it,
-  and the Config page (pending slice 4) shows them.
+  and the Config page shows them.
 - The Swagger UI iframe on the API explorer. It pointed at `BasePath` plus
   `UIPath` (`render_pages.go:242` and `:327`), a route registered only when
   `EnableGatewayDocs` is on, which is off by default, and even then it served the
   admin API's own spec, not the aggregated upstream spec
   (`extension/extension.go:510` to `:517`). By default it was a 404 inside a
-  800 pixel box. The explorer page will be a spec summary with refresh and links.
+  800 pixel box. The explorer page is a spec summary with refresh and links.
 - "Recent Routes" on the overview. It was the first five routes by priority, not
   by recency, and showed only a path and an Active or Disabled badge. The overview
   now lists the busiest routes by request count, which is what somebody opening
@@ -215,12 +212,12 @@ inside the plugin.
 | none | `/new-route` | Migrated, and new: create. Never `/routes/new`, so no route id can shadow it |
 | none | `/routes/:id/edit` | Migrated, and new: edit a manual route |
 | `/upstreams` | `/upstreams` | Migrated: `BastionUpstreamsPage` |
-| `/services` | `/services` | Pending slice 4: `services.list` |
-| `/traffic` | `/traffic` | Pending slice 4: `traffic.stats` |
-| `/health` | `/health` | Pending slice 4: `upstreams.list` (health and counters per upstream), `circuits.list` |
-| `/circuits` | `/circuits` | Pending slice 4: `circuits.list` and `circuits.reset` |
-| `/api-explorer` | `/api-explorer` | Pending slice 4: `openapi.summary` and `openapi.refresh` |
-| `/config` | `/config` | Pending slice 4: `config.detail` |
+| `/services` | `/services` | Migrated: `BastionServicesPage`, `services.list` and `discovery.refresh` |
+| `/traffic` | `/traffic` | Migrated: `BastionTrafficPage`, `traffic.stats` |
+| `/health` | `/health` | Migrated: `BastionHealthPage`, `upstreams.list` and `config.detail` |
+| `/circuits` | `/circuits` | Migrated: `BastionCircuitsPage`, `circuits.list` and `circuits.reset` |
+| `/api-explorer` | `/api-explorer` | Migrated: `BastionApiExplorerPage`, `openapi.summary` and `openapi.refresh` |
+| `/config` | `/config` | Migrated: `BastionConfigPage`, `config.detail` |
 
 An unknown route used to render a "Page Not Found" card with the route in it. The
 shell answers that now.
@@ -234,12 +231,12 @@ shell answers that now.
 | Nav Overview, `/`, icon layout-dashboard, group Gateway, priority 0 | Overview, `/`, group Gateway, priority 0 | Migrated |
 | Nav Routes, `/routes`, icon route, group Routing, priority 10 | Routes, group Routing, priority 10 | Migrated |
 | Nav Upstreams, `/upstreams`, icon server, group Routing, priority 11 | Upstreams, group Routing, priority 11 | Migrated |
-| Nav Services, `/services`, icon network, group Routing, priority 12 | none yet | Pending slice 4: `services.list` |
-| Nav Traffic, `/traffic`, icon activity, group Traffic, priority 20 | none yet | Pending slice 4: `traffic.stats` |
-| Nav Health, `/health`, icon heart-pulse, group Resilience, priority 30 | none yet | Pending slice 4 |
-| Nav Circuits, `/circuits`, icon toggle-left, group Resilience, priority 31 | none yet | Pending slice 4: `circuits.list` |
-| Nav API Explorer, `/api-explorer`, icon globe, group API, priority 40 | none yet | Pending slice 4: `openapi.summary` |
-| Nav Config, `/config`, icon settings, group Settings, priority 50 | none yet | Pending slice 4: `config.detail` |
+| Nav Services, `/services`, icon network, group Routing, priority 12 | Services, group Routing, priority 12 | Migrated: `services.list` |
+| Nav Traffic, `/traffic`, icon activity, group Traffic, priority 20 | Traffic, group Traffic, priority 20 | Migrated: `traffic.stats` |
+| Nav Health, `/health`, icon heart-pulse, group Resilience, priority 30 | Health, group Resilience, priority 30 | Migrated: `upstreams.list` and `config.detail` |
+| Nav Circuits, `/circuits`, icon toggle-left, group Resilience, priority 31 | Circuits, group Resilience, priority 31 | Migrated: `circuits.list` |
+| Nav API Explorer, `/api-explorer`, icon globe, group API, priority 40 | API explorer, group API, priority 40, code icon | Migrated: `openapi.summary` |
+| Nav Config, `/config`, icon settings, group Settings, priority 50 | Config, group Settings, priority 50 | Migrated: `config.detail` |
 | Display name "Bastion", icon shield | plugin label "Bastion", shield icon | Migrated |
 | Topbar title "Bastion Gateway", logo icon, accent `#6366f1`, no search | none | Dropped: the shell themes plugins alike |
 | Layout "extension", sidebar shown, version "1.0.0" | none | Dropped: the shell decides |
@@ -340,135 +337,135 @@ React: `pages/upstreams.tsx`, intent `upstreams.list`.
 | No traffic columns | "Requests", "Errors", "Avg latency" (blank until the upstream has a request) | Migrated, new |
 | Empty "No upstreams configured", a table row | "No upstreams. Add a route to give the gateway somewhere to send traffic." | Migrated |
 
-`upstreams.list` also carries each upstream's active connection count. The page
-doesn't show it yet, see Not classified below.
+`upstreams.list` also carries each upstream's active connection count. This page
+doesn't show it. The Health page does, see Not classified below.
 
 ### Services
 
 `renderServicesPage` and `renderServiceCards`, `render_pages.go:114` and `:531`.
 Fed by `gw.Discovery().DiscoveredServices()`, which returned shared pointers that
-discovery mutates later. Pending slice 4: `services.list`, which copies, and
+discovery mutates later. The React page reads `services.list`, which copies, and
 returns `discoveryEnabled`, `services` and `total`.
 
 | old | contract field | status |
 |---|---|---|
-| Title "Services", subtitle "Discovered services via FARP" (empty) or "N discovered services" | `total` | Pending slice 4 |
-| One card per service, in discovery order, in a three-column grid | `services`, sorted by name | Pending slice 4 |
-| Card title, the service name | `name` | Pending slice 4 |
-| Health pill, green "Healthy" or red "Unhealthy" | `healthy` | Pending slice 4 |
-| Row "Version" | `version` | Pending slice 4 |
-| Row "Address", `address:port` in mono | `address` and `port` | Pending slice 4 |
-| Row "Routes", the route count | `routeCount` | Pending slice 4 |
-| No protocols, no discovery time, no metadata | `protocols`, `discoveredAt`, `metadataKeys` | Pending slice 4, new |
-| Empty "No services discovered yet", the same whether discovery was off or found nothing | `discoveryEnabled` tells the two apart | Pending slice 4: the page will say "Discovery is switched off" separately |
-| Refresh | command `discovery.refresh`, answers CONFLICT with `details.reason` `discoveryOff` when discovery is disabled | Pending slice 4 (the command already has a button on the Routes page) |
+| Title "Services", subtitle "Discovered services via FARP" (empty) or "N discovered services" | `total` | Migrated |
+| One card per service, in discovery order, in a three-column grid | `services`, sorted by name | Migrated |
+| Card title, the service name | `name` | Migrated |
+| Health pill, green "Healthy" or red "Unhealthy" | `healthy` | Migrated |
+| Row "Version" | `version` | Migrated |
+| Row "Address", `address:port` in mono | `address` and `port` | Migrated |
+| Row "Routes", the route count | `routeCount` | Migrated |
+| No protocols, no discovery time, no metadata | `protocols`, `discoveredAt`, `metadataKeys` | Migrated, new |
+| Empty "No services discovered yet", the same whether discovery was off or found nothing | `discoveryEnabled` tells the two apart | Migrated: the page says "Discovery is switched off" separately |
+| Refresh | command `discovery.refresh`, answers CONFLICT with `details.reason` `discoveryOff` when discovery is disabled | Migrated (the command also has a button on the Routes page) |
 
 ### Traffic
 
 `renderTrafficPage` and `renderRouteStatsRows`, `render_pages.go:141` and `:556`.
-Pending slice 4: `traffic.stats`.
+The React page reads `traffic.stats`.
 
 | old | contract field | status |
 |---|---|---|
-| Title "Traffic", subtitle "Real-time traffic metrics" (it was a snapshot at page load) | the page will poll | Pending slice 4 |
-| Stat "Total Requests", abbreviated | `totalRequests` | Pending slice 4 |
-| Stat "Total Errors" | `totalErrors` | Pending slice 4 |
-| Stat "Rate Limited" | `rateLimited` | Pending slice 4 |
-| Stat "Circuit Breaks" (a running total of requests refused by an open breaker) | `circuitBreaks` | Pending slice 4 |
-| Card "Per-Route Statistics", a table in map order (random) | `routes`, busiest first | Pending slice 4 |
-| Column "Route", the route's path in mono | `routes[].path`, `routeId` | Pending slice 4 |
-| Column "Requests" | `routes[].totalRequests` | Pending slice 4 |
-| Column "Errors" | `routes[].totalErrors` | Pending slice 4 |
-| Column "Avg Latency", always "0.0ms" | `routes[].avgLatencyMs`, now real, or `null` | Pending slice 4: "Not measured" when null |
-| No latency percentile, error rate, cache or retry figures | `p99LatencyMs`, `errorRate`, `latencySamples`, `cacheHits`, `cacheMisses`, `retriesMeasured` | Pending slice 4, new. `retriesMeasured` is false today, so the page must say retries are not measured, not show 0 |
-| Empty "No traffic data yet", a table row | `routes` empty | Pending slice 4 |
+| Title "Traffic", subtitle "Real-time traffic metrics" (it was a snapshot at page load) | the page polls | Migrated |
+| Stat "Total Requests", abbreviated | `totalRequests` | Migrated |
+| Stat "Total Errors" | `totalErrors` | Migrated |
+| Stat "Rate Limited" | `rateLimited` | Migrated |
+| Stat "Circuit Breaks" (a running total of requests refused by an open breaker) | `circuitBreaks` | Migrated |
+| Card "Per-Route Statistics", a table in map order (random) | `routes`, busiest first | Migrated |
+| Column "Route", the route's path in mono | `routes[].path`, `routeId` | Migrated |
+| Column "Requests" | `routes[].totalRequests` | Migrated |
+| Column "Errors" | `routes[].totalErrors` | Migrated |
+| Column "Avg Latency", always "0.0ms" | `routes[].avgLatencyMs`, now real, or `null` | Migrated: "Not measured" when null |
+| No latency percentile, error rate, cache or retry figures | `p99LatencyMs`, `errorRate`, `latencySamples`, `cacheHits`, `cacheMisses`, `retriesMeasured` | Migrated, new. `retriesMeasured` is false today, so the page must say retries are not measured, not show 0 |
+| Empty "No traffic data yet", a table row | `routes` empty | Migrated |
 
 ### Health
 
 `renderHealthPage` and `renderHealthRows`, `render_pages.go:176` and `:575`. There
-is no `health.list` query. Pending slice 4, served by `upstreams.list` (health,
-counters and the routes using each upstream), which is what the page will show,
-one row per upstream.
+is no `health.list` query. The React page is served by `upstreams.list` (health,
+counters, active connections and the routes using each upstream), one row per
+upstream, and by `config.detail` for the health-check settings.
 
 | old | contract field | status |
 |---|---|---|
-| Title "Health", subtitle "Upstream health status" | none | Pending slice 4 |
-| Column "Target", the URL in mono | `upstreams[].url` | Pending slice 4 |
-| Column "Route", the route path, one row per route entry | `upstreams[].routes` | Pending slice 4: one row per upstream, with its routes listed |
-| Column "Status", a green "Healthy" or red "Unhealthy" pill | `upstreams[].healthy` | Pending slice 4 |
-| Column "Requests" | `upstreams[].totalRequests` | Pending slice 4 |
-| Column "Errors" | `upstreams[].totalErrors` | Pending slice 4 |
-| Empty "No targets configured" | `upstreams` empty | Pending slice 4 |
+| Title "Health", subtitle "Upstream health status" | none | Migrated |
+| Column "Target", the URL in mono | `upstreams[].url` | Migrated |
+| Column "Route", the route path, one row per route entry | `upstreams[].routes` | Migrated: one row per upstream, with its routes listed |
+| Column "Status", a green "Healthy" or red "Unhealthy" pill | `upstreams[].healthy` | Migrated |
+| Column "Requests" | `upstreams[].totalRequests` | Migrated |
+| Column "Errors" | `upstreams[].totalErrors` | Migrated |
+| Empty "No targets configured" | `upstreams` empty | Migrated |
 | Health history | none | Dropped: `health.History` is never constructed, so there was none and there is none. See Still open |
 
 ### Circuits
 
 `renderCircuitsPage` and `renderCircuitRows`, `render_pages.go:200` and `:604`.
-Pending slice 4: `circuits.list` and the command `circuits.reset`.
+The React page reads `circuits.list` and runs the command `circuits.reset`.
 
 | old | contract field | status |
 |---|---|---|
-| Title "Circuit Breakers", subtitle "Per-target circuit breaker states" | none | Pending slice 4 |
-| Column "Target", the URL | `circuits[].url`, `targetId` | Pending slice 4 |
-| Column "Route", the route path, one row per route entry | `circuits[].routes` | Pending slice 4 |
-| Column "State", a pill: green for closed, yellow for half-open, red for open. Always "closed" in practice | `circuits[].state`, now the real breaker state | Pending slice 4: badges are Closed (outline), Half-open (default), Open (destructive) |
-| Column "Active Conns" | not in `circuits.list` | Pending slice 4, not classified: see Not classified below |
-| No breaker detail | `tracked`, `failureCount`, `lastFailure`, `lastStateChange` | Pending slice 4, new. `tracked: false` means the target was never selected, so no breaker exists yet |
-| No settings | `enabled`, `failureThreshold`, `resetTimeoutSeconds`, `halfOpenMax` | Pending slice 4, new. With `enabled: false` the page must say circuit breaking is off, since "no open circuits" would read as good news |
-| No actions | command `circuits.reset` with `targetId` | Pending slice 4, new |
-| Empty "No targets configured" | `circuits` empty | Pending slice 4 |
+| Title "Circuit Breakers", subtitle "Per-target circuit breaker states" | none | Migrated |
+| Column "Target", the URL | `circuits[].url`, `targetId` | Migrated |
+| Column "Route", the route path, one row per route entry | `circuits[].routes` | Migrated |
+| Column "State", a pill: green for closed, yellow for half-open, red for open. Always "closed" in practice | `circuits[].state`, now the real breaker state | Migrated: badges are Closed (outline), Half-open (default), Open (destructive) |
+| Column "Active Conns" | not in `circuits.list` | Migrated, on the Health page: `upstreams.list` carries `activeConns`, so the active connections show per upstream there |
+| No breaker detail | `tracked`, `failureCount`, `lastFailure`, `lastStateChange` | Migrated, new. `tracked: false` means the target was never selected, so no breaker exists yet |
+| No settings | `enabled`, `failureThreshold`, `resetTimeoutSeconds`, `halfOpenMax` | Migrated, new. With `enabled: false` the page must say circuit breaking is off, since "no open circuits" would read as good news |
+| No actions | command `circuits.reset` with `targetId` | Migrated, new |
+| Empty "No targets configured" | `circuits` empty | Migrated |
 
 ### API explorer
 
-`renderAPIExplorerPage`, `render_pages.go:224`. Pending slice 4: `openapi.summary`
-and the command `openapi.refresh`.
+`renderAPIExplorerPage`, `render_pages.go:224`. The React page reads
+`openapi.summary` and runs the command `openapi.refresh`.
 
 | old | contract field | status |
 |---|---|---|
-| Title "API Explorer", subtitle "Aggregated OpenAPI specification from all upstream services" | none | Pending slice 4 |
-| Empty state when there is no merged spec: "OpenAPI spec not available yet. Enable OpenAPI aggregation or wait for the first refresh." | `enabled` and `running` | Pending slice 4: the page will say which of the two it is, disabled in config or not started |
-| Button "OpenAPI JSON", a link to `BasePath + SpecPath` in a new tab | `specPath` (already carries the base path) | Pending slice 4 |
-| Button "Refresh Specs", a POST to `BasePath/api/openapi/refresh`, then a page reload | command `openapi.refresh` | Pending slice 4: the refresh now outlives the request |
-| Stat "Services", "Discovered", the number of service specs | `total` | Pending slice 4 |
-| Stat "Healthy", "n/m", "Specs available" | `services[].healthy` | Pending slice 4 |
-| Stat "Total Paths", "Across all services", the merged spec's `paths` count | `totalPaths` | Pending slice 4 |
-| Stat "Last Refresh", "15:04:05" or "Never" | `lastRefresh` | Pending slice 4 |
-| Card "Discovered Services", "OpenAPI specs from upstream services" | `services` | Pending slice 4 |
-| Column "Service" | `services[].serviceName` | Pending slice 4 |
-| Column "Version" | `services[].version` | Pending slice 4 |
-| Column "Paths" | `services[].pathCount` | Pending slice 4 |
-| Column "Status", a green "Healthy" or red "Error" pill, with the spec error text beside it | `services[].healthy`, `services[].error` | Pending slice 4: the error text is rendered as text now, not as markup |
-| Column "Spec", a "View Spec" link to `BasePath/api/openapi/services/<name>` | `services[].specUrl`, with credentials redacted | Pending slice 4 |
-| Empty row "No upstream services discovered yet" | `services` empty | Pending slice 4 |
+| Title "API Explorer", subtitle "Aggregated OpenAPI specification from all upstream services" | none | Migrated |
+| Empty state when there is no merged spec: "OpenAPI spec not available yet. Enable OpenAPI aggregation or wait for the first refresh." | `enabled` and `running` | Migrated: the page says which of the two it is, disabled in config or not started |
+| Button "OpenAPI JSON", a link to `BasePath + SpecPath` in a new tab | `specPath` (already carries the base path) | Migrated |
+| Button "Refresh Specs", a POST to `BasePath/api/openapi/refresh`, then a page reload | command `openapi.refresh` | Migrated: the refresh now outlives the request |
+| Stat "Services", "Discovered", the number of service specs | `total` | Migrated |
+| Stat "Healthy", "n/m", "Specs available" | `services[].healthy` | Migrated |
+| Stat "Total Paths", "Across all services", the merged spec's `paths` count | `totalPaths` | Migrated |
+| Stat "Last Refresh", "15:04:05" or "Never" | `lastRefresh` | Migrated |
+| Card "Discovered Services", "OpenAPI specs from upstream services" | `services` | Migrated |
+| Column "Service" | `services[].serviceName` | Migrated |
+| Column "Version" | `services[].version` | Migrated |
+| Column "Paths" | `services[].pathCount` | Migrated |
+| Column "Status", a green "Healthy" or red "Error" pill, with the spec error text beside it | `services[].healthy`, `services[].error` | Migrated: the error text is rendered as text now, not as markup |
+| Column "Spec", a "View Spec" link to `BasePath/api/openapi/services/<name>` | `services[].specUrl`, with credentials redacted | Migrated |
+| Empty row "No upstream services discovered yet" | `services` empty | Migrated |
 | Card "Swagger UI", "Interactive API documentation", an "Open in new tab" link and an 800 pixel iframe | none | Dropped: see Deliberately dropped |
-| No fetch time per spec | `services[].fetchedAt` | Pending slice 4, new |
+| No fetch time per spec | `services[].fetchedAt` | Migrated, new |
 
 ### Config
 
-`renderConfigPage`, `render_pages.go:368`. Pending slice 4: `config.detail`, which
+`renderConfigPage`, `render_pages.go:368`. The React page reads `config.detail`, which
 answers a list of sections, each with a title, an optional on or off switch, an
 optional note and key and value settings. The old page printed 16 values in four
 cards. The contract covers all of them and many more.
 
 | old | contract section and setting | status |
 |---|---|---|
-| Title "Configuration", subtitle "Current gateway settings (read-only)" | none | Pending slice 4 |
-| Card "General", row "Enabled" | `gateway`, switch | Pending slice 4 |
-| Row "Base Path", "/" when empty | `gateway`, "Base path" | Pending slice 4: shown as configured, so an empty one is empty |
-| Row "Load Balancing", the strategy | `loadBalancing`, "Strategy" | Pending slice 4 |
-| Card "Resilience", row "Circuit Breaker" | `circuitBreaker`, switch | Pending slice 4 |
-| Row "Rate Limiting" | `rateLimiting`, switch | Pending slice 4 |
-| Row "Retry", "true (max 3)" | `retry`, switch and "Max attempts" | Pending slice 4: the section carries a note that nothing in the proxy calls the retry policy, so no request is retried |
-| Row "Health Check" | `healthCheck`, switch | Pending slice 4 |
-| Card "Security", row "Auth" | `auth`, switch | Pending slice 4 |
-| Row "TLS" | `tls`, switch | Pending slice 4: file paths show as "set" or "not set" |
-| Row "IP Filter" | `ipFilter`, switch | Pending slice 4: allow and deny lists show as counts |
-| Row "CORS" | `cors`, switch | Pending slice 4 |
-| Card "Features", row "Caching" | `caching`, switch | Pending slice 4: the section carries a note that nothing writes to the cache |
-| Row "Discovery" | `discovery`, switch | Pending slice 4 |
-| Row "OpenAPI" | `openapi`, switch | Pending slice 4 |
-| Row "Metrics" | `metrics`, switch | Pending slice 4 |
-| Not on the old page | `timeouts`, `accessLog`, and the detail settings of every section above | Pending slice 4, new |
+| Title "Configuration", subtitle "Current gateway settings (read-only)" | none | Migrated |
+| Card "General", row "Enabled" | `gateway`, switch | Migrated |
+| Row "Base Path", "/" when empty | `gateway`, "Base path" | Migrated: shown as configured, so an empty one is empty |
+| Row "Load Balancing", the strategy | `loadBalancing`, "Strategy" | Migrated |
+| Card "Resilience", row "Circuit Breaker" | `circuitBreaker`, switch | Migrated |
+| Row "Rate Limiting" | `rateLimiting`, switch | Migrated |
+| Row "Retry", "true (max 3)" | `retry`, switch and "Max attempts" | Migrated: the section carries a note that nothing in the proxy calls the retry policy, so no request is retried |
+| Row "Health Check" | `healthCheck`, switch | Migrated |
+| Card "Security", row "Auth" | `auth`, switch | Migrated |
+| Row "TLS" | `tls`, switch | Migrated: file paths show as "set" or "not set" |
+| Row "IP Filter" | `ipFilter`, switch | Migrated: allow and deny lists show as counts |
+| Row "CORS" | `cors`, switch | Migrated |
+| Card "Features", row "Caching" | `caching`, switch | Migrated: the section carries a note that nothing writes to the cache |
+| Row "Discovery" | `discovery`, switch | Migrated |
+| Row "OpenAPI" | `openapi`, switch | Migrated |
+| Row "Metrics" | `metrics`, switch | Migrated |
+| Not on the old page | `timeouts`, `accessLog`, and the detail settings of every section above | Migrated, new |
 
 ### Widgets
 
@@ -485,25 +482,25 @@ are dropped. The shell's overview replaces them and nothing else mounts a widget
 | Its bar, green at 80% and above, yellow from 50% to under 80%, red below 50%, and "N% of upstreams are healthy" | none | Dropped: the unhealthy badge on the upstreams page is the signal. It also divided by a per-route-entry total |
 | Widget `bastion-errors`, "Error Rate", "Error percentage and open circuit count", size sm, refresh 15 s | none | Dropped |
 | Its big percentage, green up to 1%, yellow above 1%, red above 5%, "Error Rate" | Overview "Error rate", "Not measured" until a request arrives | Migrated onto the overview, without the colour bands |
-| Its "Circuit Breaks: N" and "Rate Limited: N" | Overview "Open circuits" (a count of breakers open now); "Circuit Breaks" and "Rate Limited" totals on the Traffic page | Migrated, in part: the description promised an open circuit count and the widget never showed one. The overview shows it for the first time. The two totals wait for slice 4 |
+| Its "Circuit Breaks: N" and "Rate Limited: N" | Overview "Open circuits" (a count of breakers open now); "Circuit Breaks" and "Rate Limited" totals on the Traffic page | Migrated, in part: the description promised an open circuit count and the widget never showed one. The overview shows it for the first time. The two totals are on the Traffic page |
 
 ### Config settings panel
 
 `renderConfigSettingsHTML`, `render_widgets.go:80`, registered at `manifest.go:73`
 as `bastion-config`, "Gateway Configuration", "View current gateway settings",
 group "Bastion", icon settings. Dropped. The shell has no per-plugin settings panel,
-and `config.detail` covers it with the Config page (pending slice 4).
+and `config.detail` covers it with the Config page.
 
 | old | React | status |
 |---|---|---|
-| Row "Gateway Enabled" | Config page, `gateway` switch | Pending slice 4 |
-| Row "Load Balancing" | Config page, `loadBalancing` | Pending slice 4 |
-| Row "Circuit Breaker" | Config page, `circuitBreaker` | Pending slice 4 |
-| Row "Rate Limiting" | Config page, `rateLimiting` | Pending slice 4 |
-| Row "Auth" | Config page, `auth` | Pending slice 4 |
-| Row "Caching" | Config page, `caching` | Pending slice 4 |
-| Row "Discovery" | Config page, `discovery` | Pending slice 4 |
-| Row "OpenAPI" | Config page, `openapi` | Pending slice 4 |
+| Row "Gateway Enabled" | Config page, `gateway` switch | Migrated |
+| Row "Load Balancing" | Config page, `loadBalancing` | Migrated |
+| Row "Circuit Breaker" | Config page, `circuitBreaker` | Migrated |
+| Row "Rate Limiting" | Config page, `rateLimiting` | Migrated |
+| Row "Auth" | Config page, `auth` | Migrated |
+| Row "Caching" | Config page, `caching` | Migrated |
+| Row "Discovery" | Config page, `discovery` | Migrated |
+| Row "OpenAPI" | Config page, `openapi` | Migrated |
 | The panel itself | none | Dropped |
 
 ### Actions
@@ -519,8 +516,8 @@ plugin has these, backed by the seven contract commands.
 | `routes.delete` | Delete on the route page, confirmed. Goes back to the routes list | Migrated, new |
 | `routes.setEnabled` | Enable, and Disable (confirmed) on the route page. The answer carries `durable`, and the page says a config route's change lasts until restart, or that the gateway has no route store | Migrated, new |
 | `discovery.refresh` | "Refresh discovery" on the routes page. Discovery off answers CONFLICT, and the page says so in words | Migrated, new |
-| `openapi.refresh` | the API explorer's refresh | Pending slice 4 |
-| `circuits.reset` | the circuits page | Pending slice 4 |
+| `openapi.refresh` | the API explorer's refresh | Migrated |
+| `circuits.reset` | the circuits page | Migrated |
 
 Commands that change a route invalidate `routes.list`, `routes.detail`,
 `upstreams.list`, `overview.stats`, `traffic.stats` and `circuits.list`.
@@ -538,12 +535,10 @@ guess.
 - "Active Conns" on the circuits page (`render_pages.go:604`). It was a real number
   (a count of in-flight requests per target, kept by `IncrConns` and `DecrConns`
   in the HTTP, gRPC and WebSocket proxies), not a dead one. `circuits.list` doesn't
-  carry it. `upstreams.list` and `routes.detail` do (`activeConns`), but neither
-  React page displays it yet. Slice 4 has to decide whether the circuits page
-  reads it from `upstreams.list` or whether the field belongs on
-  `circuits.list`.
-- The health page's "Health" nav entry has no query of its own. We have assumed it
-  reads `upstreams.list` and `circuits.list`. If you want a probe-now button or a
+  carry it. `upstreams.list` does (`activeConns`), and the Health page shows it per
+  upstream. The Circuits page doesn't, so that column moved one page over.
+- The health page's "Health" nav entry has no query of its own. It reads
+  `upstreams.list` and `config.detail`. If you want a probe-now button or a
   history, neither exists in Go: there is no manual health check and
   `health.History` is never constructed.
 
@@ -623,8 +618,8 @@ Plainly, so you know where to look first if something breaks.
 - The plugin test checks that every nav entry has a route and that the host
   resolves the plugin. It does not click every link on every page to see where it
   lands.
-- Traffic, health, circuits, services, API explorer and config pages have no React
-  code and so no React tests. Their contract handlers have Go tests, and the
-  fixture serves all nine queries.
+- The last six pages have React tests against stubbed clients, and their
+  contract handlers have Go tests. Nothing runs them together against a live
+  gateway, and the fixture serves all nine queries.
 - The old dashboard had no tests, so there is nothing to diff the new pages
   against except this file.
