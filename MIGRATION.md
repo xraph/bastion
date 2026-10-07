@@ -62,10 +62,9 @@ The plugin's pages use Tailwind classes of their own, so the shell's stylesheet
 has to scan the package. If your shell declares its sources with `@source`, add
 `@source "<path to>/packages/plugin-bastion/src";` next to the others.
 
-Bastion now needs forge v1.11.2. v1.10.0 has `contract/dispatcher` and the same
-`ContractContributorAware` signature, but its parent `contract` package differs,
-so we moved to match vault and the shell. `forge/extensions/discovery` has to be
-fetched at the matching version.
+Bastion now needs forge v1.12.0. That release removes the dashboard
+`contributor` package and `DashboardAware` along with templ, which is why the old
+dashboard had to go, and it lets `go mod tidy` drop `a-h/templ` and `forgeui`.
 
 `DashboardConfig` stays. `Dashboard.Enabled` also gates the admin REST API and the
 WebSocket hub, and `Dashboard.BasePath` prefixes the OpenAPI endpoints, so
@@ -134,8 +133,10 @@ read this section.
   password (`xxxxx`) in an upstream URL. Before, most of these were stored and
   failed later, or never.
 - A second manual route on the same path with an overlapping method answers 409,
-  with `details.reason` set to `duplicate` and the other route's id. Shadowing a
-  discovered route is still allowed.
+  with an `error` that names the other route. (The dashboard contract answers the
+  same refusal as CONFLICT with `details.reason` `duplicate` and `routeId`; REST
+  bodies carry only `error`, plus `field` on a 400.) Shadowing a discovered route
+  is still allowed.
 - Enable and disable on a FARP or discovery route answer 400. They used to
   succeed, and the next discovery update reverted them.
 - Enable and disable now write an access-log admin line, like the other writes.
