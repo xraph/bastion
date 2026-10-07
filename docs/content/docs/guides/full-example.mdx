@@ -131,11 +131,10 @@ func main() {
             EnableRootDocs:  true,
         }),
 
-        // Admin dashboard
+        // Admin REST API, WebSocket stream and OpenAPI endpoints
         bastion.WithDashboard(bastion.DashboardConfig{
             Enabled:  true,
             BasePath: "/gateway",
-            Title:    "API Gateway Dashboard",
             Realtime: true,
         }),
 
@@ -198,7 +197,7 @@ func main() {
         stats := gw.Snapshot()
         fmt.Printf("\nGateway started with %d routes and %d upstreams\n",
             stats.TotalRoutes, stats.TotalUpstreams)
-        fmt.Printf("Dashboard: http://localhost:8080/gateway\n")
+        fmt.Printf("Admin API: http://localhost:8080/gateway/api/routes\n")
         fmt.Printf("API Docs:  http://localhost:8080/gateway/openapi.json\n")
         fmt.Printf("Swagger:   http://localhost:8080/gateway/swagger\n\n")
     })
@@ -328,7 +327,7 @@ bastion:
 | **Health Checks** | Active probing every 10s, passive failure detection |
 | **Retry** | Exponential backoff with jitter for 502/503/504 errors |
 | **OpenAPI Aggregation** | Merged spec from all upstream services at /openapi.json |
-| **Admin Dashboard** | Real-time dashboard at /gateway with WebSocket updates |
+| **Admin API** | REST API and WebSocket stream under /gateway (the React dashboard plugin reads the contract contributor instead) |
 | **CORS** | Cross-origin support for the frontend application |
 | **Hooks** | Request logging, response tagging, error alerting, health alerts |
 
@@ -345,7 +344,7 @@ CONFIG_FILE=config.yaml go run main.go
 Once running:
 
 - **Proxy endpoint**: `http://localhost:8080/api/*` -- routes to upstream services
-- **Dashboard**: `http://localhost:8080/gateway` -- real-time admin UI
+- **Admin API**: `http://localhost:8080/gateway/api/routes` -- REST API for routes, stats and discovery
 - **API docs**: `http://localhost:8080/gateway/openapi.json` -- aggregated OpenAPI spec
 - **Swagger UI**: `http://localhost:8080/gateway/swagger` -- interactive API explorer
 - **Admin API**: `http://localhost:8080/gateway/api/routes` -- route management
@@ -385,4 +384,4 @@ curl -X POST http://localhost:8080/gateway/api/routes \
 - [Hook System](/docs/guides/hooks) -- Custom request/response processing
 - [OpenAPI Aggregation](/docs/guides/openapi-aggregation) -- Unified API documentation
 - [Admin REST API](/docs/api-reference/admin-api) -- Complete API endpoint reference
-- [Admin Dashboard](/docs/api-reference/dashboard) -- Real-time monitoring UI
+- [Admin Dashboard](/docs/api-reference/dashboard) -- The React dashboard plugin and its contract intents

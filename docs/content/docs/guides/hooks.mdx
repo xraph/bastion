@@ -29,9 +29,7 @@ import (
 )
 
 app := forge.New()
-app.Register(extension.New(
-    bastion.WithDashboardEnabled(true),
-))
+app.Register(extension.New())
 
 app.AfterStart(func() {
     gw, err := vessel.Inject[*bastion.Gateway](app.Container())

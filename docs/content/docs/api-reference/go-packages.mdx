@@ -10,7 +10,9 @@ All Bastion packages are importable from the module `github.com/xraph/bastion`. 
 | Package | Import Path | Description |
 |---------|-------------|-------------|
 | `bastion` | `github.com/xraph/bastion` | Root: Gateway, Config, Route, Target, HookEngine, options |
-| `extension` | `github.com/xraph/bastion/extension` | Forge extension wrapper with DI, dashboard, and store wiring |
+| `extension` | `github.com/xraph/bastion/extension` | Forge extension wrapper with DI, contract contributor, and store wiring |
+| `extension/contract` | `github.com/xraph/bastion/extension/contract` | The `bastion` contract contributor: 9 queries and 7 commands the React dashboard reads |
+| `admin` | `github.com/xraph/bastion/admin` | Route write service shared by the REST handlers and the contract commands |
 | `proxy` | `github.com/xraph/bastion/proxy` | Proxy engine, HTTP/WebSocket/SSE/gRPC protocol handlers |
 | `discovery` | `github.com/xraph/bastion/discovery` | FARP integration, service watcher, OpenAPI aggregator types |
 | `health` | `github.com/xraph/bastion/health` | Health monitor, active/passive probes, health history |
@@ -21,7 +23,6 @@ All Bastion packages are importable from the module `github.com/xraph/bastion`. 
 | `observability` | `github.com/xraph/bastion/observability` | Prometheus metrics, access logging, audit logging |
 | `api` | `github.com/xraph/bastion/api` | Admin REST API handlers, WebSocket hub |
 | `plugin` | `github.com/xraph/bastion/plugin` | Plugin manager, GraphQL stitching |
-| `dashboard` | `github.com/xraph/bastion/dashboard` | ForgeUI dashboard contributor, page/widget renderers |
 | `store` | `github.com/xraph/bastion/store` | Composite store interface |
 | `store/memory` | `github.com/xraph/bastion/store/memory` | In-memory store for development/testing |
 | `store/postgres` | `github.com/xraph/bastion/store/postgres` | PostgreSQL backend via Grove ORM |
@@ -322,7 +323,7 @@ type BasePlugin struct {
 
 ## extension
 
-The `extension` package wraps the gateway as a Forge extension with dashboard integration, discovery auto-wiring, and Grove-based persistent store support.
+The `extension` package wraps the gateway as a Forge extension that registers the dashboard's contract contributor, discovery auto-wiring, and Grove-based persistent store support.
 
 ```go
 type Extension struct { /* unexported */ }

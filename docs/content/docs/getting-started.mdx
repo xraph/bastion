@@ -240,9 +240,9 @@ With `watchMode`, Bastion monitors FARP for service registrations and deregistra
 
 Discovered routes are merged with any manually configured routes. Manual routes take precedence when paths overlap.
 
-## Step 9 -- Enable the admin dashboard (optional)
+## Step 9 -- Enable the admin API and dashboard (optional)
 
-Bastion ships with a ForgeUI-based admin dashboard and REST API:
+Bastion ships with an admin REST API. The dashboard is a separate React plugin, `packages/plugin-bastion` in the `forge-dashboard` repo, so add it to your Forge dashboard shell to get the UI (see [Admin Dashboard](/docs/api-reference/dashboard)). The `dashboard` settings below configure the REST API, the WebSocket stream and the OpenAPI endpoints:
 
 ```go
 bastion.NewExtension(
@@ -265,7 +265,7 @@ bastion:
     realtime: true
 ```
 
-This exposes the dashboard at `/bastion`, the admin REST API at `/bastion/api/*`, an aggregated OpenAPI spec at `/bastion/openapi.json`, a Swagger UI at `/bastion/swagger`, and a real-time WebSocket event stream at `/bastion/ws`.
+This exposes the admin REST API at `/bastion/api/*`, an aggregated OpenAPI spec at `/bastion/openapi.json`, a Swagger UI at `/bastion/swagger`, and a real-time WebSocket event stream at `/bastion/ws`.
 
 ## Next steps
 

@@ -3,7 +3,11 @@ title: Admin REST API
 description: Full CRUD API for routes, upstreams, stats, and configuration.
 ---
 
-Bastion exposes a comprehensive REST API for managing routes, inspecting upstreams, viewing statistics, controlling discovery, and streaming real-time events. All endpoints are mounted under the dashboard base path (default: `/gateway`).
+Bastion exposes a comprehensive REST API for managing routes, inspecting upstreams, viewing statistics, controlling discovery, and streaming real-time events. All endpoints are mounted under `Dashboard.BasePath` (default: `/gateway`), and `Dashboard.Enabled` turns them on. The React dashboard doesn't call this API. You use it for scripts and other clients.
+
+## Changed in this release
+
+Create now validates its input, enable and disable refuse discovered routes, and the target ids of routes you create over REST are different. If you script against this API, read "What changed for REST clients" in [MIGRATION.md](https://github.com/xraph/bastion/blob/main/MIGRATION.md).
 
 ## Endpoint Summary
 
@@ -146,7 +150,7 @@ curl http://localhost:8080/gateway/api/routes/manual-/users
 POST /gateway/api/routes
 ```
 
-Creates a new manual route. The route is immediately active and targets are registered with the health monitor.
+Creates a new manual route. The route is immediately active and targets are registered with the health monitor. The body is validated: a bad one answers 400 with a `field` naming the problem (for example a path that doesn't start with `/`, no upstream, or an upstream URL that isn't `http`, `https`, `ws` or `wss`). Target ids are `<routeId>/<n>`.
 
 **Request Body:**
 
@@ -203,10 +207,16 @@ curl -X POST http://localhost:8080/gateway/api/routes \
 }
 ```
 
-**Error Response (409):**
+**Error Response (400):**
 
 ```json
-{"error": "route already exists"}
+{"error": "path: must start with /", "field": "path"}
+```
+
+**Error Response (409):** a second manual route on the same path with an overlapping method.
+
+```json
+{"error": "route \"manual-/products\" already serves /products for an overlapping method"}
 ```
 
 ### Update Route
@@ -267,7 +277,7 @@ POST /gateway/api/routes/:id/enable
 POST /gateway/api/routes/:id/disable
 ```
 
-Toggle a route's enabled status without deleting it. Disabled routes stop receiving traffic but remain in the route table.
+Toggle a route's enabled status without deleting it. Disabled routes stop receiving traffic but remain in the route table. This works on manual routes only. On a FARP or discovery route it answers 400, because the next discovery update would revert the change.
 
 **Example Request:**
 
@@ -582,7 +592,7 @@ ws.onmessage = (event) => {
   const msg = JSON.parse(event.data);
   switch (msg.type) {
     case "stats":
-      updateDashboard(msg.data);
+      updateStats(msg.data);
       break;
     case "routes":
       updateRouteTable(msg.data);
@@ -633,7 +643,7 @@ ws.onmessage = (event) => {
 }
 ```
 
-The WebSocket connection is only available when the dashboard is enabled with `realtime: true` (the default).
+The WebSocket connection is only available when `Dashboard.Enabled` is true and `Realtime` is true (the default). The React dashboard doesn't use it.
 
 ## Error Responses
 
@@ -649,8 +659,8 @@ Common HTTP status codes:
 |------|---------|
 | `200` | Success |
 | `201` | Resource created |
-| `400` | Bad request (invalid body, cannot modify auto-discovered route) |
+| `400` | Bad request (invalid body, with a `field` on validation errors; cannot modify or enable/disable a discovered route) |
 | `404` | Resource not found |
-| `409` | Conflict (route already exists) |
+| `409` | Conflict (a manual route already serves that path and method) |
 | `500` | Internal server error |
 | `503` | Service unavailable (gateway draining, realtime not enabled) |

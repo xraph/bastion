@@ -1,6 +1,6 @@
 # Forge Gateway Extension
 
-Production-grade API gateway extension for [Forge](https://github.com/xraph/forge) that turns any Forge application into a feature-complete reverse proxy with automatic service discovery, multi-protocol support, and an admin dashboard.
+Production-grade API gateway extension for [Forge](https://github.com/xraph/forge) that turns any Forge application into a feature-complete reverse proxy with automatic service discovery, multi-protocol support, and an admin dashboard in the Forge dashboard shell.
 
 ## Features
 
@@ -19,7 +19,7 @@ Production-grade API gateway extension for [Forge](https://github.com/xraph/forg
 - **Request/response transformation**: Path rewriting, header manipulation, prefix stripping
 - **CORS and IP filtering**: Gateway-level security policies
 - **Observability**: Prometheus metrics, structured access logging, OpenTelemetry trace propagation
-- **Admin dashboard**: Real-time ForgeUI-based dashboard with routes, upstreams, stats, and service discovery views
+- **Admin dashboard**: React plugin for the Forge dashboard shell, with overview, routes (create, edit, disable, delete) and upstreams pages
 - **Admin REST API**: Full CRUD for routes, upstreams, stats, and configuration
 - **Hot-reload**: Configuration changes applied without restart
 - **OpenAPI aggregation**: Unified OpenAPI spec from all upstream services via FARP, Swagger UI, per-service specs
@@ -284,16 +284,18 @@ gateway:
 
 Individual service specs are available at `/gateway/api/openapi/services/:serviceName`, allowing you to access each service's original spec independently.
 
-## ForgeUI Dashboard
+## Dashboard
 
-The gateway includes a built-in admin dashboard that can run standalone or be mounted into the `dashboard` extension:
+The dashboard is the `packages/plugin-bastion` React plugin in the `forge-dashboard` repo. Add it to your shell and it reads the `bastion` contract contributor that the extension registers on its own (`extension/contract`). Nothing in this repo renders HTML any more.
 
-- **Overview**: Real-time stats (requests, errors, latency, health)
-- **Routes**: Sortable table with path, protocol, source, targets, status
-- **Upstreams**: Health matrix, circuit breaker states, connection counts
-- **Services**: Discovered FARP services with schema types
+- **Overview**: Requests, errors, latency, open circuits and upstream health
+- **Routes**: Table of every route, with New route and Refresh discovery
+- **Route detail and editor**: Edit, disable or delete a manual route
+- **Upstreams**: Targets with their health and circuit state
 
-The dashboard uses ForgeUI (gomponents + Alpine.js + Tailwind CSS) for a fully server-rendered, interactive UI with WebSocket real-time updates.
+Traffic, health, circuits, services, API explorer and config pages are coming. Their contract intents already exist. The old `bastion/dashboard` Go package is gone, so remove any import of it. [MIGRATION.md](MIGRATION.md) lists what happened to every old page and what changed for REST clients.
+
+`DashboardConfig` still matters: `Enabled` gates the admin REST API, the WebSocket hub and the OpenAPI endpoints, `BasePath` prefixes them, and `Realtime` gates the hub.
 
 ## License
 
