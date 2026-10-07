@@ -23,7 +23,8 @@ Status is one of:
 
 Every old page now has a React home. The last six (traffic, health, circuits,
 services, the API explorer and config) landed in the last slice, so the plugin's
-sidebar has nine entries, the same nine the old dashboard had. Nothing is left to do.
+sidebar has nine entries, the same nine the old dashboard had. The page migration
+is complete. What remains is in the Still open section, and none of it is a page.
 The admin REST API is unchanged apart from what the REST section below lists.
 
 ## There was no templ in the templ dashboard
@@ -338,7 +339,7 @@ React: `pages/upstreams.tsx`, intent `upstreams.list`.
 | Empty "No upstreams configured", a table row | "No upstreams. Add a route to give the gateway somewhere to send traffic." | Migrated |
 
 `upstreams.list` also carries each upstream's active connection count. This page
-doesn't show it. The Health page does, see Not classified below.
+doesn't show it. The Health page does, see Moved between pages below.
 
 ### Services
 
@@ -376,8 +377,8 @@ The React page reads `traffic.stats`.
 | Column "Route", the route's path in mono | `routes[].path`, `routeId` | Migrated |
 | Column "Requests" | `routes[].totalRequests` | Migrated |
 | Column "Errors" | `routes[].totalErrors` | Migrated |
-| Column "Avg Latency", always "0.0ms" | `routes[].avgLatencyMs`, now real, or `null` | Migrated: "Not measured" when null |
-| No latency percentile, error rate, cache or retry figures | `p99LatencyMs`, `errorRate`, `latencySamples`, `cacheHits`, `cacheMisses`, `retriesMeasured` | Migrated, new. `retriesMeasured` is false today, so the page must say retries are not measured, not show 0 |
+| Column "Avg Latency", always "0.0ms" | `routes[].avgLatencyMs`, now real, or `null` | Migrated: the per-route table shows an empty "none" cell when null. Only the Latency stat says "Not measured" |
+| No latency percentile, error rate, cache or retry figures | `p99LatencyMs`, `errorRate`, `latencySamples`, `cacheHits`, `cacheMisses`, `retriesMeasured` | Migrated, new. `retriesMeasured` is false today, so the Retries stat reads "Not measured" with the hint "Nothing in the proxy retries", not 0 |
 | Empty "No traffic data yet", a table row | `routes` empty | Migrated |
 
 ### Health
@@ -411,7 +412,7 @@ The React page reads `circuits.list` and runs the command `circuits.reset`.
 | Column "State", a pill: green for closed, yellow for half-open, red for open. Always "closed" in practice | `circuits[].state`, now the real breaker state | Migrated: badges are Closed (outline), Half-open (default), Open (destructive) |
 | Column "Active Conns" | not in `circuits.list` | Migrated, on the Health page: `upstreams.list` carries `activeConns`, so the active connections show per upstream there |
 | No breaker detail | `tracked`, `failureCount`, `lastFailure`, `lastStateChange` | Migrated, new. `tracked: false` means the target was never selected, so no breaker exists yet |
-| No settings | `enabled`, `failureThreshold`, `resetTimeoutSeconds`, `halfOpenMax` | Migrated, new. With `enabled: false` the page must say circuit breaking is off, since "no open circuits" would read as good news |
+| No settings | `enabled`, `failureThreshold`, `resetTimeoutSeconds`, `halfOpenMax` | Migrated, new. With `enabled: false` the page says circuit breaking is switched off in the gateway config, since "no open circuits" would read as good news |
 | No actions | command `circuits.reset` with `targetId` | Migrated, new |
 | Empty "No targets configured" | `circuits` empty | Migrated |
 
@@ -427,7 +428,7 @@ The React page reads `circuits.list` and runs the command `circuits.reset`.
 | Button "OpenAPI JSON", a link to `BasePath + SpecPath` in a new tab | `specPath` (already carries the base path) | Migrated |
 | Button "Refresh Specs", a POST to `BasePath/api/openapi/refresh`, then a page reload | command `openapi.refresh` | Migrated: the refresh now outlives the request |
 | Stat "Services", "Discovered", the number of service specs | `total` | Migrated |
-| Stat "Healthy", "n/m", "Specs available" | `services[].healthy` | Migrated |
+| Stat "Healthy", "n/m", "Specs available" | `services[].healthy`, counted against `total` | Migrated: the Healthy stat shows healthy of total, as "1 of 2" |
 | Stat "Total Paths", "Across all services", the merged spec's `paths` count | `totalPaths` | Migrated |
 | Stat "Last Refresh", "15:04:05" or "Never" | `lastRefresh` | Migrated |
 | Card "Discovered Services", "OpenAPI specs from upstream services" | `services` | Migrated |
@@ -435,7 +436,7 @@ The React page reads `circuits.list` and runs the command `circuits.reset`.
 | Column "Version" | `services[].version` | Migrated |
 | Column "Paths" | `services[].pathCount` | Migrated |
 | Column "Status", a green "Healthy" or red "Error" pill, with the spec error text beside it | `services[].healthy`, `services[].error` | Migrated: the error text is rendered as text now, not as markup |
-| Column "Spec", a "View Spec" link to `BasePath/api/openapi/services/<name>` | `services[].specUrl`, with credentials redacted | Migrated |
+| Column "Spec", a "View Spec" link to `BasePath/api/openapi/services/<name>` | `services[].specUrl`, with credentials redacted | Migrated: the new "Spec URL" column shows the URL as plain text, not a link. The merged spec has its own link above the table |
 | Empty row "No upstream services discovered yet" | `services` empty | Migrated |
 | Card "Swagger UI", "Interactive API documentation", an "Open in new tab" link and an 800 pixel iframe | none | Dropped: see Deliberately dropped |
 | No fetch time per spec | `services[].fetchedAt` | Migrated, new |
@@ -527,10 +528,10 @@ reaches the page with its code: a source refusal answers CONFLICT with
 `details.reason` `duplicate` and the other route's id, and a validation error
 answers BAD_REQUEST with `details.field`.
 
-## Not classified
+## Moved between pages
 
-Two things on the old pages have no settled home, and we'd rather say so than
-guess.
+Two things on the old pages didn't map onto one new page, so here is where each
+one went.
 
 - "Active Conns" on the circuits page (`render_pages.go:604`). It was a real number
   (a count of in-flight requests per target, kept by `IncrConns` and `DecrConns`
@@ -538,8 +539,8 @@ guess.
   carry it. `upstreams.list` does (`activeConns`), and the Health page shows it per
   upstream. The Circuits page doesn't, so that column moved one page over.
 - The health page's "Health" nav entry has no query of its own. It reads
-  `upstreams.list` and `config.detail`. If you want a probe-now button or a
-  history, neither exists in Go: there is no manual health check and
+  `upstreams.list` and `config.detail`. A probe-now button or a history isn't
+  there, because neither exists in Go: there is no manual health check and
   `health.History` is never constructed.
 
 ## Still open
