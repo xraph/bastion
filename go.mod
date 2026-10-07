@@ -10,8 +10,8 @@ require (
 	github.com/gorilla/websocket v1.5.4-0.20250319132907-e064f32e3674
 	github.com/xraph/farp v1.3.1
 	github.com/xraph/farp/discovery v1.3.1
-	github.com/xraph/forge v1.11.2
-	github.com/xraph/forge/extensions/discovery v1.11.2
+	github.com/xraph/forge v1.12.0
+	github.com/xraph/forge/extensions/discovery v1.12.0
 	github.com/xraph/go-utils v1.3.0
 	github.com/xraph/grove v1.6.3
 	github.com/xraph/grove/drivers/mongodriver v1.6.3
@@ -24,8 +24,6 @@ require (
 
 require (
 	github.com/BurntSushi/toml v1.6.0 // indirect
-	github.com/Oudwins/tailwind-merge-go v0.2.1 // indirect
-	github.com/a-h/templ v0.3.1001 // indirect
 	github.com/armon/go-metrics v0.4.1 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/cenkalti/backoff v2.2.1+incompatible // indirect
@@ -110,7 +108,6 @@ require (
 	github.com/xdg-go/scram v1.2.0 // indirect
 	github.com/xdg-go/stringprep v1.0.4 // indirect
 	github.com/xraph/confy v1.0.3 // indirect
-	github.com/xraph/forgeui v1.4.1 // indirect
 	github.com/youmark/pkcs8 v0.0.0-20240726163527-a2c0da244d78 // indirect
 	go.etcd.io/etcd/api/v3 v3.5.17 // indirect
 	go.etcd.io/etcd/client/pkg/v3 v3.5.17 // indirect
@@ -156,7 +153,6 @@ require (
 	modernc.org/mathutil v1.7.1 // indirect
 	modernc.org/memory v1.11.0 // indirect
 	modernc.org/sqlite v1.46.1 // indirect
-	nhooyr.io/websocket v1.8.17 // indirect
 	sigs.k8s.io/json v0.0.0-20250730193827-2d320260d730 // indirect
 	sigs.k8s.io/randfill v1.0.0 // indirect
 	sigs.k8s.io/structured-merge-diff/v6 v6.4.2 // indirect
