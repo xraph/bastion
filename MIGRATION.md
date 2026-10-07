@@ -428,7 +428,7 @@ The React page reads `circuits.list` and runs the command `circuits.reset`.
 | Button "OpenAPI JSON", a link to `BasePath + SpecPath` in a new tab | `specPath` (already carries the base path) | Migrated |
 | Button "Refresh Specs", a POST to `BasePath/api/openapi/refresh`, then a page reload | command `openapi.refresh` | Migrated: the refresh now outlives the request |
 | Stat "Services", "Discovered", the number of service specs | `total` | Migrated |
-| Stat "Healthy", "n/m", "Specs available" | `services[].healthy`, counted against `total` | Migrated: the Healthy stat shows healthy of total, as "1 of 2" |
+| Stat "Healthy", "n/m", "Specs available" | `services[].healthy`, counted against `total` | Migrated: the Healthy stat counts healthy services against the total, for example "3 of 4" |
 | Stat "Total Paths", "Across all services", the merged spec's `paths` count | `totalPaths` | Migrated |
 | Stat "Last Refresh", "15:04:05" or "Never" | `lastRefresh` | Migrated |
 | Card "Discovered Services", "OpenAPI specs from upstream services" | `services` | Migrated |
