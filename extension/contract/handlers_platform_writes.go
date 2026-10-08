@@ -72,7 +72,7 @@ func discoveryRefreshHandler(deps Deps) func(context.Context, discoveryRefreshRe
 }
 
 func openapiRefreshHandler(deps Deps) func(context.Context, openapiRefreshRequest, contract.Principal) (openapiRefreshResponse, error) {
-	return func(_ context.Context, _ openapiRefreshRequest, p contract.Principal) (openapiRefreshResponse, error) {
+	return func(ctx context.Context, _ openapiRefreshRequest, p contract.Principal) (openapiRefreshResponse, error) {
 		oa := deps.Gateway.OpenAPI()
 		if oa == nil {
 			return openapiRefreshResponse{}, &contract.Error{
@@ -83,10 +83,12 @@ func openapiRefreshHandler(deps Deps) func(context.Context, openapiRefreshReques
 		}
 
 		// Fetching every service's spec can take a while, so it runs in the
-		// background with its own bound. The aggregator drops a second
-		// refresh while one is in flight.
+		// background with its own bound. It keeps the request's values but
+		// not its cancellation, because the response goes out before the
+		// fetch finishes. The aggregator drops a second refresh while one is
+		// in flight.
 		go func() {
-			rctx, cancel := context.WithTimeout(context.Background(), openapiRefreshTimeout)
+			rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), openapiRefreshTimeout)
 			defer cancel()
 			oa.Refresh(rctx)
 		}()
