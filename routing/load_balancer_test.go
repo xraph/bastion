@@ -108,7 +108,7 @@ func TestLoadBalancer_Random(t *testing.T) {
 
 	// Track selections
 	counts := make(map[string]int)
-	iterations := 300
+	iterations := 30000
 
 	for i := 0; i < iterations; i++ {
 		target := lb.Select(targets, "")
@@ -118,12 +118,15 @@ func TestLoadBalancer_Random(t *testing.T) {
 		counts[target.ID]++
 	}
 
-	// Each target should be selected roughly 1/3 of the time
-	// Allow for 20-40% per target (accounts for randomness)
-	for id, count := range counts {
-		percentage := float64(count) / float64(iterations)
-		if percentage < 0.20 || percentage > 0.40 {
-			t.Errorf("target %s selected %.1f%% of time, expected ~33%%", id, percentage*100)
+	// Each target should be selected 1/3 of the time. At 30000 draws the
+	// standard deviation of a target's share is about 0.27 points, so a
+	// 3-point band sits ~11 sigma out: a fair pick never leaves it, while a
+	// selector that skips or favours a target still does. Ranging over the
+	// targets, not the counts, means a target that is never picked fails too.
+	for _, target := range targets {
+		share := float64(counts[target.ID]) / float64(iterations)
+		if share < 1.0/3-0.03 || share > 1.0/3+0.03 {
+			t.Errorf("target %s selected %.1f%% of the time, want 33.3%% ± 3", target.ID, share*100)
 		}
 	}
 }
