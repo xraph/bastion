@@ -26,8 +26,8 @@ type RouteConfig struct {
     // AddPrefix is put in front of the path before forwarding.
     AddPrefix string
 
-    // RewritePath is a regex rewrite rule, "pattern:replacement".
-    // It is stored with the route, but the proxy doesn't apply it yet.
+    // RewritePath is a regex rewrite rule, "pattern:replacement", run on
+    // the path after StripPrefix and AddPrefix.
     RewritePath string
 
     // Headers adds, sets and removes request headers sent upstream.
@@ -153,6 +153,29 @@ When `StripPrefix` is `true`, Bastion removes the matched path prefix before for
 ```
 
 This is useful when the upstream service does not expect the gateway's path prefix. Most microservice deployments use `StripPrefix: true`.
+
+## Path rewriting
+
+The path the upstream sees is built in three steps, in this order:
+
+1. `StripPrefix` removes the route's path prefix.
+2. `AddPrefix` is put in front of what's left.
+3. `RewritePath` runs a regex rule on the result.
+
+The rule is `"pattern:replacement"`, split at the first colon, so the pattern can't contain one. The replacement can use capture groups (`$1`). A rule that doesn't compile leaves the path as it is.
+
+```go
+route := bastion.RouteConfig{
+    Path:        "/legacy/*",
+    StripPrefix: true,
+    AddPrefix:   "/api",
+    RewritePath: "^/api/v1/(.*):/api/v2/$1",
+}
+// Request:  GET /legacy/v1/orders?page=2
+// Upstream: GET /api/v2/orders?page=2
+```
+
+The query string is forwarded unchanged. The rewrite applies to HTTP, SSE, WebSocket and gRPC requests alike.
 
 ## Enable and disable
 

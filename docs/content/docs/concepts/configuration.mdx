@@ -138,6 +138,8 @@ Keys are the snake_case names below, under `extensions.bastion` or the top-level
 | `targets[].url` | `string` | -- | Target base URL |
 | `targets[].weight` | `int` | `1` | Relative traffic weight |
 | `strip_prefix` | `bool` | `false` | Remove matched prefix before forwarding |
+| `add_prefix` | `string` | `""` | Put in front of the path after `strip_prefix` |
+| `rewrite_path` | `string` | `""` | Regex rule, `"pattern:replacement"`, run after `add_prefix` |
 | `protocol` | `string` | `"http"` | Proxy protocol: `http`, `websocket`, `sse`, `grpc` |
 | `enabled` | `bool` | `false` | Whether the route is active. A route you don't set to `true` is skipped |
 | `timeout` | `object` | global `timeouts` | Override with `connect`, `read`, `write`, `idle` durations. A field you leave out takes the global value, except `write`, which only applies when the route sets it. HTTP routes only |

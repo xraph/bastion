@@ -5,7 +5,6 @@ import (
 	"net"
 	"net/http"
 	"net/url"
-	"strings"
 	"sync"
 
 	"github.com/gobwas/ws"
@@ -43,19 +42,8 @@ func ProxyWebSocket(
 		wsScheme = "wss"
 	}
 
-	upstreamPath := forwardPath(r)
-	if route.StripPrefix && route.Path != "" {
-		prefix := strings.TrimSuffix(route.Path, "/*")
-		upstreamPath = strings.TrimPrefix(upstreamPath, prefix)
-
-		if upstreamPath == "" {
-			upstreamPath = "/"
-		}
-	}
-
-	if route.AddPrefix != "" {
-		upstreamPath = route.AddPrefix + upstreamPath
-	}
+	// strip_prefix, then add_prefix, then rewrite_path.
+	upstreamPath := bastion.RewritePath(forwardPath(r), route)
 
 	upstreamURL := wsScheme + "://" + targetURL.Host + singleJoiningSlash(targetURL.Path, upstreamPath)
 	if r.URL.RawQuery != "" {

@@ -5,13 +5,19 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
 // PathRewriter rewrites request paths according to route configuration.
 type PathRewriter struct{}
 
-// RewritePath applies path rewriting rules to a request.
+// RewritePath returns the path to send upstream for a request on route.
+// It applies the route's rules in this order: StripPrefix removes the
+// route's path prefix, AddPrefix is put in front, and then RewritePath, a
+// "pattern:replacement" regex rule, runs on the result. The rule splits at
+// the first colon, so the pattern can't contain one. An invalid rule
+// leaves the path as it is.
 func RewritePath(path string, route *Route) string {
 	result := path
 
@@ -39,6 +45,11 @@ func RewritePath(path string, route *Route) string {
 	return result
 }
 
+// rewriteRules caches compiled rewrite patterns by rule, since the same
+// few rules run on every request. A rule whose pattern doesn't compile is
+// cached as nil.
+var rewriteRules sync.Map // rule string -> *regexp.Regexp
+
 // applyRegexRewrite applies a regex rewrite rule.
 // Format: "pattern:replacement" (e.g., "/v1/(.*):/$1")
 func applyRegexRewrite(path, rule string) string {
@@ -47,8 +58,16 @@ func applyRegexRewrite(path, rule string) string {
 		return path
 	}
 
-	re, err := regexp.Compile(parts[0])
-	if err != nil {
+	var re *regexp.Regexp
+
+	if cached, ok := rewriteRules.Load(rule); ok {
+		re, _ = cached.(*regexp.Regexp)
+	} else {
+		re, _ = regexp.Compile(parts[0])
+		rewriteRules.Store(rule, re)
+	}
+
+	if re == nil {
 		return path
 	}
 

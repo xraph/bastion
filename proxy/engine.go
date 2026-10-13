@@ -503,22 +503,8 @@ func (pe *Engine) director(origReq *http.Request, route *bastion.Route, target *
 		req.URL.Scheme = target.Scheme
 		req.URL.Host = target.Host
 
-		// Path rewriting
-		path := forwardPath(origReq)
-
-		if route.StripPrefix && route.Path != "" {
-			prefix := strings.TrimSuffix(route.Path, "/*")
-			prefix = strings.TrimSuffix(prefix, "/*")
-			path = strings.TrimPrefix(path, prefix)
-
-			if path == "" {
-				path = "/"
-			}
-		}
-
-		if route.AddPrefix != "" {
-			path = route.AddPrefix + path
-		}
+		// Path rewriting: strip_prefix, then add_prefix, then rewrite_path.
+		path := bastion.RewritePath(forwardPath(origReq), route)
 
 		req.URL.Path = singleJoiningSlash(target.Path, path)
 		req.URL.RawQuery = origReq.URL.RawQuery

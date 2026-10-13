@@ -82,20 +82,8 @@ func (gp *GRPCProxy) ServeHTTP(w http.ResponseWriter, r *http.Request, route *ba
 		upstreamURL = "https://" + upstreamURL // gRPC typically uses TLS
 	}
 
-	// Apply path rewriting
-	path := forwardPath(r)
-	if route.StripPrefix && route.Path != "" {
-		prefix := strings.TrimSuffix(route.Path, "/*")
-		prefix = strings.TrimSuffix(prefix, "/*")
-		path = strings.TrimPrefix(path, prefix)
-		if path == "" {
-			path = "/"
-		}
-	}
-
-	if route.AddPrefix != "" {
-		path = route.AddPrefix + path
-	}
+	// Apply path rewriting: strip_prefix, then add_prefix, then rewrite_path.
+	path := bastion.RewritePath(forwardPath(r), route)
 
 	// Construct the full upstream URL
 	targetURL := strings.TrimRight(upstreamURL, "/") + path
