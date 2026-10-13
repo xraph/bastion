@@ -76,42 +76,42 @@ Bastion reads configuration from Forge YAML config files under the `bastion` key
 ```yaml
 bastion:
   enabled: true
-  basePath: "/api"
+  base_path: "/api"
   routes:
     - path: "/users/*"
       targets:
         - url: "http://user-service:8080"
           weight: 1
-      stripPrefix: true
+      strip_prefix: true
       protocol: http
       enabled: true
     - path: "/orders/*"
       targets:
         - url: "http://order-service:8080"
           weight: 1
-      stripPrefix: true
+      strip_prefix: true
       protocol: http
       enabled: true
-  circuitBreaker:
+  circuit_breaker:
     enabled: true
-    failureThreshold: 5
-    resetTimeout: 30s
-  rateLimiting:
+    failure_threshold: 5
+    reset_timeout: 30s
+  rate_limiting:
     enabled: true
-    requestsPerSec: 1000
+    requests_per_sec: 1000
     burst: 100
-  healthCheck:
+  health_check:
     enabled: true
     interval: 10s
     path: "/health"
     timeout: 5s
   discovery:
     enabled: true
-    watchMode: true
-    autoPrefix: true
+    watch_mode: true
+    auto_prefix: true
   dashboard:
     enabled: true
-    basePath: "/bastion"
+    base_path: "/bastion"
     realtime: true
 ```
 
@@ -119,102 +119,146 @@ When you use both, the order is defaults, then YAML, then the options you pass i
 
 ## Configuration keys reference
 
+Keys are the snake_case names below, under `extensions.bastion` or the top-level `bastion` key. Defaults are the values Bastion uses when you leave a key out.
+
 ### Top-level
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
 | `enabled` | `bool` | `true` | Enable or disable the entire gateway |
-| `basePath` | `string` | `"/api"` | Base URL prefix for all proxied routes |
+| `base_path` | `string` | `""` | Base URL prefix for all proxied routes |
 
 ### Routes (`routes[]`)
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
 | `path` | `string` | -- | URL pattern to match (required) |
+| `methods` | `[]string` | all | HTTP methods the route accepts |
 | `targets` | `[]object` | -- | Upstream targets (required, at least one) |
 | `targets[].url` | `string` | -- | Target base URL |
 | `targets[].weight` | `int` | `1` | Relative traffic weight |
-| `stripPrefix` | `bool` | `false` | Remove matched prefix before forwarding |
+| `strip_prefix` | `bool` | `false` | Remove matched prefix before forwarding |
 | `protocol` | `string` | `"http"` | Proxy protocol: `http`, `websocket`, `sse`, `grpc` |
-| `enabled` | `bool` | `true` | Whether the route is active |
-| `loadBalancer` | `string` | `""` | Override: `round-robin`, `weighted-round-robin`, `random`, `least-connections`, `consistent-hash` |
-| `timeout` | `duration` | `30s` | Override: upstream request timeout |
+| `enabled` | `bool` | `false` | Whether the route is active. A route you don't set to `true` is skipped |
+| `timeout` | `object` | global `timeouts` | Override with `connect`, `read`, `write`, `idle` durations |
+| `rate_limit` | `object` | global `rate_limiting` | Override with the same keys as `rate_limiting` |
+| `retry` | `object` | global `retry` | Override with the same keys as `retry` |
 
-### Circuit breaker (`circuitBreaker`)
+### Timeouts (`timeouts`)
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `enabled` | `bool` | `false` | Enable circuit breakers |
-| `failureThreshold` | `int` | `5` | Consecutive failures before opening the circuit |
-| `resetTimeout` | `duration` | `30s` | Time to wait before transitioning from open to half-open |
+| `connect` | `duration` | `10s` | Upstream connect timeout |
+| `read` | `duration` | `30s` | Upstream read timeout |
+| `write` | `duration` | `30s` | Upstream write timeout |
+| `idle` | `duration` | `90s` | Idle connection timeout |
 
-### Rate limiting (`rateLimiting`)
+### Load balancing (`load_balancing`)
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `strategy` | `string` | `"roundRobin"` | `roundRobin`, `weightedRoundRobin`, `random`, `leastConnections`, `consistentHash` |
+| `consistent_key` | `string` | `""` | Request header to hash on for `consistentHash`. Without it the client address is used |
+
+### Circuit breaker (`circuit_breaker`)
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `enabled` | `bool` | `true` | Enable circuit breakers |
+| `failure_threshold` | `int` | `5` | Failures before opening the circuit |
+| `failure_window` | `duration` | `60s` | Window the failures are counted over |
+| `reset_timeout` | `duration` | `30s` | Time to wait before transitioning from open to half-open |
+| `half_open_max` | `int` | `3` | Requests allowed through while half-open |
+
+### Rate limiting (`rate_limiting`)
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
 | `enabled` | `bool` | `false` | Enable rate limiting |
-| `requestsPerSec` | `float64` | `1000` | Token refill rate (requests per second) |
+| `requests_per_sec` | `float64` | `1000` | Token refill rate (requests per second) |
 | `burst` | `int` | `100` | Maximum burst size (token bucket capacity) |
+| `per_client` | `bool` | `false` | Keep a separate bucket per client |
+| `key_header` | `string` | `""` | Header that identifies the client for per-client limits |
 
-### Health check (`healthCheck`)
+### Health check (`health_check`)
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `enabled` | `bool` | `false` | Enable active health probes |
+| `enabled` | `bool` | `true` | Enable active health probes |
 | `interval` | `duration` | `10s` | Time between health check requests |
-| `path` | `string` | `"/health"` | HTTP path to probe on each target |
 | `timeout` | `duration` | `5s` | Health check request timeout |
+| `path` | `string` | `""` | HTTP path to probe on each target. Empty probes `/_/health` and keeps a target that answers 404 |
+| `failure_threshold` | `int` | `3` | Failed probes before a target is marked unhealthy |
+| `success_threshold` | `int` | `2` | Passing probes before it is marked healthy again |
+| `enable_passive` | `bool` | `true` | Also count failures seen on live traffic |
+| `passive_fail_threshold` | `int` | `5` | Live-traffic failures before a target is marked unhealthy |
 
 ### Discovery (`discovery`)
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `enabled` | `bool` | `false` | Enable FARP service discovery |
-| `watchMode` | `bool` | `false` | Watch for service registrations/deregistrations in real time |
-| `autoPrefix` | `bool` | `false` | Auto-create route prefixes from service names |
+| `enabled` | `bool` | `true` | Enable FARP service discovery |
+| `poll_interval` | `duration` | `30s` | How often to poll for services |
+| `watch_mode` | `bool` | `true` | Watch for service registrations/deregistrations in real time |
+| `auto_prefix` | `bool` | `true` | Auto-create route prefixes from service names |
+| `prefix_template` | `string` | `"/{{.ServiceName}}"` | Template for the generated prefix |
+| `strip_prefix` | `bool` | `true` | Strip the generated prefix before forwarding |
 
 ### Dashboard (`dashboard`)
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `enabled` | `bool` | `false` | Enable the admin dashboard and REST API |
-| `basePath` | `string` | `"/bastion"` | Base path for dashboard and API routes |
-| `realtime` | `bool` | `false` | Enable WebSocket real-time event stream |
+| `enabled` | `bool` | `true` | Enable the admin REST API |
+| `base_path` | `string` | `"/gateway"` | Base path for the admin API routes |
+| `realtime` | `bool` | `true` | Enable WebSocket real-time event stream |
+| `admin_token` | `string` | `""` | Bearer token every admin API request has to carry |
+| `allow_unauthenticated_admin` | `bool` | `false` | Silence the warning for an admin API with no auth |
 
 ### Authentication (`auth`)
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `type` | `string` | `""` | Auth type: `api-key`, `bearer`, `forward-auth` |
-| `secret` | `string` | `""` | Secret or token for validation |
-| `header` | `string` | `""` | Header name for API key auth |
-| `forwardURL` | `string` | `""` | URL for forward-auth delegation |
+| `enabled` | `bool` | `false` | Enable gateway-level authentication |
+| `default_policy` | `string` | `""` | With no providers configured, `allow` lets requests through. Anything else answers 401 |
+| `providers` | `[]string` | `[]` | Auth providers to try in order. The first one that passes lets the request through |
+| `forward_headers` | `bool` | `true` | Forward identity headers to the upstream |
 
 ### TLS (`tls`)
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `caCertFile` | `string` | `""` | CA certificate for upstream verification |
-| `certFile` | `string` | `""` | Client certificate for mTLS |
-| `keyFile` | `string` | `""` | Client key for mTLS |
-| `insecureSkipVerify` | `bool` | `false` | Skip certificate verification (development only) |
+| `enabled` | `bool` | `false` | Enable upstream TLS |
+| `ca_cert_file` | `string` | `""` | CA certificate for upstream verification |
+| `client_cert_file` | `string` | `""` | Client certificate for mTLS |
+| `client_key_file` | `string` | `""` | Client key for mTLS |
+| `insecure_skip_verify` | `bool` | `false` | Skip certificate verification (development only) |
+| `min_version` | `string` | `"1.2"` | Minimum TLS version |
+| `reload_interval` | `duration` | `0` | How often to reload certificates from disk (0 = never) |
 
 ### Retry (`retry`)
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `maxRetries` | `int` | `0` | Maximum retry attempts (0 = disabled) |
-| `strategy` | `string` | `"exponential"` | Backoff strategy: `exponential`, `linear`, `fixed` |
-| `baseDelay` | `duration` | `100ms` | Initial delay between retries |
-| `maxDelay` | `duration` | `5s` | Maximum delay cap |
-| `jitter` | `bool` | `false` | Add randomized jitter to delays |
+| `enabled` | `bool` | `true` | Enable retries |
+| `max_attempts` | `int` | `3` | Maximum attempts (1 to 10) |
+| `backoff` | `string` | `"exponential"` | Backoff strategy: `exponential`, `linear`, `fixed` |
+| `initial_delay` | `duration` | `100ms` | Initial delay between retries |
+| `max_delay` | `duration` | `5s` | Maximum delay cap |
+| `multiplier` | `float64` | `2.0` | Delay multiplier for `exponential` |
+| `jitter` | `bool` | `true` | Add randomized jitter to delays |
+| `retryable_status` | `[]int` | `[502, 503, 504]` | Upstream statuses that trigger a retry |
+| `retryable_methods` | `[]string` | `[GET, HEAD, OPTIONS]` | Methods that are safe to retry |
+| `budget_percent` | `float64` | `20` | Retry budget as a percentage (0 to 100) |
 
-### Cache (`cache`)
+### Cache (`caching`)
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
 | `enabled` | `bool` | `false` | Enable response caching |
-| `ttl` | `duration` | `5m` | Default cache entry time-to-live |
+| `default_ttl` | `duration` | `5m` | Default cache entry time-to-live |
+| `max_size` | `int` | `1000` | Maximum number of cached entries |
+| `methods` | `[]string` | `[GET, HEAD]` | Methods whose responses are cached |
+| `vary_by` | `[]string` | `[]` | Request headers that go into the cache key |
 
 ## Hot-reload behavior
 
@@ -248,8 +292,8 @@ Changes made through the admin API take effect immediately and are reflected in 
 
 Some settings require a restart to take effect:
 
-- `basePath` (the gateway base URL prefix)
-- `dashboard.basePath` (the admin dashboard prefix)
+- `base_path` (the gateway base URL prefix)
+- `dashboard.base_path` (the admin API prefix)
 - TLS certificate file paths (though certificate contents are reloaded automatically when the files change)
 
 ## Per-route config overrides
@@ -258,17 +302,17 @@ Many global settings can be overridden at the route level. Route-level settings 
 
 ```yaml
 bastion:
-  rateLimiting:
+  rate_limiting:
     enabled: true
-    requestsPerSec: 1000
+    requests_per_sec: 1000
     burst: 100
   routes:
     - path: "/uploads/*"
       targets:
         - url: "http://upload-service:8080"
-      rateLimit:
+      rate_limit:
         enabled: true
-        requestsPerSec: 10     # stricter limit for uploads
+        requests_per_sec: 10     # stricter limit for uploads
         burst: 5
     - path: "/api/*"
       targets:
@@ -276,4 +320,4 @@ bastion:
       # inherits the global rate limit (1000 req/s)
 ```
 
-Overridable settings: `rateLimit`, `loadBalancer`, `auth`, `cache`, `timeout`, `retryPolicy`.
+Overridable settings: `rate_limit`, `timeout`, `retry`, `auth`, `cache`.

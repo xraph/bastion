@@ -118,40 +118,40 @@ gateway.NewExtension(
 
 ### File-based Configuration (YAML/JSON)
 
-The gateway loads config from Forge's ConfigManager under the `gateway` key:
+The gateway loads config from Forge's ConfigManager under the `extensions.bastion` key, or the top-level `bastion` key. Keys use the snake_case names below:
 
 ```yaml
-gateway:
+bastion:
   enabled: true
-  basePath: "/api"
+  base_path: "/api"
   routes:
     - path: "/users/*"
       targets:
         - url: "http://user-service:8080"
           weight: 1
-      stripPrefix: true
+      strip_prefix: true
       protocol: http
       enabled: true
-  circuitBreaker:
+  circuit_breaker:
     enabled: true
-    failureThreshold: 5
-    resetTimeout: 30s
-  rateLimiting:
+    failure_threshold: 5
+    reset_timeout: 30s
+  rate_limiting:
     enabled: true
-    requestsPerSec: 1000
+    requests_per_sec: 1000
     burst: 100
-  healthCheck:
+  health_check:
     enabled: true
     interval: 10s
     path: "/health"
   discovery:
     enabled: true
-    watchMode: true
-    autoPrefix: true
-    prefixTemplate: "/{{.ServiceName}}"
+    watch_mode: true
+    auto_prefix: true
+    prefix_template: "/{{.ServiceName}}"
   dashboard:
     enabled: true
-    basePath: "/gateway"
+    base_path: "/gateway"
     realtime: true
 ```
 
@@ -267,16 +267,16 @@ gateway.NewExtension(
 ### YAML Configuration
 
 ```yaml
-gateway:
+bastion:
   openapi:
     enabled: true
     path: "/openapi.json"
-    uiPath: "/swagger"
+    ui_path: "/swagger"
     title: "My API Gateway"
-    refreshInterval: 30s
-    mergeStrategy: prefix
-    includeGatewayRoutes: true
-    excludeServices:
+    refresh_interval: 30s
+    merge_strategy: prefix
+    include_gateway_routes: true
+    exclude_services:
       - internal-admin
 ```
 

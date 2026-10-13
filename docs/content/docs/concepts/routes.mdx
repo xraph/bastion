@@ -234,16 +234,19 @@ bastion:
       targets:
         - url: "http://user-service:8080"
           weight: 1
-      stripPrefix: true
+      strip_prefix: true
       protocol: http
       enabled: true
-      loadBalancer: round-robin
-      timeout: 30s
-      rateLimit:
+      timeout:
+        read: 30s
+        write: 30s
+      rate_limit:
         enabled: true
-        requestsPerSec: 100
+        requests_per_sec: 100
         burst: 20
       cache:
         enabled: true
         ttl: 5m
 ```
+
+A route has no load balancing key of its own. You set the strategy for the whole gateway under `load_balancing.strategy`.
