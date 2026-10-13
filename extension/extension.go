@@ -7,17 +7,13 @@ import (
 	"github.com/xraph/forge"
 	dashcontract "github.com/xraph/forge/extensions/dashboard/contract"
 	"github.com/xraph/forge/extensions/dashboard/contract/dispatcher"
-	"github.com/xraph/forge/extensions/discovery"
 	"github.com/xraph/grove"
 	"github.com/xraph/vessel"
 
 	"github.com/xraph/bastion"
 	"github.com/xraph/bastion/admin"
-	"github.com/xraph/bastion/api"
 	bastioncontract "github.com/xraph/bastion/extension/contract"
-	"github.com/xraph/bastion/proxy"
-	"github.com/xraph/bastion/resilience"
-	"github.com/xraph/bastion/routing"
+	"github.com/xraph/bastion/gateway"
 	"github.com/xraph/bastion/store"
 	mongostore "github.com/xraph/bastion/store/mongo"
 	pgstore "github.com/xraph/bastion/store/postgres"
@@ -31,6 +27,10 @@ var _ forge.Extension = (*Extension)(nil)
 // bastion contract contributor that the React dashboard shell reads,
 // auto-wiring the discovery service, and providing grove-based persistent
 // store support.
+//
+// The proxy and admin wiring is shared with the gateway package. Use that
+// package directly when you don't need a grove store: it leaves the Mongo,
+// Postgres and SQLite store packages out of your build.
 type Extension struct {
 	gw    *bastion.Gateway
 	admin *admin.Service
@@ -96,88 +96,11 @@ func (e *Extension) Register(app forge.App) error {
 		return nil
 	}
 
-	cfg := gw.Config()
-
-	// Wire concrete subsystems from subpackages
-	rm := routing.NewManager()
-	gw.SetRouteRegistry(rm)
-
-	cbm := resilience.NewCBManager(cfg.CircuitBreaker)
-	gw.SetCircuitControl(cbm)
-
-	re := resilience.NewRetryExecutor(cfg.Retry)
-	gw.SetRetryPolicy(re)
-
-	ts := routing.NewTrafficSplitter(cfg.TrafficSplit.Enabled)
-	gw.SetTrafficRouter(ts)
-
-	stats := proxy.NewStatsCollector()
-	gw.SetStatsRecorder(stats)
-
-	svc, err := admin.New(admin.Deps{
-		Routes:    rm,
-		Health:    gw.HealthMonitor(),
-		Breakers:  cbm,
-		BasePath:  cfg.BasePath,
-		Persisted: gw.RoutesPersisted,
-	})
+	svc, err := gateway.Wire(gw)
 	if err != nil {
-		return fmt.Errorf("bastion: build admin service: %w", err)
+		return err
 	}
 	e.admin = svc
-
-	lb := routing.NewLoadBalancer(cfg.LoadBalancing.Strategy)
-
-	pe := proxy.NewEngine(cfg, gw.Logger(), rm, gw.HealthMonitor(), cbm, gw.RateLimiter(), stats, gw.Hooks(), lb)
-	pe.SetAuth(gw.Auth())
-	pe.SetCache(gw.Cache())
-	pe.SetTLSManager(gw.TLS())
-	gw.SetProxyHandler(pe)
-
-	// Dashboard hub + admin handlers
-	var hub *api.Hub
-	if cfg.Dashboard.Enabled && cfg.Dashboard.Realtime {
-		hub = api.NewHub(gw.Logger())
-		gw.SetWSBroadcaster(hub)
-	}
-
-	gw.SetAdminHandlerSetup(func(gw *bastion.Gateway, router forge.Router) {
-		adminBase := cfg.Dashboard.BasePath + "/api"
-		h := api.NewHandlers(gw, hub, svc)
-
-		mustReg := func(err error) {
-			if err != nil {
-				gw.Logger().Error("failed to register admin route", forge.F("error", err))
-			}
-		}
-
-		mustReg(router.GET(adminBase+"/routes", h.HandleListRoutes))
-		mustReg(router.GET(adminBase+"/routes/:id", h.HandleGetRoute))
-		mustReg(router.POST(adminBase+"/routes", h.HandleCreateRoute))
-		mustReg(router.PUT(adminBase+"/routes/:id", h.HandleUpdateRoute))
-		mustReg(router.DELETE(adminBase+"/routes/:id", h.HandleDeleteRoute))
-		mustReg(router.POST(adminBase+"/routes/:id/enable", h.HandleEnableRoute))
-		mustReg(router.POST(adminBase+"/routes/:id/disable", h.HandleDisableRoute))
-		mustReg(router.GET(adminBase+"/upstreams", h.HandleListUpstreams))
-		mustReg(router.GET(adminBase+"/stats", h.HandleGetStats))
-		mustReg(router.GET(adminBase+"/stats/routes", h.HandleGetRouteStats))
-		mustReg(router.GET(adminBase+"/config", h.HandleGetConfig))
-		mustReg(router.GET(adminBase+"/discovery/services", h.HandleListDiscoveredServices))
-		mustReg(router.POST(adminBase+"/discovery/refresh", h.HandleRefreshDiscovery))
-		mustReg(router.GET(adminBase+"/discovery/debug", h.HandleDebugDiscovery))
-		mustReg(router.POST(adminBase+"/discovery/register", h.HandleRegisterService))
-		mustReg(router.DELETE(adminBase+"/discovery/services/:name", h.HandleDeregisterService))
-
-		// FARP v1 push protocol endpoints (spec section 17.4).
-		// Services POST to these endpoints to push-register with the gateway.
-		mustReg(router.POST("/_farp/v1/register", h.HandleFARPRegister, forge.WithSchemaExclude()))
-		mustReg(router.PUT("/_farp/v1/heartbeat/:id", h.HandleFARPHeartbeat, forge.WithSchemaExclude()))
-		mustReg(router.DELETE("/_farp/v1/deregister/:id", h.HandleFARPDeregister, forge.WithSchemaExclude()))
-
-		if hub != nil {
-			mustReg(router.GET(cfg.Dashboard.BasePath+"/ws", h.HandleWebSocket))
-		}
-	})
 
 	return nil
 }
@@ -186,21 +109,8 @@ func (e *Extension) Start(ctx context.Context) error {
 	app := e.gateway().App()
 
 	// Auto-wire discovery service if available.
-	// Prefer FARP ServiceDiscovery (via the discovery extension's backend)
-	// for richer integration, falling back to the discovery.Service adapter.
 	if app != nil {
-		discSvc, err := forge.Inject[*discovery.Service](app.Container())
-		if err != nil {
-			e.gw.Logger().Warn("bastion: discovery service not found in DI container",
-				forge.F("error", err),
-			)
-		} else if discSvc != nil {
-			// Use the FARP-aware adapter that wraps forge's backend as FARP ServiceDiscovery
-			e.gw.Logger().Info("bastion: discovery service wired from DI container")
-			e.gw.SetDiscoveryService(NewDiscoveryAdapter(discSvc))
-		} else {
-			e.gw.Logger().Warn("bastion: discovery service resolved as nil from DI container")
-		}
+		gateway.WireDiscovery(e.gw)
 	}
 
 	// Wire grove store

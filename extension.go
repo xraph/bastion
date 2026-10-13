@@ -62,7 +62,14 @@ type Gateway struct {
 	routesRegistered bool
 }
 
-// NewExtension creates a new bastion gateway.
+// New creates the core bastion gateway.
+//
+// On its own it proxies nothing. The proxy engine, route manager and
+// admin API are built in subpackages that import this one, so they have
+// to be injected (SetProxyHandler and friends) before Start, or no
+// catch-all route is registered. gateway.New does that for you and keeps
+// the store packages out of your build; extension.New does the same and
+// adds grove-backed persistence.
 func New(opts ...ConfigOption) forge.Extension {
 	config := DefaultConfig()
 	for _, opt := range opts {
@@ -599,7 +606,7 @@ func (e *Gateway) registerRoutes() {
 	// Register the catch-all proxy handler
 	// This must be registered last to not interfere with admin routes
 	if e.proxyHandler == nil {
-		e.Logger().Warn("proxy handler not set, skipping catch-all route registration")
+		e.Logger().Warn("proxy handler not set, skipping catch-all route registration; build the gateway with gateway.New or extension.New")
 		return
 	}
 

@@ -30,6 +30,23 @@ That single call registers Bastion into the Forge lifecycle:
 5. Provides the `*bastion.Gateway` instance to the DI container via [Vessel](https://github.com/xraph/vessel).
 6. Starts the WebSocket hub for real-time dashboard updates.
 
+### Without a persistent store
+
+`extension.New` imports the Mongo, Postgres and SQLite store packages so it can pick one from a grove database. If you don't need routes to survive a restart, use `gateway.New` instead. It wires the same proxy engine, admin API and discovery, and leaves the store packages out of your build:
+
+```go
+import (
+    "github.com/xraph/bastion"
+    "github.com/xraph/bastion/gateway"
+)
+
+app.RegisterExtension(gateway.New(
+    bastion.WithBasePath("/api"),
+))
+```
+
+Don't register `bastion.New(...)` directly. It's the core gateway with nothing wired into it, so it registers no catch-all route and proxies nothing.
+
 ## Extension Lifecycle
 
 The extension participates in the full Forge lifecycle:
