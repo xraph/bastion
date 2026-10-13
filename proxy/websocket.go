@@ -43,7 +43,7 @@ func ProxyWebSocket(
 		wsScheme = "wss"
 	}
 
-	upstreamPath := r.URL.Path
+	upstreamPath := forwardPath(r)
 	if route.StripPrefix && route.Path != "" {
 		prefix := strings.TrimSuffix(route.Path, "/*")
 		upstreamPath = strings.TrimPrefix(upstreamPath, prefix)

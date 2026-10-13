@@ -502,7 +502,7 @@ func (pe *Engine) director(origReq *http.Request, route *bastion.Route, target *
 		req.URL.Host = target.Host
 
 		// Path rewriting
-		path := origReq.URL.Path
+		path := forwardPath(origReq)
 
 		if route.StripPrefix && route.Path != "" {
 			prefix := strings.TrimSuffix(route.Path, "/*")

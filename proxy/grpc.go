@@ -83,7 +83,7 @@ func (gp *GRPCProxy) ServeHTTP(w http.ResponseWriter, r *http.Request, route *ba
 	}
 
 	// Apply path rewriting
-	path := r.URL.Path
+	path := forwardPath(r)
 	if route.StripPrefix && route.Path != "" {
 		prefix := strings.TrimSuffix(route.Path, "/*")
 		prefix = strings.TrimSuffix(prefix, "/*")
