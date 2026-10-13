@@ -19,7 +19,10 @@ type Gateway struct {
 	*forge.BaseExtension
 
 	config Config
-	app    forge.App
+	// opts are the options passed to New. Register replays them over the
+	// loaded config, so an option set in code beats the YAML file.
+	opts []ConfigOption
+	app  forge.App
 
 	// Core components (interfaces — concrete implementations injected by extension/)
 	routeManager RouteRegistry
@@ -86,7 +89,41 @@ func New(opts ...ConfigOption) forge.Extension {
 	return &Gateway{
 		BaseExtension: base,
 		config:        config,
+		opts:          append([]ConfigOption(nil), opts...),
 	}
+}
+
+// loadConfig builds the config Register runs with. The precedence, lowest
+// first, is DefaultConfig, then the "extensions.bastion" (or "bastion")
+// block of the app's config files, then the options passed to New.
+//
+// The YAML is bound straight over DefaultConfig, and binding only touches
+// the keys the file sets, so a key the file leaves out keeps its default
+// and a key it sets to false or "" really is false or "". The options are
+// then replayed over the result. Each one sets exactly the fields it
+// names, so it wins over the file without wiping the rest of the block it
+// lives in, and an option that sets a bool to false (WithEnabled(false),
+// say) is applied like any other. That's why the options aren't handed to
+// LoadConfig as a programmatic config: its merge copies every non-zero
+// top-level field, so DefaultConfig plus options would replace whole YAML
+// blocks, and a zero struct plus options couldn't tell "false" from
+// "unset".
+func (e *Gateway) loadConfig() Config {
+	cfg := DefaultConfig()
+
+	if err := e.LoadConfig("bastion", &cfg, nil, DefaultConfig(), false); err != nil {
+		e.Logger().Warn("bastion: could not load config from the config manager, using defaults and code options",
+			forge.F("error", err.Error()),
+		)
+
+		cfg = DefaultConfig()
+	}
+
+	for _, opt := range e.opts {
+		opt(&cfg)
+	}
+
+	return cfg
 }
 
 // Register registers the bastion gateway.
@@ -97,17 +134,7 @@ func (e *Gateway) Register(app forge.App) error {
 
 	e.app = app
 
-	// Load config from ConfigManager
-	programmaticConfig := e.config
-	finalConfig := DefaultConfig()
-
-	if err := e.LoadConfig("bastion", &finalConfig, programmaticConfig, DefaultConfig(), false); err != nil {
-		e.Logger().Warn("bastion: using programmatic config",
-			forge.F("error", err.Error()),
-		)
-	}
-
-	e.config = finalConfig
+	e.config = e.loadConfig()
 
 	if !e.config.Enabled {
 		e.Logger().Info("bastion gateway disabled")

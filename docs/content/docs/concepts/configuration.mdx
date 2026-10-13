@@ -115,7 +115,7 @@ bastion:
     realtime: true
 ```
 
-YAML configuration is merged with programmatic defaults. Programmatic options that are explicitly set take precedence over YAML values.
+When you use both, the order is defaults, then YAML, then the options you pass in code. A key the YAML leaves out keeps its default. An option overrides only the fields it sets, so `WithAdminToken` replaces the token and leaves the rest of the YAML dashboard block alone. Options that add to a list, like `WithRoute` and `WithAdminMiddleware`, add to what the YAML already lists.
 
 ## Configuration keys reference
 
