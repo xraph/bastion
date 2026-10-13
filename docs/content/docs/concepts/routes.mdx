@@ -3,7 +3,7 @@ title: Routes
 description: Route configuration, path matching, protocol selection, and per-route overrides.
 ---
 
-A route defines how incoming requests are matched and forwarded to upstream targets. Each route has a path pattern, one or more targets, a protocol, and optional overrides for load balancing, rate limiting, authentication, and caching.
+A route defines how incoming requests are matched and forwarded to upstream targets. Each route has a path pattern, one or more targets, a protocol, and optional overrides for rate limiting, authentication, caching, timeouts and retries.
 
 ## RouteConfig
 
@@ -14,58 +14,89 @@ type RouteConfig struct {
     // Path is the URL pattern to match (e.g., "/users/*", "/api/v1/orders/*").
     Path string
 
+    // Methods limits the route to these HTTP methods. Empty matches every method.
+    Methods []string
+
     // Targets is the list of upstream targets for this route.
     Targets []TargetConfig
 
     // StripPrefix removes the matched path prefix before forwarding.
     StripPrefix bool
 
-    // Protocol specifies the proxy protocol (HTTP, WebSocket, SSE, gRPC).
-    Protocol Protocol
+    // AddPrefix is put in front of the path before forwarding.
+    AddPrefix string
+
+    // RewritePath is a regex rewrite rule, "pattern:replacement".
+    // It is stored with the route, but the proxy doesn't apply it yet.
+    RewritePath string
+
+    // Headers adds, sets and removes request headers sent upstream.
+    Headers HeaderPolicy
+
+    // Protocol is the proxy protocol: ProtocolHTTP, ProtocolWebSocket,
+    // ProtocolSSE, ProtocolGRPC or ProtocolGraphQL.
+    Protocol RouteProtocol
+
+    // Priority orders matching. Higher wins.
+    Priority int
 
     // Enabled controls whether this route is active.
     Enabled bool
 
-    // LoadBalancer overrides the global load balancing strategy for this route.
-    LoadBalancer LoadBalancerStrategy
+    // Retry overrides the global retry configuration for this route.
+    Retry *RetryConfig
+
+    // Timeout overrides the global upstream timeouts for this route.
+    Timeout *TimeoutConfig
 
     // RateLimit overrides the global rate limit for this route.
     RateLimit *RateLimitConfig
 
     // Auth sets route-specific authentication requirements.
-    Auth *AuthConfig
+    Auth *RouteAuthConfig
 
     // Cache sets route-specific response caching policy.
-    Cache *CacheConfig
+    Cache *RouteCacheConfig
 
-    // Timeout overrides the global upstream timeouts for this route.
-    Timeout *TimeoutConfig
-
-    // RetryPolicy overrides the global retry configuration for this route.
-    RetryPolicy *RetryConfig
+    // TrafficPolicy holds canary, blue-green, A/B or mirror rules.
+    // It is stored with the route, but the proxy doesn't apply it yet.
+    TrafficPolicy *TrafficPolicy
 
     // Metadata is a free-form map for custom route annotations.
-    Metadata map[string]string
+    Metadata map[string]any
+
+    // ServiceName associates the route with a logical service, so it can
+    // contribute to the aggregated OpenAPI spec.
+    ServiceName string
+
+    // OpenAPISpec is the URL of the upstream service's OpenAPI spec.
+    OpenAPISpec string
 }
 ```
+
+`TargetConfig` has `URL`, `Weight`, `Tags`, `Metadata` and `TLS`. There is no per-route load balancing field; the strategy is set for the whole gateway.
 
 ### Registering routes
 
 Routes are registered via the `WithRoute` option function:
 
 ```go
-bastion.NewExtension(
-    bastion.WithRoute(bastion.RouteConfig{
-        Path:    "/users/*",
-        Targets: []bastion.TargetConfig{
-            {URL: "http://user-service:8080", Weight: 1},
-        },
-        StripPrefix: true,
-        Protocol:    bastion.ProtocolHTTP,
-        Enabled:     true,
-    }),
-)
+func register(app forge.App) error {
+    return app.RegisterExtension(gateway.New(
+        bastion.WithRoute(bastion.RouteConfig{
+            Path: "/users/*",
+            Targets: []bastion.TargetConfig{
+                {URL: "http://user-service:8080", Weight: 1},
+            },
+            StripPrefix: true,
+            Protocol:    bastion.ProtocolHTTP,
+            Enabled:     true,
+        }),
+    ))
+}
 ```
+
+`gateway.New` comes from `github.com/xraph/bastion/gateway`. `extension.New` takes the same options and adds a persistent route store.
 
 ## Path matching
 
@@ -77,11 +108,11 @@ Bastion uses path patterns to match incoming requests to routes. Patterns suppor
 | `/api/v1/orders/*` | Any path starting with `/api/v1/orders/` | `/api/v1/orders/123` |
 | `/health` | Exact match only | `/health` |
 
-The `*` wildcard matches one or more path segments. Routes are matched in registration order -- the first matching route wins.
+The `*` wildcard matches one or more path segments. The first matching route in the route table wins, and the table is ordered as described below.
 
 ### Path conflicts
 
-When multiple routes could match the same request, the most specific route wins. Exact matches take precedence over wildcard matches. If two wildcard routes overlap, the one registered first wins.
+When several routes could match a request, the route table decides. Higher `Priority` comes first. At the same priority, manual routes come before FARP routes, which come before discovered ones. After that, the route with the longer path pattern wins, so `/portal/*` matches before `/*`. Routes you define in code or YAML get 100 added to their `Priority`, so they beat discovered routes.
 
 ## Protocol selection
 
@@ -89,10 +120,11 @@ Each route specifies a protocol that determines how requests are proxied:
 
 ```go
 const (
-    ProtocolHTTP      Protocol = "http"
-    ProtocolWebSocket Protocol = "websocket"
-    ProtocolSSE       Protocol = "sse"
-    ProtocolGRPC      Protocol = "grpc"
+    ProtocolHTTP      RouteProtocol = "http"
+    ProtocolWebSocket RouteProtocol = "websocket"
+    ProtocolSSE       RouteProtocol = "sse"
+    ProtocolGRPC      RouteProtocol = "grpc"
+    ProtocolGraphQL   RouteProtocol = "graphql"
 )
 ```
 
@@ -102,6 +134,7 @@ const (
 | `ProtocolWebSocket` | Dedicated WebSocket routes where all traffic is WebSocket. |
 | `ProtocolSSE` | Server-Sent Events streaming endpoints. Disables response buffering. |
 | `ProtocolGRPC` | gRPC services. Forwards HTTP/2 frames including trailers. |
+| `ProtocolGraphQL` | GraphQL services. Proxied like HTTP; the GraphQL plugin acts on these routes. |
 
 For most services, `ProtocolHTTP` is the right choice. It handles both regular HTTP requests and WebSocket upgrade requests transparently.
 
@@ -126,9 +159,9 @@ This is useful when the upstream service does not expect the gateway's path pref
 Routes have an `Enabled` field that controls whether they accept traffic:
 
 ```go
-bastion.RouteConfig{
+route := bastion.RouteConfig{
     Path:    "/users/*",
-    Enabled: true,  // route is active
+    Enabled: true, // route is active
 }
 ```
 
@@ -156,7 +189,7 @@ Several global settings can be overridden at the route level:
 ### Rate limiting
 
 ```go
-bastion.RouteConfig{
+route := bastion.RouteConfig{
     Path: "/uploads/*",
     RateLimit: &bastion.RateLimitConfig{
         Enabled:        true,
@@ -168,31 +201,37 @@ bastion.RouteConfig{
 
 ### Load balancing
 
+A route can't override the load balancing strategy. You set it for the whole gateway:
+
 ```go
-bastion.RouteConfig{
-    Path:         "/users/*",
-    LoadBalancer: bastion.LoadBalancerLeastConn,
-}
+opt := bastion.WithLoadBalancing(bastion.LoadBalancingConfig{
+    Strategy: bastion.LBLeastConnections,
+})
 ```
+
+A route can still weight its targets with `TargetConfig.Weight`, which the weighted strategies use.
 
 ### Authentication
 
 ```go
-bastion.RouteConfig{
+route := bastion.RouteConfig{
     Path: "/admin/*",
-    Auth: &bastion.AuthConfig{
-        Type:   bastion.AuthBearer,
-        Secret: "my-admin-token",
+    Auth: &bastion.RouteAuthConfig{
+        Enabled:   true,
+        Providers: []string{"admin-token"}, // the name you registered the provider under
+        Scopes:    []string{"admin"},
     },
 }
 ```
 
+Route auth only runs when gateway auth is on (`auth.enabled`). `SkipAuth: true` opens one route on a gateway that otherwise requires auth.
+
 ### Response caching
 
 ```go
-bastion.RouteConfig{
+route := bastion.RouteConfig{
     Path: "/products/*",
-    Cache: &bastion.CacheConfig{
+    Cache: &bastion.RouteCacheConfig{
         Enabled: true,
         TTL:     5 * time.Minute,
     },
@@ -202,7 +241,7 @@ bastion.RouteConfig{
 ### Timeout
 
 ```go
-bastion.RouteConfig{
+route := bastion.RouteConfig{
     Path: "/reports/*",
     Timeout: &bastion.TimeoutConfig{
         Read:  60 * time.Second,
@@ -218,17 +257,23 @@ These apply to HTTP routes. WebSocket, SSE and gRPC traffic is long-lived and do
 ### Retry policy
 
 ```go
-bastion.RouteConfig{
+route := bastion.RouteConfig{
     Path: "/payments/*",
-    RetryPolicy: &bastion.RetryConfig{
-        MaxRetries:  3,
-        Strategy:    bastion.RetryExponential,
-        BaseDelay:   100 * time.Millisecond,
-        MaxDelay:    5 * time.Second,
-        Jitter:      true,
+    Retry: &bastion.RetryConfig{
+        Enabled:          true,
+        MaxAttempts:      3,
+        Backoff:          bastion.BackoffExponential,
+        InitialDelay:     100 * time.Millisecond,
+        MaxDelay:         5 * time.Second,
+        Multiplier:       2.0,
+        Jitter:           true,
+        RetryableStatus:  []int{502, 503, 504},
+        RetryableMethods: []string{"GET", "HEAD", "OPTIONS"},
     },
 }
 ```
+
+The route's `Retry` replaces the global `retry` block for that route. Note that the proxy doesn't retry requests yet: the retry policy is stored and validated, but nothing in the request path acts on it.
 
 ## YAML route configuration
 
