@@ -18,7 +18,7 @@ require (
 	github.com/xraph/grove/drivers/pgdriver v1.7.3
 	github.com/xraph/grove/drivers/sqlitedriver v1.7.3
 	github.com/xraph/vessel v1.0.4
-	go.mongodb.org/mongo-driver/v2 v2.5.0
+	go.mongodb.org/mongo-driver/v2 v2.9.2
 	gopkg.in/yaml.v3 v3.0.1
 )
 
@@ -81,7 +81,7 @@ require (
 	github.com/jackc/pgx/v5 v5.10.0 // indirect
 	github.com/jackc/puddle/v2 v2.2.2 // indirect
 	github.com/json-iterator/go v1.1.12 // indirect
-	github.com/klauspost/compress v1.19.1 // indirect
+	github.com/klauspost/compress v1.19.2 // indirect
 	github.com/leodido/go-urn v1.5.0 // indirect
 	github.com/mattn/go-colorable v0.1.15 // indirect
 	github.com/mattn/go-isatty v0.0.24 // indirect
