@@ -62,6 +62,31 @@ func TestNew_Proxies(t *testing.T) {
 	}
 }
 
+// A route at the root answers the root itself, not only what's under it:
+// Forge's router doesn't match "/*path" against "/".
+func TestNew_ProxiesTheRoot(t *testing.T) {
+	up := upstream(t)
+	app := forgetesting.NewTestApp("gateway-root", "0.0.0")
+	gw := gateway.New(bastion.WithRoute(bastion.RouteConfig{
+		Path: "/*", Targets: []bastion.TargetConfig{{URL: up.URL, Weight: 1}}, Enabled: true, Protocol: bastion.ProtocolHTTP,
+	}), bastion.WithDiscoveryEnabled(false))
+	if err := app.RegisterExtension(gw); err != nil {
+		t.Fatalf("RegisterExtension: %v", err)
+	}
+	if err := app.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() { _ = app.Stop(context.Background()) })
+
+	for path, want := range map[string]string{"/": "upstream saw /", "/docs/": "upstream saw /docs/"} {
+		rec := httptest.NewRecorder()
+		app.Router().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
+		if rec.Code != http.StatusOK || rec.Body.String() != want {
+			t.Errorf("%s: %d %q, want 200 %q", path, rec.Code, rec.Body.String(), want)
+		}
+	}
+}
+
 // bastion.New on its own still registers no catch-all. This pins the gap
 // gateway.New exists to fill, so a change to the core shows up here.
 func TestCoreGatewayAloneDoesNotProxy(t *testing.T) {

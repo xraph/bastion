@@ -653,32 +653,41 @@ func (e *Gateway) registerRoutes() {
 		return nil
 	}
 
-	// Register for common HTTP methods
-	for _, method := range []string{"GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"} {
-		var regErr error
+	// Register for common HTTP methods. Forge's router doesn't match a
+	// wildcard against the path it hangs off, so "/*path" misses "/" and
+	// "/gw/*path" misses "/gw": the base gets a route of its own too.
+	patterns := []string{basePath + "/*path", basePath + "/"}
+	if basePath != "" {
+		patterns = append(patterns, basePath)
+	}
+	for _, pattern := range patterns {
+		for _, method := range []string{"GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"} {
+			var regErr error
 
-		switch method {
-		case "GET":
-			regErr = router.GET(basePath+"/*path", catchAll)
-		case "POST":
-			regErr = router.POST(basePath+"/*path", catchAll)
-		case "PUT":
-			regErr = router.PUT(basePath+"/*path", catchAll)
-		case "DELETE":
-			regErr = router.DELETE(basePath+"/*path", catchAll)
-		case "PATCH":
-			regErr = router.PATCH(basePath+"/*path", catchAll)
-		case "HEAD":
-			regErr = router.HEAD(basePath+"/*path", catchAll)
-		case "OPTIONS":
-			regErr = router.OPTIONS(basePath+"/*path", catchAll)
-		}
+			switch method {
+			case "GET":
+				regErr = router.GET(pattern, catchAll)
+			case "POST":
+				regErr = router.POST(pattern, catchAll)
+			case "PUT":
+				regErr = router.PUT(pattern, catchAll)
+			case "DELETE":
+				regErr = router.DELETE(pattern, catchAll)
+			case "PATCH":
+				regErr = router.PATCH(pattern, catchAll)
+			case "HEAD":
+				regErr = router.HEAD(pattern, catchAll)
+			case "OPTIONS":
+				regErr = router.OPTIONS(pattern, catchAll)
+			}
 
-		if regErr != nil {
-			e.Logger().Warn("failed to register catch-all route",
-				forge.F("method", method),
-				forge.F("error", regErr),
-			)
+			if regErr != nil {
+				e.Logger().Warn("failed to register catch-all route",
+					forge.F("method", method),
+					forge.F("path", pattern),
+					forge.F("error", regErr),
+				)
+			}
 		}
 	}
 
