@@ -42,8 +42,12 @@ type Engine struct {
 	routeTransports transportCache
 	// retry decides whether a failed attempt is sent again. Nil sends
 	// every request once.
-	retry   bastion.RetryPolicy
-	bufPool sync.Pool
+	retry bastion.RetryPolicy
+	// traffic applies routes' traffic policies. Nil leaves every target
+	// a candidate and mirrors nothing.
+	traffic     bastion.TrafficRouter
+	mirrorSlots chan struct{}
+	bufPool     sync.Pool
 }
 
 // StatsCollector collects gateway-level statistics.
@@ -257,16 +261,17 @@ func NewEngine(
 	transport := newHTTPTransport(config.Timeouts, tlsConfig)
 
 	return &Engine{
-		config:    config,
-		logger:    logger,
-		lb:        lb,
-		cbm:       cbm,
-		hm:        hm,
-		rm:        rm,
-		rl:        rl,
-		stats:     stats,
-		hooks:     hooks,
-		transport: transport,
+		config:      config,
+		logger:      logger,
+		lb:          lb,
+		cbm:         cbm,
+		hm:          hm,
+		rm:          rm,
+		rl:          rl,
+		stats:       stats,
+		hooks:       hooks,
+		transport:   transport,
+		mirrorSlots: make(chan struct{}, maxMirrorsInFlight),
 		bufPool: sync.Pool{
 			New: func() any {
 				buf := make([]byte, 32*1024)
@@ -482,9 +487,13 @@ func (pe *Engine) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	var roundTripper http.RoundTripper = transport
 
-	// Retries need a body that can be sent again: none, or one small
-	// enough to hold in memory. A bigger body goes upstream once.
-	if pe.retry != nil && mayRetry(effectiveRetry(route, pe.config.Retry), r.Method) {
+	// Retries and mirroring both send the body more than once, so it has
+	// to be replayable: none, or one small enough to hold in memory. A
+	// bigger body goes upstream once and isn't mirrored.
+	retryable := pe.retry != nil && mayRetry(effectiveRetry(route, pe.config.Retry), r.Method)
+	mirrorTo := pe.mirrorTarget(route)
+
+	if retryable || mirrorTo != nil {
 		body, replayable, err := bufferBody(r, maxReplayBody)
 		if err != nil {
 			cb.ReleaseProbe()
@@ -494,11 +503,15 @@ func (pe *Engine) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		if replayable {
+		if retryable && replayable {
 			roundTripper = &retryTransport{
 				base: transport, policy: pe.retry, pe: pe,
 				route: route, target: target, cb: cb, body: body,
 			}
+		}
+
+		if mirrorTo != nil && replayable {
+			pe.mirror(r, route, mirrorTo, body)
 		}
 	}
 
@@ -668,7 +681,7 @@ func (pe *Engine) errorHandler(route *bastion.Route, target *bastion.Target, cb 
 }
 
 func (pe *Engine) selectTarget(r *http.Request, route *bastion.Route) *bastion.Target {
-	return pe.pick(r, pe.closedCircuits(route.Targets))
+	return pe.pick(r, pe.closedCircuits(pe.routeTargets(r, route)))
 }
 
 // admitTarget picks a target and asks its breaker to admit the request,
@@ -676,7 +689,7 @@ func (pe *Engine) selectTarget(r *http.Request, route *bastion.Route) *bastion.T
 // reports whether any breaker refused, so the caller can tell "circuit
 // breaker open" from "no healthy upstream".
 func (pe *Engine) admitTarget(r *http.Request, route *bastion.Route) (*bastion.Target, bastion.Breaker, bool) {
-	candidates := pe.closedCircuits(route.Targets)
+	candidates := pe.closedCircuits(pe.routeTargets(r, route))
 	refused := false
 
 	for len(candidates) > 0 {

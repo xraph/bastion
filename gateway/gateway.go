@@ -103,7 +103,8 @@ func Wire(gw *bastion.Gateway) (*admin.Service, error) {
 
 	retry := resilience.NewRetryExecutor(cfg.Retry)
 	gw.SetRetryPolicy(retry)
-	gw.SetTrafficRouter(routing.NewTrafficSplitter(cfg.TrafficSplit.Enabled))
+	traffic := routing.NewTrafficSplitter(cfg.TrafficSplit.Enabled)
+	gw.SetTrafficRouter(traffic)
 
 	stats := proxy.NewStatsCollector()
 	gw.SetStatsRecorder(stats)
@@ -126,6 +127,7 @@ func Wire(gw *bastion.Gateway) (*admin.Service, error) {
 	pe.SetCache(gw.Cache())
 	pe.SetTLSManager(gw.TLS())
 	pe.SetRetryPolicy(retry)
+	pe.SetTrafficRouter(traffic)
 	gw.SetProxyHandler(pe)
 
 	// Dashboard hub + admin handlers

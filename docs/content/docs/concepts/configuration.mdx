@@ -162,6 +162,12 @@ Keys are the snake_case names below, under `extensions.bastion` or the top-level
 | `strategy` | `string` | `"roundRobin"` | `roundRobin`, `weightedRoundRobin`, `random`, `leastConnections`, `consistentHash` |
 | `consistent_key` | `string` | `""` | Request header to hash on for `consistentHash`. Without it the client address is used |
 
+### Traffic split (`traffic_split`)
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `enabled` | `bool` | `false` | Apply routes' traffic policies (canary, blue-green, A/B, weighted, mirror). Off ignores them |
+
 ### Circuit breaker (`circuit_breaker`)
 
 | Key | Type | Default | Description |

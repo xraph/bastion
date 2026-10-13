@@ -58,8 +58,8 @@ type RouteConfig struct {
     // Cache sets route-specific response caching policy.
     Cache *RouteCacheConfig
 
-    // TrafficPolicy holds canary, blue-green, A/B or mirror rules.
-    // It is stored with the route, but the proxy doesn't apply it yet.
+    // TrafficPolicy narrows the targets a request may go to (canary,
+    // blue-green, A/B, weighted) or mirrors it. Needs traffic_split on.
     TrafficPolicy *TrafficPolicy
 
     // Metadata is a free-form map for custom route annotations.
@@ -232,7 +232,7 @@ opt := bastion.WithLoadBalancing(bastion.LoadBalancingConfig{
 })
 ```
 
-A route can still weight its targets with `TargetConfig.Weight`, which the weighted strategies use.
+A route can still weight its targets with `TargetConfig.Weight`, which the weighted strategies use, and narrow them per request with a `TrafficPolicy` (see [traffic splitting](/docs/subsystems/traffic-splitting)).
 
 ### Authentication
 

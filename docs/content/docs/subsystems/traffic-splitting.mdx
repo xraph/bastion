@@ -3,7 +3,9 @@ title: Traffic Splitting
 description: Canary releases, blue-green deployments, A/B testing, and shadow traffic.
 ---
 
-Bastion supports traffic splitting for safe deployments and experimentation. Traffic policies are configured per-route and control how requests are distributed across target groups. Four strategies are available: canary, blue-green, A/B testing, and traffic mirroring.
+Bastion supports traffic splitting for safe deployments and experimentation. Traffic policies are configured per-route and control how requests are distributed across target groups. Five strategies are available: canary, blue-green, A/B testing, weighted, and traffic mirroring.
+
+Policies only take effect when you turn traffic splitting on for the gateway (see [the toggle](#global-traffic-split-toggle) below). The policy narrows the route's targets for each request, and the load balancer then picks among what's left. If a policy leaves no target (say, a rule names a tag no target carries), the request falls back to every target of the route. Target selection for WebSocket, SSE and gRPC requests goes through the policy too.
 
 ## Traffic Policy Structure
 
@@ -86,16 +88,13 @@ Gradually increase the weight as confidence in the new version grows:
 
 ## Blue-Green Deployments
 
-Blue-green deployments maintain two complete environments and switch traffic between them. The active version is determined by matching rules:
+Blue-green deployments maintain two complete environments and switch traffic between them. The first rule's tags name the active colour, and every request goes there. The rule's `Match` isn't consulted:
 
 ```go
 TrafficPolicy: &bastion.TrafficPolicy{
     Type: bastion.TrafficBlueGreen,
     Rules: []bastion.TrafficRule{
-        {
-            Match:      bastion.TrafficMatch{Type: bastion.MatchHeader, Key: "X-Version", Value: "green"},
-            TargetTags: []string{"green"},
-        },
+        {TargetTags: []string{"green"}},
     },
 }
 ```
@@ -109,7 +108,7 @@ Targets: []bastion.TargetConfig{
 }
 ```
 
-Requests with `X-Version: green` go to the green environment. All other requests go to the blue environment. To switch, update the default routing or swap the tags.
+All requests go to the green environment. To switch back, change the rule's tag to `blue`.
 
 ## A/B Testing
 
@@ -143,7 +142,7 @@ TrafficPolicy: &bastion.TrafficPolicy{
 }
 ```
 
-Requests matching the rule go to the specified target tags. Unmatched requests go to the default (untagged or remaining) targets.
+Rules are tried in order, and a request matching one goes to that rule's target tags. A request that matches no rule can go to any target of the route.
 
 ### Negated Matching
 
@@ -160,7 +159,7 @@ Match: bastion.TrafficMatch{
 
 ## Traffic Mirroring (Shadow Traffic)
 
-Traffic mirroring duplicates requests to a secondary target for testing without affecting the primary response. The client always receives the response from the primary targets -- the mirror response is discarded.
+Traffic mirroring duplicates requests to a secondary target for testing without affecting the primary response. The client always receives the response from the primary targets. The mirror's response is discarded.
 
 ```go
 TrafficPolicy: &bastion.TrafficPolicy{
@@ -171,10 +170,12 @@ TrafficPolicy: &bastion.TrafficPolicy{
 
 How it works:
 
-1. The request is forwarded to the primary target as usual.
-2. A copy of the request is sent asynchronously to the `MirrorTarget`.
-3. The mirror response is discarded.
+1. A copy of the request is sent in the background to the `MirrorTarget`, with the same method, path (after `strip_prefix`, `add_prefix` and `rewrite_path`), query, headers and body the primary target gets.
+2. The request is forwarded to the primary target as usual, without waiting for the copy.
+3. The mirror's response is read and discarded. It doesn't count toward circuit breakers, health or stats.
 4. The client receives the primary response without any added latency.
+
+Some limits keep the mirror from hurting live traffic. A copy that takes longer than 30 seconds is abandoned. At most 64 copies are in flight at once, and when the mirror can't keep up, copies past that are dropped rather than queued. A request body over 1 MiB isn't mirrored, since it would have to be held in memory. Only plain HTTP requests are mirrored, not WebSocket, SSE or gRPC.
 
 Use mirroring to validate a new version handles production traffic correctly before routing real users to it.
 
@@ -211,14 +212,20 @@ TrafficPolicy: &bastion.TrafficPolicy{
 
 ## Global Traffic Split Toggle
 
-Traffic splitting can be enabled or disabled globally:
+Traffic splitting is off by default. Turn it on in YAML:
 
-```go
-bastion.WithConfig(bastion.Config{
-    TrafficSplit: bastion.TrafficSplitConfig{
-        Enabled: true,
-    },
-})
+```yaml
+bastion:
+  traffic_split:
+    enabled: true
 ```
 
-When `Enabled` is false, all traffic policies on routes are ignored and requests go to the full target list.
+or in code, with an option of your own (there is no dedicated `With` function for it):
+
+```go
+func enableTrafficSplit(c *bastion.Config) { c.TrafficSplit.Enabled = true }
+
+gw := gateway.New(bastion.ConfigOption(enableTrafficSplit))
+```
+
+When it is off, all traffic policies on routes are ignored, requests go to the full target list, and nothing is mirrored.
