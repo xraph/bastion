@@ -9,6 +9,29 @@ Bastion exposes a comprehensive REST API for managing routes, inspecting upstrea
 
 Create now validates its input, enable and disable refuse discovered routes, and the target ids of routes you create over REST are different. If you script against this API, read "What changed for REST clients" in [MIGRATION.md](https://github.com/xraph/bastion/blob/main/MIGRATION.md).
 
+## Authentication
+
+The admin API can create, change and delete routes, so put something in front of it. You have two options, and you can use both:
+
+```go
+gateway.New(
+    // Every admin request needs "Authorization: Bearer <token>".
+    bastion.WithAdminToken(os.Getenv("BASTION_ADMIN_TOKEN")),
+    // Your own check, run after the token check.
+    bastion.WithAdminMiddleware(requireOperator),
+)
+```
+
+```bash
+curl -H "Authorization: Bearer $BASTION_ADMIN_TOKEN" http://localhost:8080/gateway/api/routes
+```
+
+A request without a valid token gets a `401` with a `WWW-Authenticate: Bearer` header. The token is never included in the `/api/config` response.
+
+Both options cover every endpoint in the summary below, the `/gateway/ws` stream included, except the OpenAPI ones (the spec, the Swagger UI and `/gateway/api/openapi/*`), which the gateway registers separately. The FARP push endpoints under `/_farp/v1` aren't covered either, because the services that push-register through them have no admin credentials.
+
+If you configure neither, the admin API is still registered (as it always was) and the gateway logs a warning at start. When it's already protected some other way, such as a private network or an authenticating proxy, set `bastion.WithAllowUnauthenticatedAdmin(true)` to say so and drop the warning.
+
 ## Endpoint Summary
 
 | Method | Path | Description |

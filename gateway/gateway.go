@@ -141,11 +141,14 @@ func Wire(gw *bastion.Gateway) (*admin.Service, error) {
 }
 
 // registerAdminRoutes mounts the admin REST API, the FARP push endpoints
-// and the dashboard WebSocket.
+// and the dashboard WebSocket. The REST API and the WebSocket go behind
+// the admin auth (see adminRouteOptions). The FARP endpoints don't: the
+// services that push-register through them have no admin credentials.
 func registerAdminRoutes(gw *bastion.Gateway, router forge.Router, hub *api.Hub, svc *admin.Service) {
 	cfg := gw.Config()
 	adminBase := cfg.Dashboard.BasePath + "/api"
 	h := api.NewHandlers(gw, hub, svc)
+	auth := adminRouteOptions(gw)
 
 	mustReg := func(err error) {
 		if err != nil {
@@ -153,22 +156,22 @@ func registerAdminRoutes(gw *bastion.Gateway, router forge.Router, hub *api.Hub,
 		}
 	}
 
-	mustReg(router.GET(adminBase+"/routes", h.HandleListRoutes))
-	mustReg(router.GET(adminBase+"/routes/:id", h.HandleGetRoute))
-	mustReg(router.POST(adminBase+"/routes", h.HandleCreateRoute))
-	mustReg(router.PUT(adminBase+"/routes/:id", h.HandleUpdateRoute))
-	mustReg(router.DELETE(adminBase+"/routes/:id", h.HandleDeleteRoute))
-	mustReg(router.POST(adminBase+"/routes/:id/enable", h.HandleEnableRoute))
-	mustReg(router.POST(adminBase+"/routes/:id/disable", h.HandleDisableRoute))
-	mustReg(router.GET(adminBase+"/upstreams", h.HandleListUpstreams))
-	mustReg(router.GET(adminBase+"/stats", h.HandleGetStats))
-	mustReg(router.GET(adminBase+"/stats/routes", h.HandleGetRouteStats))
-	mustReg(router.GET(adminBase+"/config", h.HandleGetConfig))
-	mustReg(router.GET(adminBase+"/discovery/services", h.HandleListDiscoveredServices))
-	mustReg(router.POST(adminBase+"/discovery/refresh", h.HandleRefreshDiscovery))
-	mustReg(router.GET(adminBase+"/discovery/debug", h.HandleDebugDiscovery))
-	mustReg(router.POST(adminBase+"/discovery/register", h.HandleRegisterService))
-	mustReg(router.DELETE(adminBase+"/discovery/services/:name", h.HandleDeregisterService))
+	mustReg(router.GET(adminBase+"/routes", h.HandleListRoutes, auth...))
+	mustReg(router.GET(adminBase+"/routes/:id", h.HandleGetRoute, auth...))
+	mustReg(router.POST(adminBase+"/routes", h.HandleCreateRoute, auth...))
+	mustReg(router.PUT(adminBase+"/routes/:id", h.HandleUpdateRoute, auth...))
+	mustReg(router.DELETE(adminBase+"/routes/:id", h.HandleDeleteRoute, auth...))
+	mustReg(router.POST(adminBase+"/routes/:id/enable", h.HandleEnableRoute, auth...))
+	mustReg(router.POST(adminBase+"/routes/:id/disable", h.HandleDisableRoute, auth...))
+	mustReg(router.GET(adminBase+"/upstreams", h.HandleListUpstreams, auth...))
+	mustReg(router.GET(adminBase+"/stats", h.HandleGetStats, auth...))
+	mustReg(router.GET(adminBase+"/stats/routes", h.HandleGetRouteStats, auth...))
+	mustReg(router.GET(adminBase+"/config", h.HandleGetConfig, auth...))
+	mustReg(router.GET(adminBase+"/discovery/services", h.HandleListDiscoveredServices, auth...))
+	mustReg(router.POST(adminBase+"/discovery/refresh", h.HandleRefreshDiscovery, auth...))
+	mustReg(router.GET(adminBase+"/discovery/debug", h.HandleDebugDiscovery, auth...))
+	mustReg(router.POST(adminBase+"/discovery/register", h.HandleRegisterService, auth...))
+	mustReg(router.DELETE(adminBase+"/discovery/services/:name", h.HandleDeregisterService, auth...))
 
 	// FARP v1 push protocol endpoints (spec section 17.4).
 	// Services POST to these endpoints to push-register with the gateway.
@@ -177,7 +180,7 @@ func registerAdminRoutes(gw *bastion.Gateway, router forge.Router, hub *api.Hub,
 	mustReg(router.DELETE("/_farp/v1/deregister/:id", h.HandleFARPDeregister, forge.WithSchemaExclude()))
 
 	if hub != nil {
-		mustReg(router.GET(cfg.Dashboard.BasePath+"/ws", h.HandleWebSocket))
+		mustReg(router.GET(cfg.Dashboard.BasePath+"/ws", h.HandleWebSocket, auth...))
 	}
 }
 

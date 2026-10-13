@@ -3,6 +3,8 @@ package bastion
 import (
 	"time"
 
+	"github.com/xraph/forge"
+
 	disc "github.com/xraph/bastion/discovery"
 	"github.com/xraph/bastion/health"
 	"github.com/xraph/bastion/middleware"
@@ -286,6 +288,27 @@ type DashboardConfig struct {
 	Title string `json:"title,omitempty" yaml:"title"`
 	// Realtime gates the WebSocket hub.
 	Realtime bool `json:"realtime" yaml:"realtime"`
+
+	// AdminToken, when set, is the bearer token every admin API request
+	// has to carry ("Authorization: Bearer <token>"). It covers the REST
+	// API under BasePath+"/api" and the WebSocket hub. It is never written
+	// out as JSON, so the admin config endpoint doesn't hand it back.
+	AdminToken string `json:"-" yaml:"admin_token"`
+	// AdminMiddleware runs in front of every admin API handler, after the
+	// AdminToken check. Use it to plug in your own auth: a session check,
+	// an mTLS identity, an authsome guard. Set it with WithAdminMiddleware.
+	AdminMiddleware []forge.Middleware `json:"-" yaml:"-"`
+	// AllowUnauthenticatedAdmin says you mean to serve the admin API with
+	// neither AdminToken nor AdminMiddleware, say behind a private network
+	// or an authenticating proxy. Without it the gateway logs a warning at
+	// start every time it registers an open admin API.
+	AllowUnauthenticatedAdmin bool `json:"allowUnauthenticatedAdmin" yaml:"allow_unauthenticated_admin"`
+}
+
+// AdminAuthenticated reports whether the admin API has any authentication
+// configured: an AdminToken, AdminMiddleware, or both.
+func (d DashboardConfig) AdminAuthenticated() bool {
+	return d.AdminToken != "" || len(d.AdminMiddleware) > 0
 }
 
 // WebSocketConfig holds WebSocket proxy settings.
@@ -646,6 +669,25 @@ func WithDashboard(d DashboardConfig) ConfigOption {
 // WithDashboardEnabled enables/disables the admin dashboard.
 func WithDashboardEnabled(enabled bool) ConfigOption {
 	return func(c *Config) { c.Dashboard.Enabled = enabled }
+}
+
+// WithAdminToken requires "Authorization: Bearer <token>" on every admin
+// API request. See DashboardConfig.AdminToken.
+func WithAdminToken(token string) ConfigOption {
+	return func(c *Config) { c.Dashboard.AdminToken = token }
+}
+
+// WithAdminMiddleware adds middleware in front of every admin API handler,
+// for auth that a static token can't express. Calls accumulate. See
+// DashboardConfig.AdminMiddleware.
+func WithAdminMiddleware(mw ...forge.Middleware) ConfigOption {
+	return func(c *Config) { c.Dashboard.AdminMiddleware = append(c.Dashboard.AdminMiddleware, mw...) }
+}
+
+// WithAllowUnauthenticatedAdmin acknowledges that the admin API runs with
+// no authentication of its own. See DashboardConfig.AllowUnauthenticatedAdmin.
+func WithAllowUnauthenticatedAdmin(allow bool) ConfigOption {
+	return func(c *Config) { c.Dashboard.AllowUnauthenticatedAdmin = allow }
 }
 
 // WithCORS sets the CORS configuration.
