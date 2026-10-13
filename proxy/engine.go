@@ -37,7 +37,10 @@ type Engine struct {
 	tlsMgr *bastion.TLSManager
 
 	transport *http.Transport
-	bufPool   sync.Pool
+	// routeTransports holds the transports for routes with their own
+	// timeouts. See transportFor.
+	routeTransports transportCache
+	bufPool         sync.Pool
 }
 
 // StatsCollector collects gateway-level statistics.
@@ -248,19 +251,7 @@ func NewEngine(
 		tlsConfig.InsecureSkipVerify = true //nolint:gosec // user-configured
 	}
 
-	transport := &http.Transport{
-		DialContext: (&net.Dialer{
-			Timeout:   config.Timeouts.Connect,
-			KeepAlive: 30 * time.Second,
-		}).DialContext,
-		TLSClientConfig:       tlsConfig,
-		MaxIdleConns:          200,
-		MaxIdleConnsPerHost:   50,
-		IdleConnTimeout:       config.Timeouts.Idle,
-		ResponseHeaderTimeout: config.Timeouts.Read,
-		ExpectContinueTimeout: 1 * time.Second,
-		ForceAttemptHTTP2:     true,
-	}
+	transport := newHTTPTransport(config.Timeouts, tlsConfig)
 
 	return &Engine{
 		config:    config,
@@ -475,9 +466,20 @@ func (pe *Engine) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// already been consumed" errors on the client side).
 	tw := &statusTrackingWriter{ResponseWriter: w}
 
+	// A route's own timeouts: connect, read and idle live on its transport,
+	// write bounds sending the request body.
+	transport := pe.transportFor(route)
+
+	if eff, ok := routeTimeouts(route, pe.config.Timeouts); ok {
+		var stop func()
+
+		r, stop = withWriteTimeout(r, eff.Write)
+		defer stop()
+	}
+
 	proxy := &httputil.ReverseProxy{
 		Director:       pe.director(r, route, targetURL),
-		Transport:      pe.transport,
+		Transport:      transport,
 		ModifyResponse: pe.modifyResponse(route, target, cb, start),
 		ErrorHandler:   pe.errorHandler(route, target, cb, tw),
 		BufferPool:     &proxyBufferPool{pool: &pe.bufPool},

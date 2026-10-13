@@ -140,7 +140,7 @@ Keys are the snake_case names below, under `extensions.bastion` or the top-level
 | `strip_prefix` | `bool` | `false` | Remove matched prefix before forwarding |
 | `protocol` | `string` | `"http"` | Proxy protocol: `http`, `websocket`, `sse`, `grpc` |
 | `enabled` | `bool` | `false` | Whether the route is active. A route you don't set to `true` is skipped |
-| `timeout` | `object` | global `timeouts` | Override with `connect`, `read`, `write`, `idle` durations |
+| `timeout` | `object` | global `timeouts` | Override with `connect`, `read`, `write`, `idle` durations. A field you leave out takes the global value, except `write`, which only applies when the route sets it. HTTP routes only |
 | `rate_limit` | `object` | global `rate_limiting` | Override with the same keys as `rate_limiting` |
 | `retry` | `object` | global `retry` | Override with the same keys as `retry` |
 
@@ -149,9 +149,9 @@ Keys are the snake_case names below, under `extensions.bastion` or the top-level
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
 | `connect` | `duration` | `10s` | Upstream connect timeout |
-| `read` | `duration` | `30s` | Upstream read timeout |
-| `write` | `duration` | `30s` | Upstream write timeout |
-| `idle` | `duration` | `90s` | Idle connection timeout |
+| `read` | `duration` | `30s` | How long to wait for the upstream's response headers |
+| `write` | `duration` | `30s` | Not enforced gateway-wide. Set `write` on a route to bound how long sending the request body may take |
+| `idle` | `duration` | `90s` | How long a pooled upstream connection may sit unused |
 
 ### Load balancing (`load_balancing`)
 

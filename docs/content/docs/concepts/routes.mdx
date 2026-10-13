@@ -38,8 +38,8 @@ type RouteConfig struct {
     // Cache sets route-specific response caching policy.
     Cache *CacheConfig
 
-    // Timeout overrides the global upstream timeout for this route.
-    Timeout time.Duration
+    // Timeout overrides the global upstream timeouts for this route.
+    Timeout *TimeoutConfig
 
     // RetryPolicy overrides the global retry configuration for this route.
     RetryPolicy *RetryConfig
@@ -203,10 +203,17 @@ bastion.RouteConfig{
 
 ```go
 bastion.RouteConfig{
-    Path:    "/reports/*",
-    Timeout: 60 * time.Second,
+    Path: "/reports/*",
+    Timeout: &bastion.TimeoutConfig{
+        Read:  60 * time.Second,
+        Write: 2 * time.Minute,
+    },
 }
 ```
+
+`Read` is how long the gateway waits for the upstream's response headers, `Connect` bounds the dial, and `Idle` is how long a pooled connection may sit unused. A field you leave at zero takes the gateway-wide value from `timeouts`. `Write` bounds how long sending the request body upstream may take, so a client that stalls mid-upload can't hold the request open. It only applies when the route sets it. A route that hits a timeout answers 502.
+
+These apply to HTTP routes. WebSocket, SSE and gRPC traffic is long-lived and doesn't read them: WebSocket dials use `web_socket.handshake_timeout`, gRPC uses the gateway-wide `connect` and `idle` plus the `Grpc-Timeout` header the client sends, and SSE has fixed settings of its own.
 
 ### Retry policy
 
