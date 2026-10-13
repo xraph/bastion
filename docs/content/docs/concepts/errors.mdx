@@ -170,8 +170,8 @@ When a timeout occurs:
 
 1. The upstream connection is closed
 2. The failure is recorded for circuit breaker and passive health tracking
-3. If a retry policy is configured, the request is retried with the next target
-4. If all retries are exhausted, `504 Gateway Timeout` is returned to the client
+3. If the retry policy covers the request, it is sent again to the same target (see below)
+4. If no attempt succeeds, `502 Bad Gateway` is returned to the client
 5. The `OnError` hook is called with `bastion.ErrUpstreamTimeout`
 
 ## Circuit breaker errors
@@ -219,36 +219,47 @@ bastion.WithCircuitBreaker(bastion.CircuitBreakerConfig{
 
 ## Retry behavior on errors
 
-When a retry policy is configured, Bastion automatically retries failed requests:
+The gateway-wide `retry` block is on by default. A route's own `Retry` replaces it for that route.
 
 ```go
-bastion.WithRetry(bastion.RetryConfig{
-    MaxRetries: 3,
-    Strategy:   bastion.RetryExponential,
-    BaseDelay:  100 * time.Millisecond,
-    MaxDelay:   5 * time.Second,
-    Jitter:     true,
+opt := bastion.WithRetry(bastion.RetryConfig{
+    Enabled:          true,
+    MaxAttempts:      3,
+    Backoff:          bastion.BackoffExponential,
+    InitialDelay:     100 * time.Millisecond,
+    MaxDelay:         5 * time.Second,
+    Multiplier:       2.0,
+    Jitter:           true,
+    RetryableStatus:  []int{502, 503, 504},
+    RetryableMethods: []string{"GET", "HEAD", "OPTIONS"},
 })
 ```
 
-### Retryable errors
+`MaxAttempts` counts every attempt, the first one included, so 3 means up to two retries. An attempt is retried when its method is in `RetryableMethods` and its outcome is in `RetryableStatus`. A transport error, such as a refused connection, a dropped connection or a route timeout, counts as `502`. The client gets the last attempt's response.
 
-| Error type | Retried? |
+### What is retried
+
+| Situation | Retried? |
 |-----------|----------|
-| Upstream connection refused | Yes |
-| Upstream timeout | Yes |
-| Circuit breaker open (target-level) | Yes (selects a different target) |
-| 5xx upstream response | Yes |
-| 4xx upstream response | No |
-| Rate limit exceeded | No |
-| Authentication failure | No |
+| Status in `retryable_status` on a method in `retryable_methods` | Yes |
+| Connection refused, dropped, or timed out (counts as `502`) | Yes, when `502` is retryable |
+| Any other status | No |
+| Method not in `retryable_methods` | No |
+| Request body over 1 MiB | No, it is sent once |
+| Target's circuit breaker not closed (open, or half-open probing) | No |
+| WebSocket, SSE and gRPC requests | No |
+| Client gone before the next attempt | No |
+
+Retries go to the same target the request was sent to. A request body up to 1 MiB is held in memory so each attempt sends it whole. Each failed attempt counts toward the target's passive health and, for a transport error, its circuit breaker. `budget_percent` is validated but not enforced.
 
 ### Backoff strategies
 
-| Strategy | Delay pattern |
-|----------|--------------|
-| `RetryExponential` | `baseDelay * 2^attempt` (capped at `maxDelay`) |
-| `RetryLinear` | `baseDelay * attempt` (capped at `maxDelay`) |
-| `RetryFixed` | `baseDelay` (constant delay) |
+The delay before retry *n* (counting from 0) is:
 
-When `Jitter` is enabled, a random value between 0 and the computed delay is added to prevent retry storms across multiple clients.
+| `backoff` | Delay |
+|-----------|-------|
+| `exponential` | `initial_delay * multiplier^n` |
+| `linear` | `initial_delay * (n + 1)` |
+| `fixed` | `initial_delay` |
+
+The delay is capped at `max_delay`. With `jitter` on, it moves by up to 25% either way, so clients that failed together don't retry together.

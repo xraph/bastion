@@ -242,7 +242,7 @@ Keys are the snake_case names below, under `extensions.bastion` or the top-level
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
 | `enabled` | `bool` | `true` | Enable retries |
-| `max_attempts` | `int` | `3` | Maximum attempts (1 to 10) |
+| `max_attempts` | `int` | `3` | Maximum attempts, the first included (1 to 10) |
 | `backoff` | `string` | `"exponential"` | Backoff strategy: `exponential`, `linear`, `fixed` |
 | `initial_delay` | `duration` | `100ms` | Initial delay between retries |
 | `max_delay` | `duration` | `5s` | Maximum delay cap |
@@ -250,7 +250,7 @@ Keys are the snake_case names below, under `extensions.bastion` or the top-level
 | `jitter` | `bool` | `true` | Add randomized jitter to delays |
 | `retryable_status` | `[]int` | `[502, 503, 504]` | Upstream statuses that trigger a retry |
 | `retryable_methods` | `[]string` | `[GET, HEAD, OPTIONS]` | Methods that are safe to retry |
-| `budget_percent` | `float64` | `20` | Retry budget as a percentage (0 to 100) |
+| `budget_percent` | `float64` | `20` | Retry budget as a percentage (0 to 100). Validated, not enforced yet |
 
 ### Cache (`caching`)
 

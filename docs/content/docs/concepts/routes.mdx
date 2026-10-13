@@ -296,7 +296,7 @@ route := bastion.RouteConfig{
 }
 ```
 
-The route's `Retry` replaces the global `retry` block for that route. Note that the proxy doesn't retry requests yet: the retry policy is stored and validated, but nothing in the request path acts on it.
+The route's `Retry` replaces the global `retry` block for that route, as a whole. A failed attempt is sent again to the same target while its method is in `RetryableMethods`, its status (a transport error counts as 502) is in `RetryableStatus`, and `MaxAttempts` isn't used up. Bodies up to 1 MiB are replayed; larger ones, and WebSocket, SSE and gRPC requests, are sent once. See [retry behavior](/docs/concepts/errors#retry-behavior-on-errors).
 
 ## YAML route configuration
 

@@ -40,7 +40,10 @@ type Engine struct {
 	// routeTransports holds the transports for routes with their own
 	// timeouts. See transportFor.
 	routeTransports transportCache
-	bufPool         sync.Pool
+	// retry decides whether a failed attempt is sent again. Nil sends
+	// every request once.
+	retry   bastion.RetryPolicy
+	bufPool sync.Pool
 }
 
 // StatsCollector collects gateway-level statistics.
@@ -477,9 +480,31 @@ func (pe *Engine) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		defer stop()
 	}
 
+	var roundTripper http.RoundTripper = transport
+
+	// Retries need a body that can be sent again: none, or one small
+	// enough to hold in memory. A bigger body goes upstream once.
+	if pe.retry != nil && mayRetry(effectiveRetry(route, pe.config.Retry), r.Method) {
+		body, replayable, err := bufferBody(r, maxReplayBody)
+		if err != nil {
+			cb.ReleaseProbe()
+			pe.stats.RecordError(route.ID)
+			http.Error(w, `{"error":"failed to read request body"}`, http.StatusBadGateway)
+
+			return
+		}
+
+		if replayable {
+			roundTripper = &retryTransport{
+				base: transport, policy: pe.retry, pe: pe,
+				route: route, target: target, cb: cb, body: body,
+			}
+		}
+	}
+
 	proxy := &httputil.ReverseProxy{
 		Director:       pe.director(r, route, targetURL),
-		Transport:      transport,
+		Transport:      roundTripper,
 		ModifyResponse: pe.modifyResponse(route, target, cb, start),
 		ErrorHandler:   pe.errorHandler(route, target, cb, tw),
 		BufferPool:     &proxyBufferPool{pool: &pe.bufPool},
@@ -611,9 +636,13 @@ func (pe *Engine) errorHandler(route *bastion.Route, target *bastion.Target, cb 
 			forge.F("error", err),
 		)
 
-		cb.RecordFailure()
+		// The retry loop has already counted a failure it gave up on.
+		if !isAccounted(err) {
+			cb.RecordFailure()
+			pe.hm.RecordPassiveFailure(target.ID)
+		}
+
 		pe.stats.RecordError(route.ID)
-		pe.hm.RecordPassiveFailure(target.ID)
 
 		// If the proxy already started writing the response (headers
 		// flushed), we cannot write an error body. Signal the client
