@@ -110,6 +110,11 @@ type retryTransport struct {
 	target *bastion.Target
 	cb     bastion.Breaker
 	body   []byte // the buffered request body, nil when there is none
+
+	// budget caps retries to budgetPercent of the target's recent
+	// requests. Nil leaves retries unlimited.
+	budget        *retryBudget
+	budgetPercent float64
 }
 
 func (t *retryTransport) RoundTrip(req *http.Request) (*http.Response, error) {
@@ -125,6 +130,13 @@ func (t *retryTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 		if req.Context().Err() != nil ||
 			t.cb.State() != bastion.CircuitClosed ||
 			!t.policy.ShouldRetry(req.Method, status, attempt, t.route.Retry) {
+			return resp, err
+		}
+
+		// Over budget: the client gets this attempt, as if it were the last.
+		if t.budget != nil && !t.budget.tryRetry(t.pe.now(), t.budgetPercent) {
+			t.pe.stats.RecordRetryBudgetExhausted()
+
 			return resp, err
 		}
 

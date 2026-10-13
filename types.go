@@ -349,19 +349,21 @@ type GatewayStats struct {
 	// P99LatencyMs is the nearest-rank p99 over the most recent LatencySamples responses.
 	P99LatencyMs float64 `json:"p99LatencyMs"`
 	// LatencySamples is how many recent responses P99LatencyMs covers.
-	LatencySamples   int                    `json:"latencySamples"`
-	RequestsPerSec   float64                `json:"requestsPerSec"`
-	CacheHits        int64                  `json:"cacheHits"`
-	CacheMisses      int64                  `json:"cacheMisses"`
-	RateLimited      int64                  `json:"rateLimited"`
-	CircuitBreaks    int64                  `json:"circuitBreaks"`
-	RetryAttempts    int64                  `json:"retryAttempts"`
-	TotalRoutes      int                    `json:"totalRoutes"`
-	HealthyUpstreams int                    `json:"healthyUpstreams"`
-	TotalUpstreams   int                    `json:"totalUpstreams"`
-	RouteStats       map[string]*RouteStats `json:"routeStats,omitempty"`
-	Uptime           int64                  `json:"uptime"`
-	StartedAt        time.Time              `json:"startedAt"`
+	LatencySamples int     `json:"latencySamples"`
+	RequestsPerSec float64 `json:"requestsPerSec"`
+	CacheHits      int64   `json:"cacheHits"`
+	CacheMisses    int64   `json:"cacheMisses"`
+	RateLimited    int64   `json:"rateLimited"`
+	CircuitBreaks  int64   `json:"circuitBreaks"`
+	RetryAttempts  int64   `json:"retryAttempts"`
+	// RetryBudgetExhausted counts retries the retry budget refused.
+	RetryBudgetExhausted int64                  `json:"retryBudgetExhausted"`
+	TotalRoutes          int                    `json:"totalRoutes"`
+	HealthyUpstreams     int                    `json:"healthyUpstreams"`
+	TotalUpstreams       int                    `json:"totalUpstreams"`
+	RouteStats           map[string]*RouteStats `json:"routeStats,omitempty"`
+	Uptime               int64                  `json:"uptime"`
+	StartedAt            time.Time              `json:"startedAt"`
 }
 
 // RouteStats holds per-route traffic statistics.

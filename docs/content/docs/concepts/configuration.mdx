@@ -256,7 +256,7 @@ Keys are the snake_case names below, under `extensions.bastion` or the top-level
 | `jitter` | `bool` | `true` | Add randomized jitter to delays |
 | `retryable_status` | `[]int` | `[502, 503, 504]` | Upstream statuses that trigger a retry |
 | `retryable_methods` | `[]string` | `[GET, HEAD, OPTIONS]` | Methods that are safe to retry |
-| `budget_percent` | `float64` | `20` | Retry budget as a percentage (0 to 100). Validated, not enforced yet |
+| `budget_percent` | `float64` | `20` | Cap on retries as a percentage of each target's requests over the last 10s, with a floor of 3 retries per window. `0` is unlimited |
 
 ### Cache (`caching`)
 

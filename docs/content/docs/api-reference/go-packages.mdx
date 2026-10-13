@@ -297,6 +297,7 @@ type GatewayStats struct {
     RateLimited      int64
     CircuitBreaks    int64
     RetryAttempts    int64
+    RetryBudgetExhausted int64 // retries the retry budget refused
     TotalRoutes      int
     HealthyUpstreams int
     TotalUpstreams   int

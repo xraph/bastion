@@ -250,7 +250,15 @@ opt := bastion.WithRetry(bastion.RetryConfig{
 | WebSocket, SSE and gRPC requests | No |
 | Client gone before the next attempt | No |
 
-Retries go to the same target the request was sent to. A request body up to 1 MiB is held in memory so each attempt sends it whole. Each failed attempt counts toward the target's passive health and, for a transport error, its circuit breaker. `budget_percent` is validated but not enforced.
+Retries go to the same target the request was sent to. A request body up to 1 MiB is held in memory so each attempt sends it whole. Each failed attempt counts toward the target's passive health and, for a transport error, its circuit breaker.
+
+### Retry budget
+
+`budget_percent` caps retries to that share of a target's recent traffic, so an upstream that starts failing isn't sent a multiple of its normal load. With the default of 20, retries to a target may be at most 20% of the requests it received over the last 10 seconds. Every request to the target counts, whether it could be retried or not.
+
+A few retries are always allowed: each target gets at least 3 retries per 10-second window, whatever the percentage says. Without that floor a quiet target could never retry, since one retry after one request is already 100% of its traffic.
+
+The budget is kept per target, the same key the circuit breakers use, because a retry goes back to the target that failed. When the budget refuses a retry, the client gets that attempt's response as the last one, and the refusal is counted in the gateway stats as `retryBudgetExhausted`. A route's own `Retry` block brings its own `BudgetPercent`. Set it to `0` for unlimited retries.
 
 ### Backoff strategies
 

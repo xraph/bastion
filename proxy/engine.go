@@ -45,7 +45,11 @@ type Engine struct {
 	retry bastion.RetryPolicy
 	// traffic applies routes' traffic policies. Nil leaves every target
 	// a candidate and mirrors nothing.
-	traffic     bastion.TrafficRouter
+	traffic bastion.TrafficRouter
+	// budgets holds a *retryBudget per target ID. See retryBudget.
+	budgets sync.Map
+	// clock replaces time.Now for the retry budget in tests.
+	clock       func() time.Time
 	mirrorSlots chan struct{}
 	bufPool     sync.Pool
 }
@@ -60,6 +64,7 @@ type StatsCollector struct {
 	rateLimited   int64
 	circuitBreaks int64
 	retryAttempts int64
+	budgetRefused int64
 	startedAt     time.Time
 	routeStats    map[string]*bastion.RouteStats
 	latency       *latencyTrack
@@ -89,12 +94,14 @@ func (sc *StatsCollector) Snapshot(routes []*bastion.Route) *bastion.GatewayStat
 		RateLimited:   sc.rateLimited,
 		CircuitBreaks: sc.circuitBreaks,
 		RetryAttempts: sc.retryAttempts,
-		AvgLatencyMs:  sc.latency.avgMs(),
-		P99LatencyMs:  sc.latency.p99Ms(),
-		TotalRoutes:   len(routes),
-		StartedAt:     sc.startedAt,
-		Uptime:        int64(time.Since(sc.startedAt).Seconds()),
-		RouteStats:    make(map[string]*bastion.RouteStats),
+
+		RetryBudgetExhausted: sc.budgetRefused,
+		AvgLatencyMs:         sc.latency.avgMs(),
+		P99LatencyMs:         sc.latency.p99Ms(),
+		TotalRoutes:          len(routes),
+		StartedAt:            sc.startedAt,
+		Uptime:               int64(time.Since(sc.startedAt).Seconds()),
+		RouteStats:           make(map[string]*bastion.RouteStats),
 
 		LatencySamples: sc.latency.samples(),
 	}
@@ -212,6 +219,14 @@ func (sc *StatsCollector) RecordCircuitBreak() {
 	defer sc.mu.Unlock()
 
 	sc.circuitBreaks++
+}
+
+// RecordRetryBudgetExhausted records a retry the retry budget refused.
+func (sc *StatsCollector) RecordRetryBudgetExhausted() {
+	sc.mu.Lock()
+	defer sc.mu.Unlock()
+
+	sc.budgetRefused++
 }
 
 // RecordRetryAttempt records a retry attempt.
@@ -490,8 +505,17 @@ func (pe *Engine) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Retries and mirroring both send the body more than once, so it has
 	// to be replayable: none, or one small enough to hold in memory. A
 	// bigger body goes upstream once and isn't mirrored.
-	retryable := pe.retry != nil && mayRetry(effectiveRetry(route, pe.config.Retry), r.Method)
+	retryCfg := effectiveRetry(route, pe.config.Retry)
+	retryable := pe.retry != nil && mayRetry(retryCfg, r.Method)
 	mirrorTo := pe.mirrorTarget(route)
+
+	// Every request to the target counts toward its retry budget, retried
+	// or not, since the budget is a share of the target's traffic.
+	var budget *retryBudget
+	if pe.retry != nil && retryCfg.Enabled && retryCfg.BudgetPercent > 0 {
+		budget = pe.budgetFor(target.ID)
+		budget.recordRequest(pe.now())
+	}
 
 	if retryable || mirrorTo != nil {
 		body, replayable, err := bufferBody(r, maxReplayBody)
@@ -507,6 +531,7 @@ func (pe *Engine) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			roundTripper = &retryTransport{
 				base: transport, policy: pe.retry, pe: pe,
 				route: route, target: target, cb: cb, body: body,
+				budget: budget, budgetPercent: retryCfg.BudgetPercent,
 			}
 		}
 
