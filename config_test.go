@@ -16,6 +16,12 @@ func TestDefaultConfig(t *testing.T) {
 		t.Error("expected default health check interval")
 	}
 
+	// An empty path makes the monitor probe health.DefaultPath leniently,
+	// so an upstream that doesn't serve it keeps its route.
+	if config.HealthCheck.Path != "" {
+		t.Errorf("default health check path = %q, want empty", config.HealthCheck.Path)
+	}
+
 	if config.LoadBalancing.Strategy == "" {
 		t.Error("expected default load balancing strategy")
 	}

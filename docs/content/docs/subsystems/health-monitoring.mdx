@@ -26,7 +26,7 @@ bastion.WithHealthCheck(bastion.HealthCheckConfig{
 |-------|------|---------|-------------|
 | `Enabled` | `bool` | `true` | Enable or disable health monitoring |
 | `Interval` | `time.Duration` | `10s` | Time between active health check probes |
-| `Path` | `string` | `/_/health` | HTTP path to probe on each target |
+| `Path` | `string` | empty | HTTP path to probe on each target. Empty probes `/_/health` leniently, see below |
 | `Timeout` | `time.Duration` | `5s` | Maximum time to wait for a health check response |
 | `FailureThreshold` | `int` | `3` | Consecutive failed probes before marking a target unhealthy |
 | `SuccessThreshold` | `int` | `2` | Consecutive successful probes before marking a target healthy again |
@@ -43,6 +43,15 @@ The health monitor runs a background loop that sends HTTP GET requests to each r
 2. A response with status code 200-399 is considered healthy.
 3. Any other status code, connection error, or timeout is considered unhealthy.
 4. The monitor tracks consecutive successes and failures per target.
+
+### When you don't set a path
+
+If you leave `Path` empty and the target has no `health_check_path` of its own, the monitor still probes `/_/health` (the path Forge services serve). It just judges the answer more loosely, because nobody told it that path exists on the upstream:
+
+- Any status below 500 counts as healthy. An upstream that answers `/_/health` with a 404 keeps its route.
+- A 5xx, a refused connection or a timeout still counts as a failure.
+
+Set `Path` (or `health_check_path` on the target) and you get the strict rule above. Before this, `Path` defaulted to `/_/health` with the strict rule, so a route to anything that didn't serve that path went down after three probes.
 
 ### State Transitions
 

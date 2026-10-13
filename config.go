@@ -343,11 +343,13 @@ func DefaultConfig() Config {
 			Burst:          100,
 			PerClient:      false,
 		},
+		// HealthCheck.Path is left empty on purpose: the monitor then probes
+		// health.DefaultPath leniently, so an upstream that doesn't serve it
+		// (and answers 404) keeps its route. See health.Config.
 		HealthCheck: HealthCheckConfig{
 			Enabled:              true,
 			Interval:             10 * time.Second,
 			Timeout:              5 * time.Second,
-			Path:                 "/_/health",
 			FailureThreshold:     3,
 			SuccessThreshold:     2,
 			EnablePassive:        true,

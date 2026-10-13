@@ -241,15 +241,7 @@ func (hm *Monitor) checkTarget(ctx context.Context, mt *monitoredTarget) {
 	checkCtx, cancel := context.WithTimeout(ctx, hm.config.Timeout)
 	defer cancel()
 
-	// Use per-target health path if the target provides one; otherwise fall
-	// back to the global monitor path.
-	healthPath := hm.config.Path
-	if hp, ok := mt.target.(HealthPathProvider); ok {
-		if p := hp.HealthPath(); p != "" {
-			healthPath = p
-		}
-	}
-
+	healthPath, explicit := hm.probePath(mt.target)
 	url := mt.target.GetURL() + healthPath
 
 	req, err := http.NewRequestWithContext(checkCtx, http.MethodGet, url, nil)
@@ -277,11 +269,41 @@ func (hm *Monitor) checkTarget(ctx context.Context, mt *monitoredTarget) {
 		_ = resp.Body.Close()
 	}()
 
-	if resp.StatusCode >= 200 && resp.StatusCode < 400 {
+	if probeHealthy(resp.StatusCode, explicit) {
 		hm.handleCheckSuccess(mt)
 	} else {
 		hm.handleCheckFailure(mt, fmt.Errorf("unhealthy status: %d", resp.StatusCode))
 	}
+}
+
+// probeHealthy judges a probe response. An explicitly configured health
+// path has to answer 200-399. The implicit DefaultPath only has to answer
+// below 500: a 404 from a service that never served DefaultPath says the
+// upstream is up, and is no reason to take its route down.
+func probeHealthy(status int, explicit bool) bool {
+	if explicit {
+		return status >= 200 && status < 400
+	}
+
+	return status < 500
+}
+
+// probePath returns the path to probe on target and whether it was
+// configured explicitly: the target's own health path first, then
+// Config.Path. When neither is set it falls back to DefaultPath and
+// reports false.
+func (hm *Monitor) probePath(target Target) (string, bool) {
+	if hp, ok := target.(HealthPathProvider); ok {
+		if p := hp.HealthPath(); p != "" {
+			return p, true
+		}
+	}
+
+	if hm.config.Path != "" {
+		return hm.config.Path, true
+	}
+
+	return DefaultPath, false
 }
 
 func (hm *Monitor) handleCheckSuccess(mt *monitoredTarget) {

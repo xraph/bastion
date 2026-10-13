@@ -2,7 +2,20 @@ package health
 
 import "time"
 
+// DefaultPath is the path probed when neither Config.Path nor the target
+// names one. It is the path Forge services serve their health on.
+const DefaultPath = "/_/health"
+
 // Config configures upstream health checking.
+//
+// Path is the health endpoint probed on every target that does not name
+// its own (see HealthPathProvider). Leave it empty and the monitor still
+// probes DefaultPath, but more leniently: any status below 500 counts as
+// up, so an upstream that doesn't serve DefaultPath (and answers 404 or
+// 401) keeps its route. A 5xx, a refused connection or a timeout still
+// counts as a failure, which keeps a Forge service reporting 503 on its
+// health endpoint out of rotation. Set Path, or give the target a health
+// path, and the probe is strict: a status outside 200-399 fails it.
 type Config struct {
 	Enabled              bool          `json:"enabled" yaml:"enabled"`
 	Interval             time.Duration `json:"interval" yaml:"interval"`
