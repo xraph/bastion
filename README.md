@@ -1,302 +1,293 @@
-# Forge Gateway Extension
+<p align="center">
+  <img src="assets/readme-banner.svg" alt="Bastion, an API gateway for Go that runs as a Forge extension, with load balancing and service discovery" width="100%">
+</p>
 
-Production-grade API gateway extension for [Forge](https://github.com/xraph/forge) that turns any Forge application into a feature-complete reverse proxy with automatic service discovery, multi-protocol support, and an admin dashboard in the Forge dashboard shell.
+# Bastion: API gateway for Go and Forge
 
-## Features
+Bastion is an API gateway and reverse proxy written in Go that runs as an extension inside a [Forge](https://github.com/xraph/forge) app. It proxies HTTP, WebSocket, SSE and gRPC traffic to your upstream services, builds routes from config, from an admin API or from FARP service discovery, and adds load balancing, circuit breakers, retries, health checks, rate limiting, traffic splitting (canary, blue-green, A/B, mirror), authentication, response caching and OpenAPI aggregation. Bastion replaced Forge's old `extensions/gateway` package and lives in its own module.
 
-- **Multi-protocol proxying**: HTTP, WebSocket, SSE (Server-Sent Events), gRPC (unary + streaming)
-- **Automatic service discovery**: FARP-based schema-driven route generation from OpenAPI, AsyncAPI, GraphQL descriptors
-- **Manual route configuration**: Static routes via config file or admin API
-- **Load balancing**: Round-robin, weighted round-robin, random, least-connections, consistent hash
-- **Circuit breakers**: Per-target three-state (closed/open/half-open) circuit breakers
-- **Health monitoring**: Active HTTP probes + passive failure tracking with configurable thresholds
-- **Rate limiting**: Token-bucket algorithm (global, per-route, per-client)
-- **Retry with backoff**: Exponential, linear, fixed backoff with jitter and retry budgets
-- **Traffic splitting**: Canary, blue-green, A/B testing, shadow/mirror traffic
-- **Authentication**: API key, Bearer token, forward auth -- integrates with Forge auth extension
-- **Response caching**: In-memory or external cache store, per-route policies, Cache-Control respect
-- **TLS/mTLS**: Upstream TLS with CA certs, client certs for mTLS, auto cert reloading
-- **Request/response transformation**: Path rewriting, header manipulation, prefix stripping
-- **CORS and IP filtering**: Gateway-level security policies
-- **Observability**: Prometheus metrics, structured access logging, OpenTelemetry trace propagation
-- **Admin dashboard**: React plugin for the Forge dashboard shell, with overview, routes (create, edit, disable, delete) and upstreams pages
-- **Admin REST API**: Full CRUD for routes, upstreams, stats, and configuration
-- **Hot-reload**: Configuration changes applied without restart
-- **OpenAPI aggregation**: Unified OpenAPI spec from all upstream services via FARP, Swagger UI, per-service specs
-- **Hook system**: Extensible OnRequest/OnResponse/OnError/OnRouteChange/OnUpstreamHealth hooks
+[![Go 1.26+](https://img.shields.io/badge/Go-1.26%2B-00ADD8?logo=go&logoColor=white)](https://go.dev/dl/) [![CI](https://github.com/xraph/bastion/actions/workflows/ci.yml/badge.svg)](https://github.com/xraph/bastion/actions/workflows/ci.yml) [![Go Reference](https://pkg.go.dev/badge/github.com/xraph/bastion.svg)](https://pkg.go.dev/github.com/xraph/bastion) [![GitHub Stars](https://img.shields.io/github/stars/xraph/bastion?style=flat)](https://github.com/xraph/bastion/stargazers)
 
-## Quick Start
+[Documentation](https://www.xraph.com/docs/bastion) · [Quick start](#quick-start) · [Features](#why-bastion) · [Routes](#routes) · [Discovery](#service-discovery-with-farp) · [Admin API](#admin-api) · [Configuration](#configuration) · [FAQ](#faq)
+
+## Quick start
+
+You need [Go 1.26 or later](https://go.dev/dl/).
+
+```bash
+go get github.com/xraph/bastion@latest
+go get github.com/xraph/forge/extensions/discovery@latest
+```
+
+Save this as `main.go`. It sends everything under `/users/` to a service on port 9100:
 
 ```go
 package main
 
 import (
-    "github.com/xraph/forge"
-    "github.com/xraph/forge/extensions/gateway"
+	"log"
+
+	"github.com/xraph/bastion"
+	"github.com/xraph/bastion/gateway"
+	"github.com/xraph/forge"
+	"github.com/xraph/forge/extensions/discovery"
 )
 
 func main() {
-    app := forge.NewApp(forge.AppConfig{
-        Name:    "api-gateway",
-        Version: "1.0.0",
-        Extensions: []forge.Extension{
-            gateway.NewExtension(
-                gateway.WithRoute(gateway.RouteConfig{
-                    Path:    "/users/*",
-                    Targets: []gateway.TargetConfig{
-                        {URL: "http://user-service:8080", Weight: 1},
-                    },
-                    StripPrefix: true,
-                    Protocol:    gateway.ProtocolHTTP,
-                    Enabled:     true,
-                }),
-                gateway.WithRoute(gateway.RouteConfig{
-                    Path:    "/orders/*",
-                    Targets: []gateway.TargetConfig{
-                        {URL: "http://order-service:8080", Weight: 1},
-                    },
-                    StripPrefix: true,
-                    Protocol:    gateway.ProtocolHTTP,
-                    Enabled:     true,
-                }),
-            ),
-        },
-    })
+	app := forge.NewApp(forge.AppConfig{
+		Name:        "edge",
+		HTTPAddress: ":8080",
+		Extensions: []forge.Extension{
+			discovery.NewExtension(discovery.WithBackend("memory")),
+			gateway.New(
+				bastion.WithRoute(bastion.RouteConfig{
+					Path:        "/users/*",
+					Targets:     []bastion.TargetConfig{{URL: "http://localhost:9100", Weight: 1}},
+					StripPrefix: true,
+					Enabled:     true,
+				}),
+				bastion.WithAdminToken("change-me"),
+			),
+		},
+	})
 
-    app.Run()
+	if err := app.Run(); err != nil {
+		log.Fatal(err)
+	}
 }
 ```
 
-## With FARP Auto-Discovery
+Start any HTTP service on port 9100 (`python3 -m http.server 9100` will do), then run the gateway:
+
+```bash
+go mod tidy
+go run .
+```
+
+From another terminal:
+
+```bash
+curl -i http://localhost:8080/users/42
+# the upstream sees GET /42, and the response carries X-Gateway-Route: manual-/users/*
+
+curl -H "Authorization: Bearer change-me" http://localhost:8080/gateway/api/routes
+```
+
+The second call lists the routes the gateway knows about, including your manual one and anything discovery found. Without the token it answers 401.
+
+The gateway lists Forge's `discovery` extension as a dependency, which is why the example registers it with the in-memory backend. Leave it out and Bastion logs a warning and serves only your configured and admin-created routes.
+
+## Why Bastion?
+
+You already run your services on Forge, and the usual next step is putting nginx, Envoy or Kong in front of them, with a second config language and a second deploy. Bastion is the gateway as one more extension in a Forge app, so it uses the same config files, logger, metrics, health checks and container as the services behind it, and you can hook into requests with plain Go functions.
+
+| You need | Bastion gives you |
+| --- | --- |
+| A reverse proxy for every protocol | HTTP, WebSocket, SSE, gRPC and GraphQL routes, each with path rewriting, prefix stripping and header policies |
+| Routes that follow your services | FARP discovery that builds routes from what your services publish, with a prefix per service, plus a push registration endpoint |
+| Spreading load | Round robin, weighted round robin, random, least connections and consistent hashing |
+| Not hammering a sick upstream | Per-target circuit breakers, active health probes and passive failure tracking |
+| Retrying safely | Exponential, linear or fixed backoff with jitter, a retry budget, and retries only on idempotent methods and 502, 503 and 504 by default |
+| Releasing gradually | Canary, blue-green, A/B and weighted splits by header, cookie, weight or IP range, plus traffic mirroring |
+| Guarding the edge | API key, bearer token, forward auth and JWT providers, IP allow and deny lists, CORS, and TLS or mTLS to upstreams; a WAF ships as a plugin (`security.NewWAFPlugin`) you attach with the `plugin` package |
+| Cutting load on upstreams | Token-bucket rate limiting (global, per route, per client) and in-memory response caching |
+| One API reference | OpenAPI and AsyncAPI specs fetched from your services and merged into one document |
+| Operating it | An admin REST API, a WebSocket event stream, and a contributor for the [Forge dashboard](https://github.com/xraph/forge-dashboard) |
+
+## Routes
+
+A route matches a path (and optionally methods) and sends the request to one or more targets:
 
 ```go
-app := forge.NewApp(forge.AppConfig{
-    Name: "api-gateway",
-    Extensions: []forge.Extension{
-        // Discovery extension enables FARP
-        discovery.NewExtension(
-            discovery.WithEnabled(true),
-            discovery.WithBackend("consul"),
-        ),
-        // Gateway auto-discovers services
-        gateway.NewExtension(
-            gateway.WithDiscoveryEnabled(true),
-            gateway.WithDashboardEnabled(true),
-        ),
-    },
+bastion.WithRoute(bastion.RouteConfig{
+	Path:        "/orders/*",
+	Methods:     []string{"GET", "POST"},
+	Targets: []bastion.TargetConfig{
+		{URL: "http://orders-a:8080", Weight: 3},
+		{URL: "http://orders-b:8080", Weight: 1},
+	},
+	StripPrefix: true,
+	Protocol:    bastion.ProtocolHTTP,
+	Enabled:     true,
 })
 ```
 
-## Configuration
+You set `Protocol` to `ProtocolHTTP`, `ProtocolWebSocket`, `ProtocolSSE`, `ProtocolGRPC` or `ProtocolGraphQL`. If one route needs different behaviour from the rest, you can give it its own `Retry`, `Timeout`, `RateLimit`, `Auth`, `Cache` and `TrafficPolicy`, and you change what the upstream sees with `AddPrefix`, `RewritePath` and `Headers`.
 
-### Programmatic Configuration
+Every proxied response carries an `X-Gateway-Route` header naming the route that matched. Check it first when a request lands somewhere you didn't expect.
+
+Routes come from three places. You write manual routes with `WithRoute`, `WithRoutes` or the `routes` key in your config. Discovery routes come from FARP and get rebuilt on every update. And you or your operators can create routes through the REST API or the dashboard. You can only edit manual and admin-created routes through the admin API, because discovery would overwrite anything you changed on its routes the next time it ran.
+
+## Service discovery with FARP
+
+Turn discovery on and Bastion asks Forge's discovery extension (Consul, etcd, Kubernetes, Eureka, mDNS or memory) for services, then reads the routes each one publishes through [FARP](https://github.com/xraph/farp). By default each service gets the prefix `/{{.ServiceName}}`, which is stripped before the request goes upstream:
 
 ```go
-gateway.NewExtension(
-    gateway.WithBasePath("/api"),
-    gateway.WithLoadBalancing(gateway.LoadBalancingConfig{
-        Strategy: gateway.LBWeightedRoundRobin,
-    }),
-    gateway.WithCircuitBreaker(gateway.CircuitBreakerConfig{
-        Enabled:          true,
-        FailureThreshold: 5,
-        ResetTimeout:     30 * time.Second,
-    }),
-    gateway.WithRateLimiting(gateway.RateLimitConfig{
-        Enabled:        true,
-        RequestsPerSec: 1000,
-        Burst:          100,
-        PerClient:      true,
-    }),
-    gateway.WithHealthCheck(gateway.HealthCheckConfig{
-        Enabled:  true,
-        Interval: 10 * time.Second,
-        Path:     "/health",
-    }),
-)
+discovery.NewExtension(
+	discovery.WithBackend("consul"),
+	discovery.WithConsul("localhost:8500", ""),
+),
+gateway.New(
+	bastion.WithDiscoveryEnabled(true),
+	bastion.WithDiscoveryPrefixTemplate("/api/{{.ServiceName}}"),
+),
 ```
 
-### File-based Configuration (YAML/JSON)
+Discovery polls every 30 seconds. You can filter which services become routes with `WithDiscoveryServiceFilters`, rename prefixes with `WithDiscoveryPrefixOverrides`, and keep other Forge extensions' paths out with `WithExtensionFilter`. Services can also push-register themselves at `POST /_farp/v1/register`, with heartbeats at `PUT /_farp/v1/heartbeat/:id`.
 
-The gateway loads config from Forge's ConfigManager under the `extensions.bastion` key, or the top-level `bastion` key. Keys use the snake_case names below:
+If your services publish OpenAPI through FARP, Bastion fetches their specs and merges them into one document at `/gateway/openapi.json`, with per-service specs under `/gateway/api/openapi/services`. Your API consumers get one reference for everything behind the gateway. Turn on `WithOpenAPIRootDocs(true)` if you also want the merged spec at `/openapi.json` and Swagger UI at `/docs`.
 
-```yaml
-bastion:
-  enabled: true
-  base_path: "/api"
-  routes:
-    - path: "/users/*"
-      targets:
-        - url: "http://user-service:8080"
-          weight: 1
-      strip_prefix: true
-      protocol: http
-      enabled: true
-  circuit_breaker:
-    enabled: true
-    failure_threshold: 5
-    reset_timeout: 30s
-  rate_limiting:
-    enabled: true
-    requests_per_sec: 1000
-    burst: 100
-  health_check:
-    enabled: true
-    interval: 10s
-    path: "/health"
-  discovery:
-    enabled: true
-    watch_mode: true
-    auto_prefix: true
-    prefix_template: "/{{.ServiceName}}"
-  dashboard:
-    enabled: true
-    base_path: "/gateway"
-    realtime: true
+## Hooks and auth providers
+
+`Hooks()` gives you `OnRequest`, `OnResponse`, `OnError`, `OnRouteChange`, `OnUpstreamHealth` and `OnCircuitBreak`. The hook engine exists once the app has registered the gateway, so add your hooks in a Forge lifecycle hook:
+
+```go
+gw := gateway.New(bastion.WithRoutes(routes))
+
+app := forge.NewApp(forge.AppConfig{Name: "edge", Extensions: []forge.Extension{gw}})
+
+err := app.RegisterHookFn(forge.PhaseAfterRegister, "bastion-hooks", func(ctx context.Context, app forge.App) error {
+	gw.Hooks().OnRequest(func(r *http.Request, route *bastion.Route) error {
+		r.Header.Set("X-Edge", "bastion")
+		return nil
+	})
+	return nil
+})
 ```
+
+If your `OnRequest` hook returns an error, the request stops there. For gateway-level auth, you register a provider from the `security` package with `gw.Auth().RegisterProvider(...)`: `NewAPIKeyAuthProvider`, `NewBearerTokenAuthProvider`, `NewForwardAuthProvider` or `NewJWTAuthProvider`.
+
+## Persist routes in a database
+
+The `gateway` package keeps admin-created routes in memory, so they're gone after a restart, and it doesn't pull in any database driver. If you want them persisted, use the `extension` package. It's the same gateway plus a store:
+
+```go
+import bastionext "github.com/xraph/bastion/extension"
+
+bastionext.New(
+	bastion.WithAdminToken(os.Getenv("BASTION_ADMIN_TOKEN")),
+).Configure(bastionext.WithGroveDatabase("main"))
+```
+
+The store comes from `bastionext.WithStore(s)`, then the named `*grove.DB` from `WithGroveDatabase`, then the default `*grove.DB` in the container. The Grove driver picks the PostgreSQL, SQLite or MongoDB backend, and the store's migrations run at start unless you pass `bastionext.WithDisableMigrate()`. With none of those, the gateway runs in memory. Only the in-memory store has tests today, so check the database backends against a real server before you rely on them.
 
 ## Admin API
 
-| Method | Path | Description |
-|--------|------|-------------|
-| GET | `/gateway/api/routes` | List all routes |
-| GET | `/gateway/api/routes/:id` | Get route details |
-| POST | `/gateway/api/routes` | Create manual route |
-| PUT | `/gateway/api/routes/:id` | Update route |
-| DELETE | `/gateway/api/routes/:id` | Delete manual route |
-| POST | `/gateway/api/routes/:id/enable` | Enable route |
-| POST | `/gateway/api/routes/:id/disable` | Disable route |
-| GET | `/gateway/api/upstreams` | List all targets |
-| GET | `/gateway/api/stats` | Gateway statistics |
-| GET | `/gateway/api/stats/routes` | Per-route statistics |
-| GET | `/gateway/api/config` | Current configuration |
-| GET | `/gateway/api/discovery/services` | Discovered services |
-| POST | `/gateway/api/discovery/refresh` | Force FARP re-scan |
-| GET | `/gateway/openapi.json` | Aggregated OpenAPI spec |
-| GET | `/gateway/swagger` | Swagger UI |
-| GET | `/gateway/api/openapi/services` | OpenAPI service listing |
-| GET | `/gateway/api/openapi/services/:service` | Per-service OpenAPI spec |
-| POST | `/gateway/api/openapi/refresh` | Force OpenAPI re-fetch |
-| WS | `/gateway/ws` | Real-time event stream |
+The admin API is mounted under the dashboard base path, `/gateway` by default:
 
-## Hook System
+| Method | Path | What it does |
+| --- | --- | --- |
+| GET, POST | `/gateway/api/routes` | List routes, or create a manual route |
+| GET, PUT, DELETE | `/gateway/api/routes/:id` | Read, update or delete a route |
+| POST | `/gateway/api/routes/:id/enable`, `/gateway/api/routes/:id/disable` | Turn a route on or off |
+| GET | `/gateway/api/upstreams` | Targets with health and circuit state |
+| GET | `/gateway/api/stats`, `/gateway/api/stats/routes` | Gateway and per-route statistics |
+| GET | `/gateway/api/config` | The running configuration |
+| GET | `/gateway/api/discovery/services` | Services discovery has found |
+| POST | `/gateway/api/discovery/refresh` | Re-scan discovery now |
+| GET | `/gateway/ws` | Real-time event stream for the dashboard |
 
-```go
-ext := gateway.NewExtension()
+Protect it. With `WithAdminToken`, every admin request has to carry `Authorization: Bearer <token>`, and with `WithAdminMiddleware` you can put your own auth in front, such as an [Authsome](https://github.com/xraph/authsome) session check. With neither, Bastion logs a warning at every start, unless you set `WithAllowUnauthenticatedAdmin(true)` because something else guards it.
 
-// Access hooks after extension start
-app.AfterStart(func() {
-    gw := forge.Must[*gateway.Extension](app.Container(), "gateway")
+The `extension` package also registers a contract contributor for the [Forge dashboard](https://github.com/xraph/forge-dashboard), whose `plugin-bastion` package has overview, routes and upstreams pages. [MIGRATION.md](MIGRATION.md) explains what happened to the old Go-rendered dashboard pages.
 
-    gw.Hooks().OnRequest(func(r *http.Request, route *gateway.Route) error {
-        // Add custom auth header
-        r.Header.Set("X-Gateway-Auth", "validated")
-        return nil
-    })
+## Configuration
 
-    gw.Hooks().OnResponse(func(resp *http.Response, route *gateway.Route) {
-        // Add custom response header
-        resp.Header.Set("X-Served-By", "forge-gateway")
-    })
-
-    gw.Hooks().OnError(func(err error, route *gateway.Route, w http.ResponseWriter) {
-        // Custom error page
-        log.Printf("Gateway error on route %s: %v", route.Path, err)
-    })
-})
-```
-
-## Architecture
-
-```
-Client Request
-    │
-    ├── IP Filter
-    ├── CORS
-    ├── Rate Limiter (global)
-    ├── Route Matcher
-    ├── Rate Limiter (per-route)
-    ├── Authentication (API key/Bearer/forward auth)
-    ├── Response Cache (check)
-    ├── Request Hooks
-    ├── Traffic Splitter
-    ├── Load Balancer
-    ├── Circuit Breaker Check
-    ├── TLS/mTLS (per-target)
-    ├── Protocol Proxy (HTTP/WS/SSE/gRPC)
-    │   ├── Path Rewriting
-    │   ├── Header Manipulation
-    │   └── Upstream Connection
-    ├── Response Cache (store)
-    ├── Response Hooks
-    ├── Access Logger
-    └── Client Response
-```
-
-## OpenAPI Aggregation
-
-The gateway automatically discovers and aggregates OpenAPI specifications from all upstream services that publish their schemas via FARP. This provides a single, unified API documentation view for all services behind the gateway.
-
-### How It Works
-
-1. **Discovery**: Services register with FARP and expose their OpenAPI spec via metadata (`farp.openapi` or `farp.openapi.path`)
-2. **Fetching**: The gateway periodically fetches OpenAPI specs from all discovered services
-3. **Merging**: Specs are merged into a unified OpenAPI 3.1.0 document with service-level tags and namespaced schemas
-4. **Serving**: The aggregated spec is available at `/gateway/openapi.json` and browsable via Swagger UI at `/gateway/swagger`
-
-### Configuration
-
-```go
-gateway.NewExtension(
-    gateway.WithOpenAPI(gateway.OpenAPIConfig{
-        Enabled:         true,
-        Path:            "/openapi.json",
-        UIPath:          "/swagger",
-        Title:           "My API Gateway",
-        Description:     "All services behind the gateway",
-        Version:         "1.0.0",
-        RefreshInterval: 30 * time.Second,
-        FetchTimeout:    10 * time.Second,
-        MergeStrategy:   "prefix",           // "prefix" or "flat"
-        IncludeGatewayRoutes: true,           // Include gateway admin API
-        ExcludeServices: []string{"internal"},// Services to skip
-    }),
-)
-```
-
-### YAML Configuration
+Bastion reads `extensions.bastion`, or a top-level `bastion` key, from your Forge config files. Anything you leave out keeps its default, and options you pass in code win over the file:
 
 ```yaml
-bastion:
-  openapi:
+extensions:
+  bastion:
     enabled: true
-    path: "/openapi.json"
-    ui_path: "/swagger"
-    title: "My API Gateway"
-    refresh_interval: 30s
-    merge_strategy: prefix
-    include_gateway_routes: true
-    exclude_services:
-      - internal-admin
+    base_path: ""                  # prefix for proxied routes
+    routes:
+      - path: /users/*
+        strip_prefix: true
+        enabled: true
+        targets:
+          - url: http://users:8080
+            weight: 1
+    load_balancing:
+      strategy: leastConnections   # roundRobin, weightedRoundRobin, random, consistentHash
+    circuit_breaker:
+      enabled: true
+      failure_threshold: 5
+      reset_timeout: 30s
+    retry:
+      enabled: true
+      max_attempts: 3
+    rate_limiting:
+      enabled: true
+      requests_per_sec: 1000
+      burst: 100
+      per_client: true
+    health_check:
+      enabled: true
+      interval: 10s
+    discovery:
+      enabled: true
+      prefix_template: "/{{.ServiceName}}"
+    dashboard:
+      enabled: true                # gates the admin API, WebSocket hub and spec endpoints
+      base_path: /gateway
+      admin_token: ""
 ```
 
-### Per-Service Specs
+The defaults have discovery, retries, circuit breakers, health checks, metrics, tracing, access logs and the admin API turned on, and rate limiting, caching, auth, CORS, IP filtering and traffic splitting turned off. Every block has a matching option in code: `WithTimeouts`, `WithRetry`, `WithCircuitBreaker`, `WithRateLimiting`, `WithHealthCheck`, `WithLoadBalancing`, `WithAuth`, `WithTLS`, `WithCaching`, `WithCORS`, `WithIPFilter`, `WithOpenAPI`, `WithAsyncAPI`, `WithMetrics`, `WithTracing`, `WithAccessLog`, `WithDashboard` and `WithConfig` for the whole thing.
 
-Individual service specs are available at `/gateway/api/openapi/services/:serviceName`, allowing you to access each service's original spec independently.
+## Documentation
 
-## Dashboard
+| If you want to | Read |
+| --- | --- |
+| Run a first gateway | [Getting started](https://www.xraph.com/docs/bastion/getting-started), [full example](https://www.xraph.com/docs/bastion/guides/full-example) |
+| Define routes and upstreams | [Routes](https://www.xraph.com/docs/bastion/concepts/routes), [upstreams](https://www.xraph.com/docs/bastion/concepts/upstreams), [protocols](https://www.xraph.com/docs/bastion/concepts/protocols) |
+| Tune resilience | [Load balancing](https://www.xraph.com/docs/bastion/subsystems/load-balancing), [circuit breakers](https://www.xraph.com/docs/bastion/subsystems/circuit-breakers), [health monitoring](https://www.xraph.com/docs/bastion/subsystems/health-monitoring), [rate limiting](https://www.xraph.com/docs/bastion/subsystems/rate-limiting) |
+| Ship gradually | [Traffic splitting](https://www.xraph.com/docs/bastion/subsystems/traffic-splitting) |
+| Secure the edge | [Authentication](https://www.xraph.com/docs/bastion/subsystems/authentication), [TLS](https://www.xraph.com/docs/bastion/subsystems/tls) |
+| Use discovery and merged specs | [Discovery](https://www.xraph.com/docs/bastion/subsystems/discovery), [OpenAPI aggregation](https://www.xraph.com/docs/bastion/guides/openapi-aggregation) |
+| Operate it | [Admin API](https://www.xraph.com/docs/bastion/api-reference/admin-api), [dashboard](https://www.xraph.com/docs/bastion/api-reference/dashboard), [hooks](https://www.xraph.com/docs/bastion/guides/hooks) |
 
-The dashboard is the `packages/plugin-bastion` React plugin in the `forge-dashboard` repo. Add it to your shell and it reads the `bastion` contract contributor that the extension registers on its own (`extension/contract`). Nothing in this repo renders HTML any more.
+The Go API is on [pkg.go.dev](https://pkg.go.dev/github.com/xraph/bastion). New code should import the subpackages (`routing`, `proxy`, `resilience`, `security` and so on) directly; the type aliases in the root package are there for older callers.
 
-- **Overview**: Requests, errors, latency, open circuits and upstream health
-- **Routes**: Table of every route, with New route and Refresh discovery
-- **Route detail and editor**: Edit, disable or delete a manual route
-- **Upstreams**: Targets with their health and circuit state
+## FAQ
 
-Traffic, health, circuits, services, API explorer and config pages are coming. Their contract intents already exist. The old `bastion/dashboard` Go package is gone, so remove any import of it. [MIGRATION.md](MIGRATION.md) lists what happened to every old page and what changed for REST clients.
+### How do I build an API gateway in Go?
 
-`DashboardConfig` still matters: `Enabled` gates the admin REST API, the WebSocket hub and the OpenAPI endpoints, `BasePath` prefixes them, and `Realtime` gates the hub.
+Create a Forge app, add `gateway.New` with a `bastion.WithRoute` for each upstream, and run it. The [quick start](#quick-start) is a complete gateway in about thirty lines.
+
+### What happened to Forge's gateway extension?
+
+It moved out of Forge and became Bastion. Swap the import from `github.com/xraph/forge/extensions/gateway` to `github.com/xraph/bastion` (types and options) plus `github.com/xraph/bastion/gateway` or `github.com/xraph/bastion/extension` (the extension itself). The extension registers under the name `bastion` and reads `extensions.bastion` from config.
+
+### Does Bastion proxy WebSockets and gRPC?
+
+Yes. Set `Protocol` on the route to `ProtocolWebSocket`, `ProtocolSSE` or `ProtocolGRPC` (unary and streaming). Buffer sizes and ping intervals for WebSockets live under `WithWebSocket`, and SSE flushing under `WithSSE`.
+
+### How do I do a canary release with Bastion?
+
+Tag the targets on a route (for example `stable` and `canary`), turn on traffic splitting with `TrafficSplit.Enabled` in the config, and give the route a `TrafficPolicy` of type `canary` whose rules send a weight, a header or a cookie to the canary tag.
+
+### Can I use Bastion without service discovery?
+
+Yes. Set `bastion.WithDiscoveryEnabled(false)` and define every route yourself, in code, in config or through the admin API.
+
+## Contributing
+
+Issues and focused pull requests are welcome on [GitHub](https://github.com/xraph/bastion/issues). Everything runs from the repo root:
+
+```bash
+GOWORK=off go build ./...
+make test          # go test -v ./...
+make test-race
+make vet
+make lint
+gofmt -s -w . && goimports -w -local github.com/xraph/bastion .
+```
+
+Format with that `goimports` line, not `make fmt`, which groups imports for the wrong module and fails CI's Format job. Tests need nothing beyond Go. `make build`, `make run` and `make dev` point at a `cmd/bastion` that doesn't exist, so skip them. [AGENTS.md](AGENTS.md) explains which packages may import the root, how the extension wires the subsystems, and how releases go out. Commits follow [Conventional Commits](https://www.conventionalcommits.org/).
 
 ## License
 
-Same license as the Forge framework.
+See the [Bastion repository](https://github.com/xraph/bastion) for license terms.
+
+Bastion is part of the [forgery stack](https://github.com/xraph/forge#the-forgery-stack) built on [Forge](https://github.com/xraph/forge), by [Rex Raphael](https://github.com/juicycleff) and [contributors](https://github.com/xraph/bastion/graphs/contributors).
