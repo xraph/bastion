@@ -3,7 +3,7 @@ title: Admin REST API
 description: Full CRUD API for routes, upstreams, stats, and configuration.
 ---
 
-Bastion exposes a comprehensive REST API for managing routes, inspecting upstreams, viewing statistics, controlling discovery, and streaming real-time events. All endpoints are mounted under `Dashboard.BasePath` (default: `/gateway`), and `Dashboard.Enabled` turns them on. The React dashboard doesn't call this API. You use it for scripts and other clients.
+Bastion exposes a comprehensive REST API for managing routes, inspecting upstreams, viewing statistics, controlling discovery, and streaming real-time events. All endpoints are mounted under `Dashboard.BasePath` (default: `/gateway`). `Dashboard.Enabled` turns the admin API and the WebSocket stream on; the OpenAPI endpoints follow `OpenAPI.Enabled` instead. The React dashboard doesn't call this API. You use it for scripts and other clients.
 
 ## Changed in this release
 
@@ -49,10 +49,11 @@ If you configure neither, the admin API is still registered (as it always was) a
 | GET | `/gateway/api/config` | Current configuration |
 | GET | `/gateway/api/discovery/services` | Discovered services |
 | POST | `/gateway/api/discovery/refresh` | Force FARP re-scan |
+| GET | `/gateway/api/discovery/debug` | Discovery debug information |
 | POST | `/gateway/api/discovery/register` | Push-register a service |
 | DELETE | `/gateway/api/discovery/services/:name` | Deregister a service |
 | GET | `/gateway/openapi.json` | Aggregated OpenAPI spec |
-| GET | `/gateway/swagger` | Swagger UI |
+| GET | `/gateway/swagger` | Swagger UI for the admin spec only, and only with `EnableGatewayDocs` |
 | GET | `/gateway/api/openapi/services` | OpenAPI service listing |
 | GET | `/gateway/api/openapi/services/:service` | Per-service OpenAPI spec |
 | POST | `/gateway/api/openapi/refresh` | Force OpenAPI re-fetch |
@@ -561,7 +562,7 @@ Returns the merged OpenAPI 3.1.0 spec from all upstream services.
 GET /gateway/swagger
 ```
 
-Serves the interactive Swagger UI pointing to the aggregated spec.
+Registered only when `EnableGatewayDocs` is on, and then it points at the gateway's own admin spec (`/gateway/admin/openapi.json`), not the aggregated one. For a Swagger UI over the aggregated spec, turn on `EnableRootDocs` (`bastion.WithOpenAPIRootDocs(true)`) and open `/docs`.
 
 ### Service Listing
 

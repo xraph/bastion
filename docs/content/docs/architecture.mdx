@@ -181,18 +181,17 @@ Bastion implements the Forge extension lifecycle with four phases:
 
 ```
 ┌─────────────────────┐
-│  1. Register        │  Parse configuration (YAML or programmatic)
-│                     │  Build route table from static routes
-│                     │  Initialize middleware chain
-│                     │  Mount HTTP handlers on the Forge router
+│  1. Register        │  Parse configuration (YAML, then options)
+│                     │  Build the proxy engine and subsystems
 │                     │  Provide gateway instance to DI container
 └──────────┬──────────┘
            │
            ▼
 ┌─────────────────────┐
-│  2. Start           │  Start health check probes
+│  2. Start           │  Load static and persisted routes
 │                     │  Start FARP service discovery (if enabled)
-│                     │  Start configuration file watcher (if enabled)
+│                     │  Start health check probes
+│                     │  Mount admin API, spec endpoints, catch-all
 │                     │  Open WebSocket event stream (if Dashboard.Enabled and Realtime)
 └──────────┬──────────┘
            │
@@ -207,7 +206,7 @@ Bastion implements the Forge extension lifecycle with four phases:
 ┌─────────────────────┐
 │  4. Stop            │  Drain in-flight requests
 │                     │  Stop health check probes
-│                     │  Stop service discovery watcher
+│                     │  Stop service discovery polling
 │                     │  Close WebSocket connections
 │                     │  Release resources
 └─────────────────────┘
@@ -282,4 +281,4 @@ gw.Hooks().OnUpstreamHealth(func(target *bastion.Target, healthy bool) {
 | `security` | `github.com/xraph/bastion/security` | Authentication (API key, Bearer, forward-auth), IP filtering, CORS |
 | `api` | `github.com/xraph/bastion/api` | Admin REST API handlers and WebSocket event stream |
 | `store` | `github.com/xraph/bastion/store` | Route and configuration persistence backends |
-| `config` | `github.com/xraph/bastion/config` | Configuration parsing, validation, and hot-reload watcher |
+| `config` | `github.com/xraph/bastion` (root package) | Configuration types, validation, and a `ConfigWatcher` the extension never starts |

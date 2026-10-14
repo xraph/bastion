@@ -115,7 +115,7 @@ func WithCaching(caching CachingConfig) ConfigOption
 func WithDiscovery(disc DiscoveryConfig) ConfigOption
 func WithDiscoveryEnabled(enabled bool) ConfigOption
 func WithDiscoveryPollInterval(d time.Duration) ConfigOption
-func WithDiscoveryWatchMode(enabled bool) ConfigOption
+func WithDiscoveryWatchMode(enabled bool) ConfigOption // not implemented: discovery always polls
 func WithDiscoveryAutoPrefix(enabled bool) ConfigOption
 func WithDiscoveryPrefixTemplate(tmpl string) ConfigOption
 func WithDiscoveryStripPrefix(strip bool) ConfigOption
@@ -364,7 +364,7 @@ FARP integration for automatic service discovery and route generation.
 type DiscoveryConfig struct {
     Enabled          bool
     PollInterval     time.Duration
-    WatchMode        bool
+    WatchMode        bool // not implemented yet; discovery polls
     ServiceFilters   []ServiceFilter
     AutoPrefix       bool
     PrefixTemplate   string

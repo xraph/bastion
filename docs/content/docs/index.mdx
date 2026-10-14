@@ -3,40 +3,40 @@ title: Introduction
 description: Production-grade API gateway extension for the Forge Go framework.
 ---
 
-Bastion is a Go package that provides a **production-grade API gateway** as a Forge extension. It proxies HTTP, WebSocket, SSE, and gRPC traffic to upstream services with load balancing, circuit breakers, rate limiting, health monitoring, authentication, caching, and traffic splitting -- all configured programmatically or via YAML.
+Bastion is a Go package that provides an API gateway as a Forge extension. It proxies HTTP, WebSocket, SSE, and gRPC traffic to upstream services with load balancing, circuit breakers, rate limiting, health monitoring, authentication, caching, and traffic splitting, all configured programmatically or via YAML.
 
-Bastion is an **extension**, not a standalone service. You add it to an existing Forge application, and it handles the full request pipeline from ingress to upstream delivery.
+Bastion is an extension, not a standalone service. You add it to an existing Forge application, and it handles the full request pipeline from ingress to upstream delivery.
 
 ## What it does
 
-- **Multi-protocol proxying** -- Route traffic over HTTP, WebSocket, SSE, and gRPC through a unified proxy engine with protocol-aware handling for upgrades, streaming, and bidirectional communication.
-- **Service discovery** -- Automatically discover upstream services via FARP (Forge's service discovery mechanism) with watch mode, auto-prefixing, and OpenAPI aggregation. Manual route configuration is also supported.
-- **Load balancing** -- Distribute requests across upstream targets using round-robin, weighted round-robin, random, least-connections, or consistent-hash strategies. Configurable globally or per-route.
-- **Circuit breakers** -- Per-target three-state circuit breakers (closed, open, half-open) that stop sending traffic to failing upstreams and automatically recover after a configurable timeout.
-- **Health monitoring** -- Active HTTP probes at configurable intervals combined with passive failure tracking. Unhealthy targets are removed from the load balancer pool.
-- **Rate limiting** -- Token-bucket rate limiting at global, per-route, and per-client granularity. Configurable requests-per-second and burst limits.
-- **Retry with backoff** -- Automatic retries on upstream failures with exponential, linear, or fixed backoff strategies and optional jitter.
-- **Traffic splitting** -- Canary deployments, blue-green releases, A/B testing, and shadow traffic via weighted target groups.
-- **Authentication** -- API key validation, Bearer token verification, and forward-auth delegation to external authentication services.
-- **Response caching** -- In-memory response caching with per-route cache policies, TTL control, and cache-key customization.
-- **TLS and mTLS** -- Upstream TLS termination, client certificate authentication, and automatic certificate reloading on file changes.
-- **Request/response transformation** -- Path rewriting, header injection, header removal, and header value manipulation at the route level.
-- **CORS and IP filtering** -- Cross-origin resource sharing configuration and IP-based allow/deny lists.
-- **Observability** -- Prometheus metrics, structured logging, and OpenTelemetry trace propagation for full visibility into gateway behavior.
-- **Admin dashboard** -- React plugin for the Forge dashboard shell, with overview, routes and upstreams pages today and more on the way.
-- **Admin REST API** -- Full CRUD for routes, upstreams, statistics, configuration, and service discovery.
-- **Hot-reload configuration** -- Update routes, rate limits, and other settings at runtime without restarting the gateway.
-- **Hook system** -- Register `OnRequest`, `OnResponse`, `OnError`, `OnRouteChange`, and `OnUpstreamHealth` hooks to extend gateway behavior.
+- Multi-protocol proxying: route traffic over HTTP, WebSocket, SSE, and gRPC through a unified proxy engine with protocol-aware handling for upgrades, streaming, and bidirectional communication.
+- Service discovery: automatically discover upstream services via FARP (Forge's service discovery mechanism) with polling, auto-prefixing, and OpenAPI aggregation. Manual route configuration is also supported.
+- Load balancing: distribute requests across upstream targets using round-robin, weighted round-robin, random, least-connections, or consistent-hash strategies, chosen once for the whole gateway.
+- Circuit breakers: per-target three-state circuit breakers (closed, open, half-open) that stop sending traffic to failing upstreams and automatically recover after a configurable timeout.
+- Health monitoring: active HTTP probes at configurable intervals combined with passive failure tracking. Unhealthy targets are removed from the load balancer pool.
+- Rate limiting: token-bucket rate limiting at global, per-route, and per-client granularity. Configurable requests-per-second and burst limits.
+- Retry with backoff: automatic retries on upstream failures with exponential, linear, or fixed backoff strategies and optional jitter.
+- Traffic splitting: canary deployments, blue-green releases, A/B testing, and shadow traffic via weighted target groups.
+- Authentication: API key validation, bearer token and JWT verification, and forward-auth delegation to external authentication services.
+- Response caching: in-memory response caching with per-route cache policies, TTL control, and cache-key customization.
+- TLS and mTLS: TLS to upstreams, client certificate authentication, and certificate reloading from disk on an interval.
+- Request/response transformation: path rewriting, header injection, header removal, and header value manipulation at the route level.
+- CORS and IP filtering: cross-origin resource sharing configuration and IP-based allow/deny lists.
+- Observability: metrics through Forge's metrics system, structured access logs, and OpenTelemetry trace propagation.
+- Admin dashboard: a React plugin for the Forge dashboard shell, with overview, routes and upstreams pages today and more on the way.
+- Admin REST API: CRUD for routes, upstreams, statistics, configuration, and service discovery.
+- Runtime route changes: create, update, enable and disable routes through the admin API without restarting the gateway. The config file itself is read once, at start.
+- Hook system: register `OnRequest`, `OnResponse`, `OnError`, `OnRouteChange`, `OnUpstreamHealth` and `OnCircuitBreak` hooks to extend gateway behavior.
 
 ## Design philosophy
 
-**Extension, not service.** Bastion is a Forge extension you register in your application. You own `main`, the configuration, and the process lifecycle. Bastion provides the gateway plumbing.
+Bastion is a Forge extension you register in your application. You own `main`, the configuration, and the process lifecycle. Bastion provides the gateway plumbing.
 
-**Middleware pipeline.** Every request flows through a well-defined chain: IP filter, CORS, rate limiter, route matcher, authentication, cache, hooks, traffic splitter, load balancer, circuit breaker, TLS, protocol proxy, and response processing. Each stage is independently configurable.
+Every request flows through a well-defined chain: IP filter, CORS, rate limiter, route matcher, authentication, cache, hooks, traffic splitter, load balancer, circuit breaker, TLS, protocol proxy, and response processing. Each stage is independently configurable.
 
-**Forge-native.** Bastion integrates with the Forge lifecycle (Register, Start, Health, Stop), DI container, configuration system, and service discovery. It is a first-class citizen in a Forge application.
+Bastion integrates with the Forge lifecycle (Register, Start, Health, Stop), DI container, configuration system, and service discovery. It is a first-class citizen in a Forge application.
 
-**Hot-reload.** Routes, rate limits, circuit breaker thresholds, and other settings can be changed at runtime through the admin API or configuration file changes without restarting the process.
+Routes can be changed at runtime through the admin API without restarting the process. Other settings come from config, read once at start.
 
 ## Quick look
 
@@ -44,16 +44,22 @@ Bastion is an **extension**, not a standalone service. You add it to an existing
 package main
 
 import (
-    "github.com/xraph/forge"
+    "log"
+
     "github.com/xraph/bastion"
+    "github.com/xraph/bastion/gateway"
+    "github.com/xraph/forge"
+    "github.com/xraph/forge/extensions/discovery"
 )
 
 func main() {
     app := forge.NewApp(forge.AppConfig{
-        Name:    "api-gateway",
-        Version: "1.0.0",
+        Name:        "api-gateway",
+        Version:     "1.0.0",
+        HTTPAddress: ":8080",
         Extensions: []forge.Extension{
-            bastion.NewExtension(
+            discovery.NewExtension(discovery.WithBackend("memory")),
+            gateway.New(
                 bastion.WithRoute(bastion.RouteConfig{
                     Path:    "/users/*",
                     Targets: []bastion.TargetConfig{
@@ -63,10 +69,13 @@ func main() {
                     Protocol:    bastion.ProtocolHTTP,
                     Enabled:     true,
                 }),
+                bastion.WithAdminToken("change-me"),
             ),
         },
     })
-    app.Run()
+    if err := app.Run(); err != nil {
+        log.Fatal(err)
+    }
 }
 ```
 
@@ -76,5 +85,5 @@ func main() {
   <Card title="Getting started" href="/docs/getting-started" description="Install Bastion and configure your first gateway routes in under ten minutes." />
   <Card title="Architecture" href="/docs/architecture" description="Understand the request pipeline, middleware chain, and extension lifecycle." />
   <Card title="Routes" href="/docs/concepts/routes" description="Learn about route configuration, path matching, protocol selection, and per-route overrides." />
-  <Card title="Configuration" href="/docs/concepts/configuration" description="Configure Bastion programmatically or via YAML with hot-reload support." />
+  <Card title="Configuration" href="/docs/concepts/configuration" description="Configure Bastion programmatically or via YAML." />
 </Cards>

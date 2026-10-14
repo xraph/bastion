@@ -3,31 +3,34 @@ title: OpenAPI Aggregation
 description: Unified OpenAPI specification from all upstream services via FARP.
 ---
 
-Bastion can aggregate OpenAPI specifications from all upstream services into a single, unified OpenAPI 3.1.0 document. This gives API consumers a single endpoint for discovering every route behind the gateway, complete with Swagger UI for interactive exploration.
+Bastion can aggregate OpenAPI specifications from all upstream services into a single, unified OpenAPI 3.1.0 document. This gives API consumers a single endpoint for discovering every route behind the gateway. A Swagger UI for it is available at `/docs` when you turn on root docs.
 
 ## How It Works
 
-1. **Services register OpenAPI specs via FARP metadata.** When a Forge service publishes its FARP schema, it includes an `openapi` metadata key pointing to its spec URL (e.g., `http://user-service:8080/openapi.json`).
+1. Services register OpenAPI specs via FARP metadata. When a Forge service publishes its FARP schema, it includes an `openapi` metadata key pointing to its spec URL (e.g., `http://user-service:8080/openapi.json`).
 
-2. **Manual routes can also declare specs.** Routes configured with `WithServiceRoute()` or with the `openapi_spec` YAML field have their specs fetched too.
+2. Manual routes can also declare specs. Routes configured with `WithServiceRoute()` or with the `openapi_spec` YAML field have their specs fetched too.
 
-3. **The gateway periodically fetches and merges specs.** On a configurable interval, Bastion fetches each upstream spec, prefixes paths with the route prefix (in `prefix` merge strategy), and merges them into a single OpenAPI 3.1.0 document.
+3. The gateway periodically fetches and merges specs. On a configurable interval, Bastion fetches each upstream spec, prefixes paths with the route prefix (in `prefix` merge strategy), and merges them into a single OpenAPI 3.1.0 document.
 
-4. **The merged spec is served at a well-known endpoint.** Consumers access the aggregated spec and Swagger UI from the gateway.
+4. The merged spec is served at a well-known endpoint under the dashboard base path.
 
 ## Endpoints
 
 | Path | Description |
 |------|-------------|
-| `/gateway/openapi.json` | Aggregated OpenAPI spec from all upstream services |
-| `/gateway/swagger` | Swagger UI for the aggregated spec |
-| `/gateway/api/openapi/services` | List of services with OpenAPI specs |
-| `/gateway/api/openapi/services/:service` | OpenAPI spec for a specific service |
-| `/gateway/api/openapi/refresh` | Force re-fetch of all upstream specs |
-| `/docs` | Root-level Swagger UI (when `enable_root_docs` is true) |
-| `/openapi.json` | Root-level aggregated spec (when `enable_root_docs` is true) |
+| `GET /gateway/openapi.json` | Aggregated OpenAPI spec from all upstream services |
+| `GET /gateway/api/openapi/services` | List of services with OpenAPI specs |
+| `GET /gateway/api/openapi/services/:service` | OpenAPI spec for a specific service |
+| `POST /gateway/api/openapi/refresh` | Force re-fetch of all upstream specs |
+| `GET /docs` | Swagger UI for the aggregated spec (when `enable_root_docs` is true) |
+| `GET /openapi.json` | Root-level aggregated spec (when `enable_root_docs` is true) |
+| `GET /gateway/admin/openapi.json` | The gateway's own admin API spec (when `enable_gateway_docs` is true) |
+| `GET /gateway/swagger` | Swagger UI for the admin spec only (when `enable_gateway_docs` is true) |
 
-The base path (`/gateway`) matches the configured dashboard base path and is customizable.
+`/gateway/swagger` doesn't show the aggregated upstream spec. It exists only with `enable_gateway_docs`, and then it points at the gateway's own admin spec. For a Swagger UI over your services, turn on `enable_root_docs` and open `/docs`.
+
+The base path (`/gateway`) matches the configured dashboard base path and is customizable. These endpoints don't sit behind the admin token or admin middleware, `POST .../refresh` included, so if your services' specs aren't public, put your own guard in front of them.
 
 ## Configuration
 
@@ -58,21 +61,22 @@ bastion.WithOpenAPI(bastion.OpenAPIConfig{
 ### YAML
 
 ```yaml
-bastion:
-  openapi:
-    enabled: true
-    path: /openapi.json
-    ui_path: /swagger
-    title: "My API Gateway"
-    description: "All services behind the gateway"
-    version: "1.0.0"
-    refresh_interval: 30s
-    fetch_timeout: 10s
-    merge_strategy: prefix
-    enable_root_docs: true
-    enable_gateway_docs: false
-    exclude_services:
-      - internal-admin
+extensions:
+  bastion:
+    openapi:
+      enabled: true
+      path: /openapi.json
+      ui_path: /swagger
+      title: "My API Gateway"
+      description: "All services behind the gateway"
+      version: "1.0.0"
+      refresh_interval: 30s
+      fetch_timeout: 10s
+      merge_strategy: prefix
+      enable_root_docs: true
+      enable_gateway_docs: false
+      exclude_services:
+        - internal-admin
 ```
 
 ### Configuration Fields
@@ -81,9 +85,9 @@ bastion:
 |-------|------|---------|-------------|
 | `Enabled` | `bool` | `true` | Enable OpenAPI aggregation |
 | `Path` | `string` | `"/openapi.json"` | Path for the merged spec (relative to dashboard base) |
-| `UIPath` | `string` | `"/swagger"` | Path for Swagger UI (relative to dashboard base) |
-| `Title` | `string` | `"Forge Gateway"` | Title in the aggregated spec |
-| `Description` | `string` | `""` | Description in the aggregated spec |
+| `UIPath` | `string` | `"/swagger"` | Path for the admin-spec Swagger UI (relative to dashboard base); only used with `EnableGatewayDocs` |
+| `Title` | `string` | `"API Gateway"` | Title in the aggregated spec |
+| `Description` | `string` | `"Aggregated API specification from all upstream services"` | Description in the aggregated spec |
 | `Version` | `string` | `"1.0.0"` | Version in the aggregated spec |
 | `RefreshInterval` | `duration` | `30s` | How often to re-fetch upstream specs |
 | `FetchTimeout` | `duration` | `10s` | Timeout for fetching individual specs |
@@ -186,7 +190,8 @@ bastion.WithOpenAPI(bastion.OpenAPIConfig{
 Or in YAML:
 
 ```yaml
-bastion:
+extensions:
+ bastion:
   openapi:
     enabled: true
     exclude_services:
@@ -206,8 +211,8 @@ bastion.WithOpenAPIRootDocs(true)
 ```
 
 This mounts:
-- `/openapi.json` -- The aggregated spec
-- `/docs` -- Swagger UI pointing to the root spec
+- `/openapi.json`: the aggregated spec
+- `/docs`: Swagger UI pointing to the root spec
 
 This is useful when you want consumers to access API documentation directly at the gateway root without knowing the dashboard path.
 
@@ -219,7 +224,7 @@ The gateway's own admin API (route management, stats, discovery) can also be doc
 bastion.WithOpenAPIGatewayDocs(true)
 ```
 
-When enabled, the gateway admin spec is served at `/gateway/admin/openapi.json` with Swagger UI at `/gateway/swagger`.
+When enabled, the gateway admin spec is served at `/gateway/admin/openapi.json`, with a Swagger UI for it at `/gateway` plus `UIPath` (`/gateway/swagger` by default). That UI shows the admin spec only, never the aggregated one.
 
 ## Extension Path Filtering
 

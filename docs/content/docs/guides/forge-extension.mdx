@@ -3,145 +3,153 @@ title: Forge Extension
 description: Integrate Bastion as a Forge extension with auto-configuration and DI container binding.
 ---
 
-Bastion ships a first-class [Forge](https://github.com/xraph/forge) extension that handles gateway initialization, FARP discovery wiring, dashboard registration, health checks, and graceful shutdown automatically. This guide covers setup via programmatic options and YAML configuration.
+Bastion runs as a [Forge](https://github.com/xraph/forge) extension. It builds the proxy engine and its subsystems, wires in FARP discovery, mounts the admin API and provides `*bastion.Gateway` to the container. This guide covers setup in code and in YAML.
 
-## Quick Start
+## Pick a constructor
 
-```go
-import (
-    "github.com/xraph/forge"
-    "github.com/xraph/bastion/extension"
-)
+There are two, and they build the same gateway:
 
-app := forge.New()
-app.Register(extension.New(
-    bastion.WithBasePath("/api"),
-    bastion.WithDashboardEnabled(true),
-))
-app.Run()
-```
-
-That single call registers Bastion into the Forge lifecycle:
-
-1. Loads configuration from YAML (merged with programmatic options).
-2. Initializes the proxy engine, route manager, circuit breakers, and health monitor.
-3. Auto-resolves the `discovery` extension from the DI container for FARP service discovery.
-4. Registers the admin REST API and dashboard routes.
-5. Provides the `*bastion.Gateway` instance to the DI container via [Vessel](https://github.com/xraph/vessel).
-6. Starts the WebSocket hub for real-time dashboard updates.
-
-### Without a persistent store
-
-`extension.New` imports the Mongo, Postgres and SQLite store packages so it can pick one from a grove database. If you don't need routes to survive a restart, use `gateway.New` instead. It wires the same proxy engine, admin API and discovery, and leaves the store packages out of your build:
-
-```go
-import (
-    "github.com/xraph/bastion"
-    "github.com/xraph/bastion/gateway"
-)
-
-app.RegisterExtension(gateway.New(
-    bastion.WithBasePath("/api"),
-))
-```
+| Constructor | Package | What you get |
+|-------------|---------|--------------|
+| `gateway.New(opts...)` | `github.com/xraph/bastion/gateway` | The full gateway. Admin-created routes live in memory and are gone after a restart. Pulls in no database driver |
+| `extension.New(opts...)` | `github.com/xraph/bastion/extension` | The same gateway plus a store for admin-created routes and circuit breaker state, and the Forge dashboard contributor |
 
 Don't register `bastion.New(...)` directly. It's the core gateway with nothing wired into it, so it registers no catch-all route and proxies nothing.
 
-## Extension Lifecycle
+## Quick start
 
-The extension participates in the full Forge lifecycle:
+```go
+package main
 
-| Method | When Called | What Happens |
+import (
+    "log"
+
+    "github.com/xraph/bastion"
+    "github.com/xraph/bastion/gateway"
+    "github.com/xraph/forge"
+    "github.com/xraph/forge/extensions/discovery"
+)
+
+func main() {
+    app := forge.NewApp(forge.AppConfig{
+        Name:        "edge",
+        HTTPAddress: ":8080",
+        Extensions: []forge.Extension{
+            discovery.NewExtension(discovery.WithBackend("memory")),
+            gateway.New(
+                bastion.WithBasePath("/api"),
+                bastion.WithAdminToken("change-me"),
+            ),
+        },
+    })
+
+    if err := app.Run(); err != nil {
+        log.Fatal(err)
+    }
+}
+```
+
+`app.RegisterExtension(gateway.New(...))` works too, as long as you call it before the app starts.
+
+Once registered, the extension:
+
+1. Loads configuration from YAML and applies your options over it.
+2. Builds the route manager, circuit breakers, retry executor, traffic splitter, load balancer and proxy engine.
+3. Provides the `*bastion.Gateway` instance to the DI container.
+4. At start, picks up the `discovery` extension's service from the container, if there is one.
+5. Registers the admin REST API, the WebSocket hub and the catch-all proxy route.
+
+## Extension lifecycle
+
+| Method | When called | What happens |
 |--------|------------|--------------|
-| `Register(app)` | App startup | Load config, initialize components, register with DI, set up admin routes |
-| `Start(ctx)` | After all extensions registered | Wire callbacks, load manual and persisted routes, start discovery, start health monitor |
-| `Health(ctx)` | Health check requests | Verify routes exist and upstream targets are reachable |
-| `Stop(ctx)` | Graceful shutdown | Set draining mode, stop discovery, stop health monitor |
+| `Register(app)` | App startup | Load config, build components, register with DI, set up the admin API |
+| `Start(ctx)` | After all extensions registered | Wire discovery, load manual and persisted routes, start discovery, start the health monitor, register routes |
+| `Health(ctx)` | Health check requests | Fails when no routes exist, otherwise asks the health monitor |
+| `Stop(ctx)` | Graceful shutdown | Set draining mode, stop discovery, stop the health monitor |
 
-The gateway declares a dependency on the `discovery` extension, ensuring it is always registered and started first.
+The gateway lists the `discovery` extension as a dependency, but it doesn't need it. Without it, Bastion logs a warning at start and serves only the routes you configured or created through the admin API.
 
-## YAML Configuration
+## YAML configuration
 
-Bastion reads configuration from your Forge config file under the `bastion` key:
+Bastion reads `extensions.bastion`, falling back to a top-level `bastion` key:
 
 ```yaml
 # config.yaml
-bastion:
-  enabled: true
-  base_path: "/api"
+extensions:
+  bastion:
+    enabled: true
+    base_path: "/api"
 
-  routes:
-    - path: /users
-      targets:
-        - url: http://user-service:8080
-          weight: 1
-      strip_prefix: true
+    routes:
+      - path: /users/*
+        targets:
+          - url: http://user-service:8080
+            weight: 1
+        strip_prefix: true
+        enabled: true
+
+      - path: /orders/*
+        targets:
+          - url: http://order-service:8080
+            weight: 1
+        strip_prefix: true
+        enabled: true
+
+    discovery:
       enabled: true
-
-    - path: /orders
-      targets:
-        - url: http://order-service:8080
-          weight: 1
+      poll_interval: 30s
+      auto_prefix: true
+      prefix_template: "/{{.ServiceName}}"
       strip_prefix: true
+
+    circuit_breaker:
       enabled: true
+      failure_threshold: 5
+      failure_window: 60s
+      reset_timeout: 30s
 
-  discovery:
-    enabled: true
-    poll_interval: 30s
-    watch_mode: true
-    auto_prefix: true
-    prefix_template: "/{{.ServiceName}}"
-    strip_prefix: true
+    rate_limiting:
+      enabled: false
+      requests_per_sec: 1000
+      burst: 100
 
-  circuit_breaker:
-    enabled: true
-    failure_threshold: 5
-    failure_window: 60s
-    reset_timeout: 30s
+    health_check:
+      enabled: true
+      interval: 10s
+      timeout: 5s
+      path: "/_/health"
 
-  rate_limiting:
-    enabled: false
-    requests_per_sec: 1000
-    burst: 100
+    load_balancing:
+      strategy: roundRobin
 
-  health_check:
-    enabled: true
-    interval: 10s
-    timeout: 5s
-    path: "/_/health"
+    dashboard:
+      enabled: true
+      base_path: /gateway
+      title: "API Gateway"
+      realtime: true
+      admin_token: "change-me"
 
-  load_balancing:
-    strategy: roundRobin
-
-  dashboard:
-    enabled: true
-    base_path: /gateway
-    title: "API Gateway"
-    realtime: true
-
-  openapi:
-    enabled: true
-    path: /openapi.json
-    title: "My API Gateway"
+    openapi:
+      enabled: true
+      path: /openapi.json
+      title: "My API Gateway"
 ```
 
-### Config Resolution Order
+`discovery.watch_mode` is accepted and defaults to `true`, but watching isn't implemented yet. Bastion logs a warning and polls every `poll_interval`.
 
-The extension loads configuration in this order:
+### Config resolution order
 
-1. YAML file (`bastion` key).
-2. Programmatic options (`ConfigOption` functions passed to `New()`).
-3. Defaults for any zero-valued fields via `DefaultConfig()`.
+1. `DefaultConfig()`.
+2. The YAML file binds over it. Only the keys the file sets change, so a key the file leaves out keeps its default, and one it sets to `false` or `""` really is `false` or `""`.
+3. Your `ConfigOption` functions run last. Each one sets only the fields it names, so options win over the file without wiping the rest of the block.
 
-YAML values and programmatic options are merged. Programmatic options override YAML when both set the same field.
-
-## Programmatic Options
-
-All configuration can be set via `ConfigOption` functions:
+## Programmatic options
 
 ```go
 import (
     "time"
+
     "github.com/xraph/bastion"
     "github.com/xraph/bastion/extension"
 )
@@ -157,6 +165,7 @@ ext := extension.New(
         Enabled:          true,
         FailureThreshold: 5,
         ResetTimeout:     30 * time.Second,
+        HalfOpenMax:      3,
     }),
     bastion.WithRateLimiting(bastion.RateLimitConfig{
         Enabled:        true,
@@ -168,40 +177,41 @@ ext := extension.New(
 )
 ```
 
-### Key Options
+`WithCircuitBreaker` and `WithRateLimiting` replace their whole block, so set every field you want. A `HalfOpenMax` of zero means the first successful probe closes the circuit; the default is 3.
+
+### Key options
 
 | Option | Description |
 |--------|-------------|
 | `WithBasePath(path)` | URL prefix for all proxied routes |
 | `WithRoute(rc)` | Add a single manual route |
 | `WithRoutes(routes)` | Set all manual routes |
-| `WithServiceRoute(name, path, url, specURL)` | Add a route with OpenAPI spec |
-| `WithDiscoveryEnabled(bool)` | Enable/disable FARP auto-discovery |
-| `WithDiscoveryPollInterval(d)` | Set discovery polling interval |
-| `WithDiscoveryWatchMode(bool)` | Use event-driven watch instead of polling |
-| `WithLoadBalancing(cfg)` | Set load balancing strategy |
-| `WithCircuitBreaker(cfg)` | Configure circuit breaker |
+| `WithServiceRoute(name, path, url, specURL)` | Add a route with an OpenAPI spec URL |
+| `WithDiscoveryEnabled(bool)` | Enable or disable FARP discovery |
+| `WithDiscoveryPollInterval(d)` | Set the discovery polling interval |
+| `WithDiscoveryWatchMode(bool)` | Stored, but not implemented: discovery always polls |
+| `WithLoadBalancing(cfg)` | Set the load balancing strategy |
+| `WithCircuitBreaker(cfg)` | Configure circuit breakers |
 | `WithRateLimiting(cfg)` | Configure global rate limiting |
 | `WithHealthCheck(cfg)` | Configure upstream health checks |
 | `WithAuth(cfg)` | Configure gateway authentication |
 | `WithCaching(cfg)` | Configure response caching |
-| `WithDashboardEnabled(bool)` | Enable/disable the admin dashboard |
+| `WithDashboardEnabled(bool)` | Enable or disable the admin API and WebSocket hub. The OpenAPI endpoints follow `OpenAPI.Enabled` instead |
+| `WithAdminToken(token)` | Require `Authorization: Bearer <token>` on the admin API |
+| `WithAdminMiddleware(mw...)` | Put your own auth in front of the admin API |
 | `WithOpenAPI(cfg)` | Configure OpenAPI aggregation |
 | `WithCORS(cfg)` | Configure gateway-level CORS |
-| `WithTLS(cfg)` | Configure upstream TLS/mTLS |
+| `WithTLS(cfg)` | Configure upstream TLS and mTLS |
 | `WithConfig(cfg)` | Set the complete config struct |
 
-## DI Container Integration
+## DI container integration
 
-After registration, the `*bastion.Gateway` instance is available from the DI container:
+After registration, the `*bastion.Gateway` instance is in the DI container:
 
 ```go
-import "github.com/xraph/vessel"
-
-// In another extension or AfterStart callback
-gw, err := vessel.Inject[*bastion.Gateway](app.Container())
+gw, err := forge.Inject[*bastion.Gateway](app.Container())
 if err != nil {
-    log.Fatal("bastion not registered:", err)
+    log.Fatal("bastion not registered: ", err)
 }
 
 // Access gateway components
@@ -210,106 +220,78 @@ stats := gw.Snapshot()
 hooks := gw.Hooks()
 ```
 
-## Auto-Resolution of Discovery Extension
+## Discovery
 
-Bastion automatically resolves Forge's built-in discovery extension to power FARP-based service discovery. When a Forge application includes both the discovery extension and Bastion, the gateway automatically:
+At start, the gateway looks up Forge's discovery service in the DI container. When it finds one, it wraps it in an adapter and hands it to the gateway with `SetDiscoveryService()`. No manual wiring is needed. If the discovery extension isn't registered, Bastion logs a warning and serves only manual and admin-created routes.
 
-1. Resolves the `discovery.Service` from the DI container.
-2. Wraps it in an adapter that implements `bastion.DiscoveryService`.
-3. Injects it into the gateway via `SetDiscoveryService()`.
+## Health check integration
 
-No manual wiring is needed. If the discovery extension is not registered, Bastion logs a warning and operates with only manual routes.
+The extension's `Health(ctx)` fails with "no routes configured" when the route table is empty, and otherwise returns the health monitor's verdict. Forge includes it in its aggregated health endpoint.
 
-## Health Check Integration
+## Persistent store support
 
-The extension implements `forge.Extension`'s `Health(ctx)` method. Forge automatically includes this in its aggregated health endpoint:
-
-```go
-func (e *Gateway) Health(ctx context.Context) error {
-    if e.routeManager == nil || e.routeManager.RouteCount() == 0 {
-        return fmt.Errorf("no routes configured")
-    }
-    return e.healthMon.Health(ctx)
-}
-```
-
-The health check verifies:
-
-- At least one route is configured.
-- The upstream health monitor reports healthy (at least one target is reachable).
-
-## Persistent Store Support
-
-The extension supports optional persistent storage for routes, circuit breaker state, health history, and audit logs. Configure a store using Grove database integration:
+`extension.New` can keep admin-created routes and circuit breaker state in a database:
 
 ```go
 ext := extension.New(
     bastion.WithDashboardEnabled(true),
 ).Configure(
-    extension.WithGroveDatabase(""),  // Use default Grove DB
+    extension.WithGroveDatabase(""), // the default grove.DB
 )
 ```
 
-The store backend is auto-detected from the Grove driver (PostgreSQL, SQLite, or MongoDB). Routes created via the admin API are persisted and restored on restart.
+The store comes from `extension.WithStore(s)`, then the named `*grove.DB` from `WithGroveDatabase`, then the default `*grove.DB` in the container. The Grove driver picks the PostgreSQL, SQLite or MongoDB backend, and the store's migrations run at start unless you pass `extension.WithDisableMigrate()`. With none of those, the gateway runs in memory.
 
-## Dashboard Integration
+Only the in-memory store has tests today, so check the database backends against a real server before you rely on them.
 
-When Bastion is used alongside the Forge dashboard extension, it automatically registers itself as a dashboard contributor. The dashboard provides pages for Overview, Routes, Upstreams, Services, Traffic, Health, Circuits, API Explorer, and Config.
+## Dashboard integration
 
-```go
-import (
-    "github.com/xraph/forge"
-    "github.com/xraph/bastion/extension"
-    dashext "github.com/xraph/forge/extensions/dashboard"
-)
+`extension.New` registers a contract contributor for the Forge dashboard. The UI lives in the `plugin-bastion` package of the [forge-dashboard](https://github.com/xraph/forge-dashboard) repo, which has overview, routes and upstreams pages. See [Admin Dashboard](/docs/api-reference/dashboard).
 
-app := forge.New()
-app.Register(dashext.New())
-app.Register(extension.New(
-    bastion.WithDashboardEnabled(true),
-))
-app.Run()
-```
-
-## Complete Example
+## Complete example
 
 ```go
 package main
 
 import (
-    "github.com/xraph/forge"
+    "log"
+
     "github.com/xraph/bastion"
     "github.com/xraph/bastion/extension"
+    "github.com/xraph/forge"
     "github.com/xraph/forge/extensions/discovery"
-    dashext "github.com/xraph/forge/extensions/dashboard"
 )
 
 func main() {
-    app := forge.New()
+    app := forge.NewApp(forge.AppConfig{
+        Name:        "edge",
+        HTTPAddress: ":8080",
+        Extensions: []forge.Extension{
+            // Discovery for FARP service auto-discovery.
+            discovery.NewExtension(discovery.WithBackend("memory")),
 
-    // Register discovery for FARP service auto-discovery.
-    app.Register(discovery.New())
+            // The Bastion API gateway.
+            extension.New(
+                bastion.WithBasePath("/api"),
+                bastion.WithRoute(bastion.RouteConfig{
+                    Path: "/users/*",
+                    Targets: []bastion.TargetConfig{
+                        {URL: "http://user-service:8080", Weight: 1},
+                    },
+                    StripPrefix: true,
+                    Enabled:     true,
+                }),
+                bastion.WithDiscoveryEnabled(true),
+                bastion.WithDashboardEnabled(true),
+                bastion.WithOpenAPIEnabled(true),
+                bastion.WithAdminToken("change-me"),
+            ),
+        },
+    })
 
-    // Register the dashboard extension.
-    app.Register(dashext.New())
-
-    // Register Bastion API gateway.
-    app.Register(extension.New(
-        bastion.WithBasePath("/api"),
-        bastion.WithRoute(bastion.RouteConfig{
-            Path: "/users",
-            Targets: []bastion.TargetConfig{
-                {URL: "http://user-service:8080", Weight: 1},
-            },
-            StripPrefix: true,
-            Enabled:     true,
-        }),
-        bastion.WithDiscoveryEnabled(true),
-        bastion.WithDashboardEnabled(true),
-        bastion.WithOpenAPIEnabled(true),
-    ))
-
-    app.Run()
+    if err := app.Run(); err != nil {
+        log.Fatal(err)
+    }
 }
 ```
 
@@ -317,21 +299,22 @@ With the corresponding YAML config:
 
 ```yaml
 # config.yaml
-bastion:
-  enabled: true
-  base_path: "/api"
-  routes:
-    - path: /users
-      targets:
-        - url: http://user-service:8080
-          weight: 1
-      strip_prefix: true
+extensions:
+  bastion:
+    enabled: true
+    base_path: "/api"
+    routes:
+      - path: /users/*
+        targets:
+          - url: http://user-service:8080
+            weight: 1
+        strip_prefix: true
+        enabled: true
+    discovery:
       enabled: true
-  discovery:
-    enabled: true
-  dashboard:
-    enabled: true
-    base_path: /gateway
-  openapi:
-    enabled: true
+    dashboard:
+      enabled: true
+      base_path: /gateway
+    openapi:
+      enabled: true
 ```

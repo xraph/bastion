@@ -133,9 +133,11 @@ gateway.New(
 ),
 ```
 
-Discovery polls every 30 seconds. You can filter which services become routes with `WithDiscoveryServiceFilters`, rename prefixes with `WithDiscoveryPrefixOverrides`, and keep other Forge extensions' paths out with `WithExtensionFilter`. Services can also push-register themselves at `POST /_farp/v1/register`, with heartbeats at `PUT /_farp/v1/heartbeat/:id`.
+Discovery polls every 30 seconds. You can filter which services become routes with `WithDiscoveryServiceFilters`, rename prefixes with `WithDiscoveryPrefixOverrides`, and keep other Forge extensions' paths out with `WithExtensionFilter`. Services can also push-register themselves at `POST /_farp/v1/register`, with heartbeats at `PUT /_farp/v1/heartbeat/:id`. Those endpoints are mounted with the admin API, so they need `dashboard.enabled`, but they skip the admin auth, because the services calling them have no admin credentials.
 
 If your services publish OpenAPI through FARP, Bastion fetches their specs and merges them into one document at `/gateway/openapi.json`, with per-service specs under `/gateway/api/openapi/services`. Your API consumers get one reference for everything behind the gateway. Turn on `WithOpenAPIRootDocs(true)` if you also want the merged spec at `/openapi.json` and Swagger UI at `/docs`.
+
+These spec endpoints are mounted whenever OpenAPI aggregation is on (`openapi.enabled`, the default), whatever `dashboard.enabled` says. They don't sit behind the admin token or admin middleware either, and that includes `POST /gateway/api/openapi/refresh`, which makes the gateway re-fetch every upstream spec. If your specs aren't public, or you don't want anyone triggering a refresh, put your own guard in front of those paths or turn aggregation off with `WithOpenAPIEnabled(false)`.
 
 ## Hooks and auth providers
 
@@ -228,7 +230,7 @@ extensions:
       enabled: true
       prefix_template: "/{{.ServiceName}}"
     dashboard:
-      enabled: true                # gates the admin API, WebSocket hub and spec endpoints
+      enabled: true                # gates the admin API, the WebSocket hub and the FARP push endpoints
       base_path: /gateway
       admin_token: ""
 ```

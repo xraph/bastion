@@ -7,36 +7,43 @@ This guide walks you through installing Bastion, defining routes, adding resilie
 
 ## Prerequisites
 
-- **Go 1.24+**
+- Go 1.26 or later
 - A Go module (`go mod init`)
 - A Forge application (`github.com/xraph/forge`)
 
 ## Install
 
 ```bash
-go get github.com/xraph/bastion
+go get github.com/xraph/bastion@latest
+go get github.com/xraph/forge/extensions/discovery@latest
 ```
 
-This pulls in the root module and all sub-packages (proxy, resilience, health, discovery, security, etc.).
+This pulls in the root module and all sub-packages (proxy, resilience, health, discovery, security, etc.). Forge's discovery extension is the gateway's declared dependency, so the examples register it with the in-memory backend.
 
-## Step 1 -- Create a basic gateway
+## Step 1: Create a basic gateway
 
-Register Bastion as a Forge extension with a single static route:
+Register Bastion as a Forge extension with a single static route. Use `gateway.New` (or `extension.New` if you want routes persisted in a database). `bastion.New` on its own is the core gateway with nothing wired in, and proxies nothing.
 
 ```go
 package main
 
 import (
-    "github.com/xraph/forge"
+    "log"
+
     "github.com/xraph/bastion"
+    "github.com/xraph/bastion/gateway"
+    "github.com/xraph/forge"
+    "github.com/xraph/forge/extensions/discovery"
 )
 
 func main() {
     app := forge.NewApp(forge.AppConfig{
-        Name:    "api-gateway",
-        Version: "1.0.0",
+        Name:        "api-gateway",
+        Version:     "1.0.0",
+        HTTPAddress: ":8080",
         Extensions: []forge.Extension{
-            bastion.NewExtension(
+            discovery.NewExtension(discovery.WithBackend("memory")),
+            gateway.New(
                 bastion.WithRoute(bastion.RouteConfig{
                     Path:    "/users/*",
                     Targets: []bastion.TargetConfig{
@@ -46,21 +53,26 @@ func main() {
                     Protocol:    bastion.ProtocolHTTP,
                     Enabled:     true,
                 }),
+                bastion.WithAdminToken("change-me"),
             ),
         },
     })
-    app.Run()
+    if err := app.Run(); err != nil {
+        log.Fatal(err)
+    }
 }
 ```
 
-Requests to `/users/*` are proxied to `http://user-service:8080` with the `/users` prefix stripped. A request to `/users/42` becomes `/42` on the upstream.
+Requests to `/users/*` are proxied to `http://user-service:8080` with the `/users` prefix stripped. A request to `/users/42` becomes `/42` on the upstream. Every proxied response carries an `X-Gateway-Route` header naming the route that matched.
 
-## Step 2 -- Add multiple routes
+`WithAdminToken` protects the admin API under `/gateway/api`. Without it (or `WithAdminMiddleware`), Bastion logs a warning at every start. If you leave the discovery extension out, Bastion logs a warning too and serves only the routes you configure.
+
+## Step 2: Add multiple routes
 
 Call `WithRoute` multiple times to define additional routes:
 
 ```go
-bastion.NewExtension(
+gateway.New(
     bastion.WithRoute(bastion.RouteConfig{
         Path:    "/users/*",
         Targets: []bastion.TargetConfig{
@@ -91,41 +103,45 @@ bastion.NewExtension(
 )
 ```
 
-## Step 3 -- Configure load balancing
+## Step 3: Configure load balancing
 
-Add multiple targets to a route and choose a load balancing strategy:
+Add multiple targets to a route and choose a load balancing strategy. The strategy is gateway-wide, set with `WithLoadBalancing`; a route has no strategy of its own:
 
 ```go
-bastion.WithRoute(bastion.RouteConfig{
-    Path: "/users/*",
-    Targets: []bastion.TargetConfig{
-        {URL: "http://user-service-1:8080", Weight: 3},
-        {URL: "http://user-service-2:8080", Weight: 2},
-        {URL: "http://user-service-3:8080", Weight: 1},
-    },
-    StripPrefix:  true,
-    Protocol:     bastion.ProtocolHTTP,
-    LoadBalancer: bastion.LoadBalancerWeightedRoundRobin,
-    Enabled:      true,
-}),
+gateway.New(
+    bastion.WithLoadBalancing(bastion.LoadBalancingConfig{
+        Strategy: bastion.LBWeightedRoundRobin,
+    }),
+    bastion.WithRoute(bastion.RouteConfig{
+        Path: "/users/*",
+        Targets: []bastion.TargetConfig{
+            {URL: "http://user-service-1:8080", Weight: 3},
+            {URL: "http://user-service-2:8080", Weight: 2},
+            {URL: "http://user-service-3:8080", Weight: 1},
+        },
+        StripPrefix: true,
+        Protocol:    bastion.ProtocolHTTP,
+        Enabled:     true,
+    }),
+)
 ```
 
 Available strategies:
 
-| Strategy | Constant | Description |
-|----------|----------|-------------|
-| Round-robin | `LoadBalancerRoundRobin` | Cycles through targets sequentially |
-| Weighted round-robin | `LoadBalancerWeightedRoundRobin` | Distributes based on target weights |
-| Random | `LoadBalancerRandom` | Selects a target at random |
-| Least connections | `LoadBalancerLeastConn` | Sends to the target with fewest active connections |
-| Consistent hash | `LoadBalancerConsistentHash` | Routes based on a hash of the request (sticky sessions) |
+| Strategy | Constant | YAML value | Description |
+|----------|----------|------------|-------------|
+| Round-robin | `LBRoundRobin` | `roundRobin` | Cycles through targets sequentially |
+| Weighted round-robin | `LBWeightedRoundRobin` | `weightedRoundRobin` | Distributes based on target weights |
+| Random | `LBRandom` | `random` | Selects a target at random |
+| Least connections | `LBLeastConnections` | `leastConnections` | Sends to the target with fewest active connections |
+| Consistent hash | `LBConsistentHash` | `consistentHash` | Routes based on a hash of the request (sticky sessions) |
 
-## Step 4 -- Enable circuit breakers
+## Step 4: Enable circuit breakers
 
 Add circuit breaker protection to prevent cascading failures:
 
 ```go
-bastion.NewExtension(
+gateway.New(
     bastion.WithCircuitBreaker(bastion.CircuitBreakerConfig{
         Enabled:          true,
         FailureThreshold: 5,
@@ -143,14 +159,14 @@ bastion.NewExtension(
 )
 ```
 
-When a target accumulates 5 consecutive failures, the circuit opens and requests are rejected immediately. After 30 seconds the circuit enters half-open state and allows a single probe request. If it succeeds, the circuit closes. If it fails, the circuit re-opens.
+When a target accumulates 5 failures (within `FailureWindow`, if you set one), the circuit opens and requests are rejected immediately. After 30 seconds the circuit goes half-open and lets up to `HalfOpenMax` probe requests through (3 by default). Once that many succeed, the circuit closes. Any failure while half-open re-opens it.
 
-## Step 5 -- Add rate limiting
+## Step 5: Add rate limiting
 
 Protect upstreams from traffic spikes with token-bucket rate limiting:
 
 ```go
-bastion.NewExtension(
+gateway.New(
     bastion.WithRateLimiting(bastion.RateLimitConfig{
         Enabled:        true,
         RequestsPerSec: 1000,
@@ -160,14 +176,14 @@ bastion.NewExtension(
 )
 ```
 
-This applies a global rate limit. For per-route limits, set `RateLimit` on individual `RouteConfig` entries. Per-client rate limiting uses the client IP address as the bucket key.
+This applies a global rate limit. For per-route limits, set `RateLimit` on individual `RouteConfig` entries. With `PerClient: true`, the bucket key is the value of `KeyHeader` if you set one, and otherwise `r.RemoteAddr`, which includes the client's port, so two connections from the same address get separate buckets.
 
-## Step 6 -- Enable health checks
+## Step 6: Enable health checks
 
 Active health probes verify upstream availability before routing traffic:
 
 ```go
-bastion.NewExtension(
+gateway.New(
     bastion.WithHealthCheck(bastion.HealthCheckConfig{
         Enabled:  true,
         Interval: 10 * time.Second,
@@ -179,73 +195,72 @@ bastion.NewExtension(
 
 Bastion sends HTTP GET requests to the configured path on each target at the specified interval. Targets that fail health checks are marked unhealthy and excluded from the load balancer pool. They are automatically re-added when health checks pass again.
 
-## Step 7 -- YAML configuration
+## Step 7: YAML configuration
 
 Instead of programmatic configuration, you can define the entire gateway in YAML:
 
 ```yaml
-bastion:
-  enabled: true
-  base_path: "/api"
-  routes:
-    - path: "/users/*"
-      targets:
-        - url: "http://user-service:8080"
-          weight: 1
-      strip_prefix: true
-      protocol: http
+extensions:
+  bastion:
+    enabled: true
+    base_path: "/api"
+    routes:
+      - path: "/users/*"
+        targets:
+          - url: "http://user-service:8080"
+            weight: 1
+        strip_prefix: true
+        protocol: http
+        enabled: true
+    circuit_breaker:
       enabled: true
-  circuit_breaker:
-    enabled: true
-    failure_threshold: 5
-    reset_timeout: 30s
-  rate_limiting:
-    enabled: true
-    requests_per_sec: 1000
-    burst: 100
-  health_check:
-    enabled: true
-    interval: 10s
-    path: "/health"
+      failure_threshold: 5
+      reset_timeout: 30s
+    rate_limiting:
+      enabled: true
+      requests_per_sec: 1000
+      burst: 100
+    health_check:
+      enabled: true
+      interval: 10s
+      path: "/health"
 ```
 
-When using YAML, the Forge application loads configuration automatically. See the [Configuration](/docs/concepts/configuration) page for the full key reference.
+Bastion reads `extensions.bastion`, or a top-level `bastion` key. Keys you leave out keep their defaults, and options you pass in code win over the file. See the [Configuration](/docs/concepts/configuration) page for the full key reference.
 
-## Step 8 -- Integrate with FARP discovery (optional)
+## Step 8: Integrate with FARP discovery (optional)
 
 If your upstream services register themselves via FARP (Forge's service discovery), Bastion can discover them automatically:
 
 ```go
-bastion.NewExtension(
-    bastion.WithDiscovery(bastion.DiscoveryConfig{
-        Enabled:    true,
-        WatchMode:  true,
-        AutoPrefix: true,
-    }),
-    // No manual routes needed -- discovered services are registered automatically
+gateway.New(
+    bastion.WithDiscoveryEnabled(true),
+    bastion.WithDiscoveryAutoPrefix(true),
+    // No manual routes needed: discovered services become routes
 )
 ```
 
 Or via YAML:
 
 ```yaml
-bastion:
-  discovery:
-    enabled: true
-    watch_mode: true
-    auto_prefix: true
+extensions:
+  bastion:
+    discovery:
+      enabled: true
+      poll_interval: 30s
+      auto_prefix: true
 ```
 
-With `watch_mode`, Bastion monitors FARP for service registrations and deregistrations in real time. With `auto_prefix`, each discovered service gets a route prefix matching its service name (e.g., a service named `users` gets the route `/users/*`).
+Discovery polls the discovery extension every `poll_interval` (30 seconds by default). `watch_mode` exists in the config and defaults to `true`, but it isn't implemented yet: Bastion logs a warning and polls anyway. With `auto_prefix`, each discovered service gets a route prefix from `prefix_template`, `/{{.ServiceName}}` by default, so a service named `users` is served under `/users/`.
 
 Discovered routes are merged with any manually configured routes. Manual routes take precedence when paths overlap.
 
-## Step 9 -- Enable the admin API and dashboard (optional)
+## Step 9: Enable the admin API and dashboard (optional)
 
 Bastion ships with an admin REST API. The dashboard is a separate React plugin, `packages/plugin-bastion` in the `forge-dashboard` repo, so add it to your Forge dashboard shell to get the UI (see [Admin Dashboard](/docs/api-reference/dashboard)). The `dashboard` settings below configure the REST API, the WebSocket stream and the OpenAPI endpoints:
 
 ```go
-bastion.NewExtension(
+gateway.New(
     bastion.WithDashboard(bastion.DashboardConfig{
         Enabled:  true,
         BasePath: "/bastion",
@@ -258,19 +273,21 @@ bastion.NewExtension(
 Or via YAML:
 
 ```yaml
-bastion:
-  dashboard:
-    enabled: true
-    base_path: "/bastion"
-    realtime: true
+extensions:
+  bastion:
+    dashboard:
+      enabled: true
+      base_path: "/bastion"
+      realtime: true
+      admin_token: "change-me"
 ```
 
-This exposes the admin REST API at `/bastion/api/*`, an aggregated OpenAPI spec at `/bastion/openapi.json`, a Swagger UI at `/bastion/swagger`, and a real-time WebSocket event stream at `/bastion/ws`.
+This exposes the admin REST API at `/bastion/api/*`, the aggregated upstream OpenAPI spec at `/bastion/openapi.json`, and a real-time WebSocket event stream at `/bastion/ws`. There is no Swagger UI for the aggregated spec under the dashboard path: turn on `WithOpenAPIRootDocs(true)` to get one at `/docs`. See [OpenAPI aggregation](/docs/guides/openapi-aggregation).
 
 ## Next steps
 
-- [Architecture](/docs/architecture) -- Understand the request pipeline, middleware chain, and extension lifecycle.
-- [Routes](/docs/concepts/routes) -- Path matching, protocol selection, and per-route overrides.
-- [Upstreams](/docs/concepts/upstreams) -- Target configuration, health states, and connection pooling.
-- [Protocols](/docs/concepts/protocols) -- HTTP, WebSocket, SSE, and gRPC proxying.
-- [Configuration](/docs/concepts/configuration) -- Full configuration reference with YAML keys and hot-reload behavior.
+- [Architecture](/docs/architecture): understand the request pipeline, middleware chain, and extension lifecycle.
+- [Routes](/docs/concepts/routes): path matching, protocol selection, and per-route overrides.
+- [Upstreams](/docs/concepts/upstreams): target configuration, health states, and connection pooling.
+- [Protocols](/docs/concepts/protocols): HTTP, WebSocket, SSE, and gRPC proxying.
+- [Configuration](/docs/concepts/configuration): the full configuration reference with YAML keys and what can change at runtime.

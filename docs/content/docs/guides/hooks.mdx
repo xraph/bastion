@@ -3,7 +3,7 @@ title: Hook System
 description: Extend gateway behavior with OnRequest, OnResponse, OnError, and lifecycle hooks.
 ---
 
-Bastion's hook system provides extension points at every stage of the request lifecycle and for gateway management events. Hooks let you add custom logic without modifying the gateway core -- authentication, logging, metrics, header injection, error handling, and alerting are all common use cases.
+Bastion's hook system provides extension points at every stage of the request lifecycle and for gateway management events. Hooks let you add custom logic without modifying the gateway core. Authentication, logging, metrics, header injection, error handling, and alerting are all common use cases.
 
 ## Available Hooks
 
@@ -18,34 +18,39 @@ Bastion's hook system provides extension points at every stage of the request li
 
 ## Hook Registration
 
-Hooks must be registered after the gateway extension has started. Use Forge's `AfterStart` callback to ensure the gateway is fully initialized:
+The hook engine exists once the app has registered the gateway, so add your hooks in a Forge lifecycle hook that runs after registration. Keep a reference to the extension you build and call `Hooks()` on it:
 
 ```go
 import (
-    "github.com/xraph/forge"
+    "context"
+    "log"
+    "net/http"
+
     "github.com/xraph/bastion"
-    "github.com/xraph/bastion/extension"
-    "github.com/xraph/vessel"
+    "github.com/xraph/bastion/gateway"
+    "github.com/xraph/forge"
 )
 
-app := forge.New()
-app.Register(extension.New())
+gw := gateway.New(bastion.WithRoutes(routes))
+app := forge.NewApp(forge.AppConfig{Name: "edge", Extensions: []forge.Extension{gw}})
 
-app.AfterStart(func() {
-    gw, err := vessel.Inject[*bastion.Gateway](app.Container())
-    if err != nil {
-        log.Fatal("bastion not registered:", err)
-    }
-
-    // Register hooks on the running gateway
+err := app.RegisterHookFn(forge.PhaseAfterRegister, "bastion-hooks", func(ctx context.Context, app forge.App) error {
     gw.Hooks().OnRequest(func(r *http.Request, route *bastion.Route) error {
         r.Header.Set("X-Gateway-Auth", "validated")
         return nil
     })
+    return nil
 })
+if err != nil {
+    log.Fatal(err)
+}
 
-app.Run()
+if err := app.Run(); err != nil {
+    log.Fatal(err)
+}
 ```
+
+With `extension.New`, call `ext.Gateway().Hooks()` instead. Anywhere else in the app, `forge.Inject[*bastion.Gateway](app.Container())` gives you the same gateway.
 
 Multiple hooks of the same type can be registered. They execute in registration order.
 
@@ -151,7 +156,7 @@ gw.Hooks().OnError(func(err error, route *bastion.Route, w http.ResponseWriter) 
 
 ## OnRouteChange Hook
 
-The `OnRouteChange` hook fires when the route table changes -- routes added, updated, or removed. It runs asynchronously in a goroutine. The `RouteEvent` contains the event type and the affected route.
+The `OnRouteChange` hook fires when the route table changes: routes added, updated, or removed. It runs asynchronously in a goroutine. The `RouteEvent` contains the event type and the affected route.
 
 ```go
 gw.Hooks().OnRouteChange(func(event bastion.RouteEvent) {
@@ -229,18 +234,21 @@ gw.Hooks().OnCircuitBreak(func(targetID string, from, to bastion.CircuitState) {
 
 ## Execution Model
 
-- **OnRequest** and **OnResponse** run synchronously in the request path. Keep them fast to avoid adding latency.
-- **OnError** runs synchronously so you can write custom error responses.
-- **OnRouteChange**, **OnUpstreamHealth**, and **OnCircuitBreak** run asynchronously in goroutines. They do not block the request path.
-- Multiple hooks of the same type execute in registration order.
-- **OnRequest** hooks short-circuit on the first error -- subsequent hooks are not called.
-- All hooks are thread-safe. The hook engine uses read-write locks internally.
+- `OnRequest` and `OnResponse` run synchronously in the request path. Keep them fast to avoid adding latency.
+- `OnError` runs synchronously so you can write custom error responses.
+- `OnRouteChange`, `OnUpstreamHealth` and `OnCircuitBreak` each run in their own goroutine. They don't block the request path, and they don't run in a fixed order.
+- Multiple synchronous hooks of the same type execute in registration order.
+- `OnRequest` hooks short-circuit on the first error: later hooks are not called.
+- Registering hooks is safe from any goroutine. The hook engine uses read-write locks internally.
 
 ## Complete Example
 
 ```go
-app.AfterStart(func() {
-    gw, _ := vessel.Inject[*bastion.Gateway](app.Container())
+err := app.RegisterHookFn(forge.PhaseAfterRegister, "bastion-hooks", func(ctx context.Context, app forge.App) error {
+    gw, err := forge.Inject[*bastion.Gateway](app.Container())
+    if err != nil {
+        return err
+    }
 
     // Request pipeline
     gw.Hooks().OnRequest(func(r *http.Request, route *bastion.Route) error {
@@ -271,5 +279,7 @@ app.AfterStart(func() {
     gw.Hooks().OnCircuitBreak(func(targetID string, from, to bastion.CircuitState) {
         log.Printf("Circuit %s: %s -> %s", targetID, from, to)
     })
+
+    return nil
 })
 ```

@@ -16,31 +16,24 @@ import (
     "net/http"
     "time"
 
-    "github.com/xraph/forge"
+    "context"
+
     "github.com/xraph/bastion"
     "github.com/xraph/bastion/extension"
-    "github.com/xraph/forge/extensions/discovery"
+    "github.com/xraph/forge"
     dashext "github.com/xraph/forge/extensions/dashboard"
-    "github.com/xraph/vessel"
+    "github.com/xraph/forge/extensions/discovery"
 )
 
 func main() {
-    app := forge.New()
-
-    // ─── 1. Register discovery for FARP auto-discovery ──────
-    app.Register(discovery.New())
-
-    // ─── 2. Register the Forge dashboard ────────────────────
-    app.Register(dashext.New())
-
-    // ─── 3. Register Bastion API gateway ────────────────────
-    app.Register(extension.New(
+    // ─── 1. Build the Bastion API gateway ───────────────────
+    ext := extension.New(
         // Base path for all proxied routes
         bastion.WithBasePath("/api"),
 
         // Static routes for known services
         bastion.WithRoute(bastion.RouteConfig{
-            Path:        "/users",
+            Path:        "/users/*",
             ServiceName: "user-service",
             Targets: []bastion.TargetConfig{
                 {URL: "http://user-service-1:8080", Weight: 3},
@@ -52,7 +45,7 @@ func main() {
             OpenAPISpec: "http://user-service-1:8080/openapi.json",
         }),
         bastion.WithRoute(bastion.RouteConfig{
-            Path:        "/orders",
+            Path:        "/orders/*",
             ServiceName: "order-service",
             Targets: []bastion.TargetConfig{
                 {URL: "http://order-service:8080", Weight: 1},
@@ -62,20 +55,19 @@ func main() {
             OpenAPISpec: "http://order-service:8080/openapi.json",
         }),
 
-        // FARP discovery -- auto-detect new services on the network
+        // FARP discovery: poll for new services on the network
         bastion.WithDiscoveryEnabled(true),
         bastion.WithDiscoveryPollInterval(15 * time.Second),
-        bastion.WithDiscoveryWatchMode(true),
         bastion.WithDiscoveryAutoPrefix(true),
         bastion.WithDiscoveryPrefixTemplate("/{{.ServiceName}}"),
         bastion.WithDiscoveryStripPrefix(true),
 
-        // Load balancing -- weighted round-robin across targets
+        // Load balancing: weighted round-robin across targets
         bastion.WithLoadBalancing(bastion.LoadBalancingConfig{
             Strategy: bastion.LBWeightedRoundRobin,
         }),
 
-        // Circuit breakers -- fail fast on unhealthy upstreams
+        // Circuit breakers: fail fast on unhealthy upstreams
         bastion.WithCircuitBreaker(bastion.CircuitBreakerConfig{
             Enabled:          true,
             FailureThreshold: 5,
@@ -84,7 +76,7 @@ func main() {
             HalfOpenMax:      3,
         }),
 
-        // Rate limiting -- global request throttling
+        // Rate limiting: global request throttling
         bastion.WithRateLimiting(bastion.RateLimitConfig{
             Enabled:        true,
             RequestsPerSec: 1000,
@@ -92,7 +84,7 @@ func main() {
             PerClient:      true,
         }),
 
-        // Health checks -- active probing of upstream targets
+        // Health checks: active probing of upstream targets
         bastion.WithHealthCheck(bastion.HealthCheckConfig{
             Enabled:              true,
             Interval:             10 * time.Second,
@@ -104,7 +96,7 @@ func main() {
             PassiveFailThreshold: 5,
         }),
 
-        // Retry -- automatic retry for transient failures
+        // Retry: automatic retry for transient failures
         bastion.WithRetry(bastion.RetryConfig{
             Enabled:          true,
             MaxAttempts:      3,
@@ -117,11 +109,10 @@ func main() {
             RetryableMethods: []string{"GET", "HEAD", "OPTIONS"},
         }),
 
-        // OpenAPI aggregation -- merge specs from all upstreams
+        // OpenAPI aggregation: merge specs from all upstreams
         bastion.WithOpenAPI(bastion.OpenAPIConfig{
             Enabled:         true,
             Path:            "/openapi.json",
-            UIPath:          "/swagger",
             Title:           "My API Gateway",
             Description:     "Unified API documentation",
             Version:         "1.0.0",
@@ -133,9 +124,10 @@ func main() {
 
         // Admin REST API, WebSocket stream and OpenAPI endpoints
         bastion.WithDashboard(bastion.DashboardConfig{
-            Enabled:  true,
-            BasePath: "/gateway",
-            Realtime: true,
+            Enabled:    true,
+            BasePath:   "/gateway",
+            Realtime:   true,
+            AdminToken: "change-me",
         }),
 
         // CORS
@@ -146,14 +138,23 @@ func main() {
             AllowHeaders: []string{"Authorization", "Content-Type"},
             MaxAge:       86400,
         }),
-    ))
+    )
+
+    app := forge.NewApp(forge.AppConfig{
+        Name:        "edge",
+        HTTPAddress: ":8080",
+        Extensions: []forge.Extension{
+            // ─── 2. Discovery for FARP auto-discovery ───────
+            discovery.NewExtension(discovery.WithBackend("memory")),
+            // ─── 3. The Forge dashboard contract server ─────
+            dashext.NewExtension(),
+            ext,
+        },
+    })
 
     // ─── 4. Register hooks for logging and alerting ─────────
-    app.AfterStart(func() {
-        gw, err := vessel.Inject[*bastion.Gateway](app.Container())
-        if err != nil {
-            log.Fatal("resolve bastion:", err)
-        }
+    err := app.RegisterHookFn(forge.PhaseAfterStart, "bastion-hooks", func(ctx context.Context, app forge.App) error {
+        gw := ext.Gateway()
 
         // Log every proxied request
         gw.Hooks().OnRequest(func(r *http.Request, route *bastion.Route) error {
@@ -199,30 +200,33 @@ func main() {
             stats.TotalRoutes, stats.TotalUpstreams)
         fmt.Printf("Admin API: http://localhost:8080/gateway/api/routes\n")
         fmt.Printf("API Docs:  http://localhost:8080/gateway/openapi.json\n")
-        fmt.Printf("Swagger:   http://localhost:8080/gateway/swagger\n\n")
+        fmt.Printf("Swagger:   http://localhost:8080/docs\n\n")
+
+        return nil
     })
+    if err != nil {
+        log.Fatal(err)
+    }
 
     // ─── 5. Run the application ─────────────────────────────
-    app.Run()
+    if err := app.Run(); err != nil {
+        log.Fatal(err)
+    }
 }
 ```
 
 ## YAML Config Equivalent
 
-The same gateway configuration expressed as YAML:
+The same gateway configuration expressed as YAML. Bastion reads `extensions.bastion` first and falls back to the top-level `bastion` key used here:
 
 ```yaml
 # config.yaml
-app:
-  name: api-gateway
-  port: 8080
-
 bastion:
   enabled: true
   base_path: "/api"
 
   routes:
-    - path: /users
+    - path: /users/*
       service_name: user-service
       targets:
         - url: http://user-service-1:8080
@@ -235,7 +239,7 @@ bastion:
       enabled: true
       openapi_spec: http://user-service-1:8080/openapi.json
 
-    - path: /orders
+    - path: /orders/*
       service_name: order-service
       targets:
         - url: http://order-service:8080
@@ -247,7 +251,6 @@ bastion:
   discovery:
     enabled: true
     poll_interval: 15s
-    watch_mode: true
     auto_prefix: true
     prefix_template: "/{{.ServiceName}}"
     strip_prefix: true
@@ -292,7 +295,6 @@ bastion:
   openapi:
     enabled: true
     path: /openapi.json
-    ui_path: /swagger
     title: "My API Gateway"
     description: "Unified API documentation"
     version: "1.0.0"
@@ -306,6 +308,7 @@ bastion:
     base_path: /gateway
     title: "API Gateway Dashboard"
     realtime: true
+    admin_token: "change-me"
 
   cors:
     enabled: true
@@ -319,58 +322,55 @@ bastion:
 
 | Feature | What Is Configured |
 |---------|--------------------|
-| **Static Routes** | Two services (user-service, order-service) with explicit targets and weights |
-| **FARP Discovery** | Auto-detection of new services on the network with watch mode |
-| **Load Balancing** | Weighted round-robin distributes traffic by target weight |
-| **Circuit Breakers** | Auto-trip after 5 failures in 60s, half-open probe after 30s |
-| **Rate Limiting** | 1000 req/s global with per-client tracking and burst of 200 |
-| **Health Checks** | Active probing every 10s, passive failure detection |
-| **Retry** | Exponential backoff with jitter for 502/503/504 errors |
-| **OpenAPI Aggregation** | Merged spec from all upstream services at /openapi.json |
-| **Admin API** | REST API and WebSocket stream under /gateway (the React dashboard plugin reads the contract contributor instead) |
-| **CORS** | Cross-origin support for the frontend application |
-| **Hooks** | Request logging, response tagging, error alerting, health alerts |
+| Static routes | Two services (user-service, order-service) with explicit targets and weights |
+| FARP discovery | Polling for new services every 15 seconds |
+| Load balancing | Weighted round-robin distributes traffic by target weight |
+| Circuit breakers | Trip after 5 failures in 60s, half-open probes after 30s |
+| Rate limiting | 1000 req/s with per-client buckets and a burst of 200 |
+| Health checks | Active probing every 10s, passive failure detection |
+| Retry | Exponential backoff with jitter for 502/503/504 errors |
+| OpenAPI aggregation | Merged spec from all upstream services at /gateway/openapi.json, plus /openapi.json and Swagger UI at /docs |
+| Admin API | REST API and WebSocket stream under /gateway, behind the admin token (the React dashboard plugin reads the contract contributor instead) |
+| CORS | Cross-origin support for the frontend application |
+| Hooks | Request logging, response tagging, error alerting, health alerts |
 
 ## Running the Gateway
 
 ```bash
-# Build and run
-go run main.go
-
-# Or with a custom config file
-CONFIG_FILE=config.yaml go run main.go
+go run .
 ```
+
+Forge picks up a `config.yaml` in the working directory on its own.
 
 Once running:
 
-- **Proxy endpoint**: `http://localhost:8080/api/*` -- routes to upstream services
-- **Admin API**: `http://localhost:8080/gateway/api/routes` -- REST API for routes, stats and discovery
-- **API docs**: `http://localhost:8080/gateway/openapi.json` -- aggregated OpenAPI spec
-- **Swagger UI**: `http://localhost:8080/gateway/swagger` -- interactive API explorer
-- **Admin API**: `http://localhost:8080/gateway/api/routes` -- route management
-- **Stats**: `http://localhost:8080/gateway/api/stats` -- gateway statistics
-- **WebSocket**: `ws://localhost:8080/gateway/ws` -- real-time event stream
+- Proxy: `http://localhost:8080/api/users/...` and `http://localhost:8080/api/orders/...` go to the upstream services
+- Admin API: `http://localhost:8080/gateway/api/routes`, the REST API for routes, stats and discovery
+- API docs: `http://localhost:8080/gateway/openapi.json`, the aggregated OpenAPI spec
+- Swagger UI: `http://localhost:8080/docs`, because `EnableRootDocs` is on. There is none under `/gateway`
+- Stats: `http://localhost:8080/gateway/api/stats`
+- WebSocket: `ws://localhost:8080/gateway/ws`, the real-time event stream
 
 ## Testing the Gateway
 
 ```bash
 # List all routes
-curl http://localhost:8080/gateway/api/routes | jq
+curl -H "Authorization: Bearer change-me" http://localhost:8080/gateway/api/routes | jq
 
 # Proxy a request through the gateway
-curl http://localhost:8080/api/users
+curl http://localhost:8080/api/users/42
 
 # Check gateway statistics
-curl http://localhost:8080/gateway/api/stats | jq
+curl -H "Authorization: Bearer change-me" http://localhost:8080/gateway/api/stats | jq
 
 # View discovered services
-curl http://localhost:8080/gateway/api/discovery/services | jq
+curl -H "Authorization: Bearer change-me" http://localhost:8080/gateway/api/discovery/services | jq
 
 # Create a route via the admin API
-curl -X POST http://localhost:8080/gateway/api/routes \
+curl -X POST -H "Authorization: Bearer change-me" http://localhost:8080/gateway/api/routes \
   -H "Content-Type: application/json" \
   -d '{
-    "path": "/products",
+    "path": "/products/*",
     "targets": [{"url": "http://product-service:8080", "weight": 1}],
     "stripPrefix": true,
     "enabled": true,
@@ -380,8 +380,8 @@ curl -X POST http://localhost:8080/gateway/api/routes \
 
 ## Next Steps
 
-- [Forge Extension](/docs/guides/forge-extension) -- Extension lifecycle and DI integration
-- [Hook System](/docs/guides/hooks) -- Custom request/response processing
-- [OpenAPI Aggregation](/docs/guides/openapi-aggregation) -- Unified API documentation
-- [Admin REST API](/docs/api-reference/admin-api) -- Complete API endpoint reference
-- [Admin Dashboard](/docs/api-reference/dashboard) -- The React dashboard plugin and its contract intents
+- [Forge Extension](/docs/guides/forge-extension): Extension lifecycle and DI integration
+- [Hook System](/docs/guides/hooks): Custom request/response processing
+- [OpenAPI Aggregation](/docs/guides/openapi-aggregation): Unified API documentation
+- [Admin REST API](/docs/api-reference/admin-api): Complete API endpoint reference
+- [Admin Dashboard](/docs/api-reference/dashboard): The React dashboard plugin and its contract intents
