@@ -7,6 +7,9 @@ import (
 	"time"
 
 	"github.com/xraph/forge"
+	"go.opentelemetry.io/otel/attribute"
+
+	"github.com/xraph/bastion/internal/telemetry"
 )
 
 // Auth handles authentication for gateway requests.
@@ -74,7 +77,32 @@ func (ga *Auth) Authenticate(r *http.Request, route Route) (*AuthContext, error)
 		return nil, &AuthError{Code: http.StatusUnauthorized, Message: "no auth providers configured"}
 	}
 
-	// Try each provider in order (OR logic - any success passes)
+	// The span covers the providers, so a forward-auth call shows up
+	// inside it. A denial is the answer auth exists to give, not a failure,
+	// so it sets bastion.auth.result and leaves the status alone.
+	ctx, span := telemetry.Start(r.Context(), "authenticate request")
+	defer span.End()
+
+	r = r.WithContext(ctx)
+
+	authCtx, err := ga.authenticate(r, routeAuth, providerNames)
+
+	result := "ok"
+	if err != nil {
+		result = "denied"
+	}
+
+	span.SetAttributes(attribute.String("bastion.auth.result", result))
+
+	if authCtx != nil {
+		span.SetAttributes(attribute.String("bastion.auth.provider", authCtx.ProviderName))
+	}
+
+	return authCtx, err
+}
+
+// authenticate tries providerNames in order, the first success winning.
+func (ga *Auth) authenticate(r *http.Request, routeAuth *RouteAuthConfig, providerNames []string) (*AuthContext, error) {
 	var lastErr error
 	for _, name := range providerNames {
 		provider := ga.getProvider(name)
@@ -289,6 +317,8 @@ func NewForwardAuthProvider(name, endpoint string, headers []string) *ForwardAut
 		headers:  headers,
 		client: &http.Client{
 			Timeout: 5 * time.Second,
+			// The call gets a client span and carries the trace context.
+			Transport: telemetry.NewTransport(nil, "call forward auth"),
 		},
 	}
 }
