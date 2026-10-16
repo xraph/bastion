@@ -12,6 +12,17 @@ import (
 
 	"github.com/xraph/farp"
 	"github.com/xraph/forge"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
+
+	"github.com/xraph/bastion/internal/telemetry"
+	"github.com/xraph/bastion/observability"
+)
+
+// Span names for discovery work.
+const (
+	spanDiscoverServices = "discover services"
+	spanFetchManifest    = "fetch farp manifest"
 )
 
 // errManifestNotFound is returned when the remote FARP endpoint returns 404,
@@ -25,6 +36,7 @@ type Manager struct {
 	rm         RouteRegistry
 	service    DiscoveryService
 	httpClient *http.Client
+	metrics    *observability.Metrics
 
 	mu               sync.RWMutex
 	discoveredSvcs   map[string]*DiscoveredService
@@ -63,7 +75,7 @@ func NewManager(
 		logger:                 logger,
 		rm:                     rm,
 		service:                discService,
-		httpClient:             &http.Client{Timeout: fetchTimeout},
+		httpClient:             &http.Client{Timeout: fetchTimeout, Transport: telemetry.NewTransport(nil, spanFetchManifest)},
 		discoveredSvcs:         make(map[string]*DiscoveredService),
 		servicePrefixes:        make(map[string]string),
 		serviceManifests:       make(map[string]*farp.SchemaManifest),
@@ -112,14 +124,21 @@ func (sd *Manager) Start(ctx context.Context) error {
 		sd.logger.Warn("initial service discovery failed", forge.F("error", err))
 	}
 
-	// Start polling or watching
+	// Start polling or watching. The initial pass above ran under ctx's
+	// span (Forge's boot span), which is still open. The loop outlives it,
+	// so it drops the span: its ListServices calls then never land in the
+	// finished boot trace.
 	sd.wg.Add(1)
 	sd.started = true
 
-	go sd.loop(ctx)
+	go sd.loop(telemetry.Detach(ctx))
 
 	return nil
 }
+
+// SetMetrics sets where discovery records the duration of each pass. Nil
+// records none. Call it before Start.
+func (sd *Manager) SetMetrics(m *observability.Metrics) { sd.metrics = m }
 
 // Stop stops service discovery. It is safe to call multiple times
 // and safe to call when Start() was never invoked.
@@ -185,7 +204,7 @@ func (sd *Manager) RegisterService(ctx context.Context, info *ServiceInstanceInf
 	}
 	sd.mu.Unlock()
 
-	sd.processService(info.Name, allInstances)
+	sd.processService(ctx, info.Name, allInstances)
 
 	sd.emitServiceChange(info.Name, true)
 
@@ -371,23 +390,87 @@ func (sd *Manager) loop(ctx context.Context) {
 		case <-sd.stopCh:
 			return
 		case <-ticker.C:
-			if err := sd.refresh(ctx); err != nil {
+			// Each poll that has work is the root of its own trace.
+			if err := sd.runRefresh(ctx, true); err != nil {
 				sd.logger.Warn("service discovery refresh failed", forge.F("error", err))
 			}
 		}
 	}
 }
 
+// refresh runs one discovery pass. Its span is a child of whatever span
+// ctx carries: the request's, when an operator asks for a refresh, or the
+// boot span, for the pass Start runs.
 func (sd *Manager) refresh(ctx context.Context) error {
+	return sd.runRefresh(ctx, false)
+}
+
+// refreshCounts is what one discovery pass found.
+type refreshCounts struct {
+	services   int // listed services that passed the filters
+	unresolved int // services whose instances couldn't be looked up
+	removed    int // services removed for being gone too long
+}
+
+// runRefresh runs one discovery pass. root starts its span as the root of a
+// new trace, for the polling loop.
+//
+// The span only starts once the listing is back and there is something to
+// do: services listed, services known from earlier passes, or an error. An
+// idle poll records its duration and nothing else. The span's start time is
+// still the start of the pass.
+func (sd *Manager) runRefresh(ctx context.Context, root bool) (err error) {
 	if sd.service == nil {
 		return nil
 	}
 
+	start := time.Now()
+
+	var counts refreshCounts
+
+	defer func() {
+		sd.metrics.ObserveJob(observability.JobDiscovery, err != nil || counts.unresolved > 0, time.Since(start))
+	}()
+
 	// List all services
 	serviceNames, err := sd.service.ListServices(ctx)
+
+	sd.mu.RLock()
+	known := len(sd.discoveredSvcs) + len(sd.pushInstances)
+	sd.mu.RUnlock()
+
+	if err == nil && len(serviceNames) == 0 && known == 0 {
+		return nil
+	}
+
+	startSpan := telemetry.Start
+	if root {
+		startSpan = telemetry.StartRoot
+	}
+
+	ctx, span := startSpan(ctx, spanDiscoverServices, trace.WithTimestamp(start))
+	defer span.End()
+
 	if err != nil {
+		telemetry.Fail(span, "list services failed", err)
+
 		return fmt.Errorf("failed to list services: %w", err)
 	}
+
+	sd.refreshServices(ctx, serviceNames, &counts)
+
+	span.SetAttributes(
+		attribute.Int("bastion.discovery.services", counts.services),
+		attribute.Int("bastion.discovery.unresolved", counts.unresolved),
+		attribute.Int("bastion.discovery.removed", counts.removed),
+	)
+
+	return nil
+}
+
+// refreshServices brings the routes in line with serviceNames, the services
+// the discovery backend lists right now.
+func (sd *Manager) refreshServices(ctx context.Context, serviceNames []string, counts *refreshCounts) {
 
 	sd.logger.Debug("discovery refresh: listed services",
 		forge.F("count", len(serviceNames)),
@@ -420,8 +503,12 @@ func (sd *Manager) refresh(ctx context.Context) error {
 		sd.serviceLastSeen[name] = now
 		sd.mu.Unlock()
 
+		counts.services++
+
 		instances, discErr := sd.service.DiscoverHealthy(ctx, name)
 		if discErr != nil {
+			counts.unresolved++
+
 			sd.logger.Warn("failed to discover service",
 				forge.F("service", name),
 				forge.F("error", discErr),
@@ -465,7 +552,7 @@ func (sd *Manager) refresh(ctx context.Context) error {
 
 		currentServices[name] = true
 
-		sd.processService(name, instances)
+		sd.processService(ctx, name, instances)
 
 		// Only emit for genuinely new services, not on every poll tick
 		if !alreadyKnown[name] {
@@ -540,7 +627,7 @@ func (sd *Manager) refresh(ctx context.Context) error {
 		sd.emitServiceChange(name, false)
 	}
 
-	return nil
+	counts.removed = len(removedServices)
 }
 
 // markTargetsUnhealthy marks all targets as unhealthy for routes belonging to
@@ -699,7 +786,7 @@ func (sd *Manager) serviceLock(name string) *sync.Mutex {
 	return mu
 }
 
-func (sd *Manager) processService(name string, instances []*ServiceInstanceInfo) {
+func (sd *Manager) processService(ctx context.Context, name string, instances []*ServiceInstanceInfo) {
 	if len(instances) == 0 {
 		return
 	}
@@ -753,7 +840,7 @@ func (sd *Manager) processService(name string, instances []*ServiceInstanceInfo)
 
 	if farpEnabled, ok := firstInstance.Metadata["farp.enabled"]; ok && farpEnabled == "true" {
 		// Try to get routes from FARP manifest
-		farpRoutes := sd.routesFromFARP(name, firstInstance, targets)
+		farpRoutes := sd.routesFromFARP(ctx, name, firstInstance, targets)
 		if len(farpRoutes) > 0 {
 			routes = farpRoutes
 
@@ -903,7 +990,7 @@ func (sd *Manager) processService(name string, instances []*ServiceInstanceInfo)
 	sd.mu.Unlock()
 }
 
-func (sd *Manager) routesFromFARP(serviceName string, instance *ServiceInstanceInfo, targets []*Target) []*Route {
+func (sd *Manager) routesFromFARP(ctx context.Context, serviceName string, instance *ServiceInstanceInfo, targets []*Target) []*Route {
 	// 0. Check for a pre-set manifest (from inline push registration).
 	sd.mu.RLock()
 	cachedManifest := sd.serviceManifests[serviceName]
@@ -935,10 +1022,13 @@ func (sd *Manager) routesFromFARP(serviceName string, instance *ServiceInstanceI
 			timeout = 10 * time.Second
 		}
 
-		ctx, cancel := context.WithTimeout(context.Background(), timeout)
+		// The fetch keeps ctx's span as its parent but not its
+		// cancellation, as it always has: a pushing client that hangs up
+		// doesn't abandon the fetch.
+		fetchCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), timeout)
 		defer cancel()
 
-		manifest, err := sd.fetchManifest(ctx, manifestURL)
+		manifest, err := sd.fetchManifest(fetchCtx, manifestURL)
 		if err == nil && manifest != nil {
 			// Cache the manifest for downstream consumers (OpenAPI/AsyncAPI aggregators).
 			sd.mu.Lock()

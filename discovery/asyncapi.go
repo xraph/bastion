@@ -7,11 +7,17 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/xraph/farp"
 	"github.com/xraph/farp/merger"
 	"github.com/xraph/forge"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
+
+	"github.com/xraph/bastion/internal/telemetry"
+	"github.com/xraph/bastion/observability"
 )
 
 // AsyncAPIAggregator fetches, caches, and merges AsyncAPI specs from all
@@ -23,6 +29,7 @@ type AsyncAPIAggregator struct {
 	disc          *Manager
 	httpClient    *http.Client
 	schemaFetcher *SchemaFetcher
+	metrics       *observability.Metrics
 
 	mu             sync.RWMutex
 	mergedSpec     map[string]any // cached merged spec
@@ -36,7 +43,8 @@ type AsyncAPIAggregator struct {
 // NewAsyncAPIAggregator creates a new AsyncAPI aggregator.
 func NewAsyncAPIAggregator(config AsyncAPIConfig, logger forge.Logger, disc *Manager) *AsyncAPIAggregator {
 	httpClient := &http.Client{
-		Timeout: config.FetchTimeout,
+		Timeout:   config.FetchTimeout,
+		Transport: telemetry.NewTransport(nil, "fetch asyncapi spec"),
 	}
 
 	return &AsyncAPIAggregator{
@@ -49,12 +57,20 @@ func NewAsyncAPIAggregator(config AsyncAPIConfig, logger forge.Logger, disc *Man
 	}
 }
 
+// SetMetrics sets where the aggregator records the duration of each
+// refresh. Nil records none. Call it before Start.
+func (aa *AsyncAPIAggregator) SetMetrics(m *observability.Metrics) { aa.metrics = m }
+
 // Start begins the periodic spec refresh loop and subscribes to service
-// change events for reactive refresh.
+// change events for reactive refresh. The refreshes it runs are each the
+// root of their own trace.
 func (aa *AsyncAPIAggregator) Start(ctx context.Context) {
 	if !aa.config.Enabled {
 		return
 	}
+
+	// The loops outlive Start, so they drop the boot span ctx carries.
+	ctx = telemetry.Detach(ctx)
 
 	// Subscribe to service changes for reactive refresh.
 	if aa.disc != nil {
@@ -77,7 +93,7 @@ func (aa *AsyncAPIAggregator) Start(ctx context.Context) {
 	go func() {
 		select {
 		case <-time.After(3 * time.Second):
-			aa.Refresh(ctx)
+			aa.refresh(ctx, true)
 		case <-ctx.Done():
 		}
 	}()
@@ -92,7 +108,7 @@ func (aa *AsyncAPIAggregator) Start(ctx context.Context) {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				aa.Refresh(ctx)
+				aa.refresh(ctx, true)
 			}
 		}
 	}()
@@ -129,13 +145,29 @@ func (aa *AsyncAPIAggregator) debounceLoop(ctx context.Context) {
 				}
 			}
 
-			aa.Refresh(ctx)
+			aa.refresh(ctx, true)
 		}
 	}
 }
 
 // Refresh fetches all upstream AsyncAPI specs and rebuilds the merged spec.
+// Its span is a child of whatever span ctx carries.
 func (aa *AsyncAPIAggregator) Refresh(ctx context.Context) {
+	aa.refresh(ctx, false)
+}
+
+// RefreshDetached is Refresh for a caller that doesn't wait for it. The
+// refresh starts a trace of its own, linked to ctx's span.
+func (aa *AsyncAPIAggregator) RefreshDetached(ctx context.Context) {
+	aa.refresh(telemetry.Detach(ctx), true, trace.LinkFromContext(ctx))
+}
+
+// refresh is Refresh. root starts its span as the root of a new trace, for
+// the background loops, linked to links. The span only starts once there
+// are specs to fetch.
+func (aa *AsyncAPIAggregator) refresh(ctx context.Context, root bool, links ...trace.Link) {
+	start := time.Now()
+
 	aa.mu.Lock()
 	if aa.refreshing {
 		aa.mu.Unlock()
@@ -153,9 +185,6 @@ func (aa *AsyncAPIAggregator) Refresh(ctx context.Context) {
 	if aa.disc == nil {
 		return
 	}
-
-	refreshCtx, refreshCancel := context.WithTimeout(ctx, 30*time.Second)
-	defer refreshCancel()
 
 	// Collect AsyncAPI schemas from FARP manifests.
 	manifests := aa.disc.ServiceManifests()
@@ -242,8 +271,34 @@ func (aa *AsyncAPIAggregator) Refresh(ctx context.Context) {
 	}
 
 	if len(sources) == 0 {
+		aa.metrics.ObserveJob(observability.JobAsyncAPI, false, time.Since(start))
+
 		return
 	}
+
+	startSpan := telemetry.Start
+	if root {
+		startSpan = telemetry.StartRoot
+	}
+
+	ctx, span := startSpan(ctx, "refresh asyncapi specs", trace.WithTimestamp(start), trace.WithLinks(validLinks(links)...))
+	defer span.End()
+
+	refreshCtx, refreshCancel := context.WithTimeout(ctx, 30*time.Second)
+	defer refreshCancel()
+
+	var (
+		failed    atomic.Int64
+		mergeFail bool
+	)
+
+	defer func() {
+		span.SetAttributes(
+			attribute.Int("bastion.asyncapi.sources", len(sources)),
+			attribute.Int64("bastion.asyncapi.failed", failed.Load()),
+		)
+		aa.metrics.ObserveJob(observability.JobAsyncAPI, mergeFail || failed.Load() > 0, time.Since(start))
+	}()
 
 	// Fetch schemas in parallel.
 	const maxConcurrent = 10
@@ -286,6 +341,8 @@ func (aa *AsyncAPIAggregator) Refresh(ctx context.Context) {
 			}
 
 			if fetched == nil || !fetched.Healthy || fetched.Schema == nil {
+				failed.Add(1)
+
 				return
 			}
 
@@ -335,10 +392,17 @@ func (aa *AsyncAPIAggregator) Refresh(ctx context.Context) {
 		SortOutput:         true,
 	}
 
+	_, mergeSpan := telemetry.Start(ctx, "merge asyncapi specs")
+
 	m := merger.NewAsyncAPIMerger(mergerConfig)
 	result, err := m.MergeAsyncAPI(asyncSchemas)
 	if err != nil {
+		mergeFail = true
+		telemetry.Fail(mergeSpan, "merge failed", err)
+		mergeSpan.End()
+		telemetry.Fail(span, "merge failed", nil)
 		aa.logger.Error("AsyncAPI merge failed", forge.F("error", err))
+
 		return
 	}
 
@@ -348,9 +412,16 @@ func (aa *AsyncAPIAggregator) Refresh(ctx context.Context) {
 	// Serialize to JSON.
 	mergedJSON, err := json.Marshal(merged)
 	if err != nil {
+		mergeFail = true
+		telemetry.Fail(mergeSpan, "serialize merged spec failed", err)
+		mergeSpan.End()
+		telemetry.Fail(span, "merge failed", nil)
 		aa.logger.Error("failed to serialize merged AsyncAPI spec", forge.F("error", err))
+
 		return
 	}
+
+	mergeSpan.End()
 
 	// Atomically update.
 	aa.mu.Lock()
@@ -363,6 +434,8 @@ func (aa *AsyncAPIAggregator) Refresh(ctx context.Context) {
 	if channels, ok := merged["channels"].(map[string]any); ok {
 		channelCount = len(channels)
 	}
+
+	span.SetAttributes(attribute.Int("bastion.asyncapi.channels", channelCount))
 
 	aa.logger.Debug("AsyncAPI specs refreshed",
 		forge.F("services", len(asyncSchemas)),

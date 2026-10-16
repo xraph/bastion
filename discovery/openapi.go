@@ -9,11 +9,17 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/xraph/farp"
 	"github.com/xraph/farp/merger"
 	"github.com/xraph/forge"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
+
+	"github.com/xraph/bastion/internal/telemetry"
+	"github.com/xraph/bastion/observability"
 )
 
 // OpenAPIAggregator fetches, caches, and merges OpenAPI specs from all
@@ -32,6 +38,7 @@ type OpenAPIAggregator struct {
 	disc          *Manager
 	httpClient    *http.Client
 	schemaFetcher *SchemaFetcher
+	metrics       *observability.Metrics
 
 	mu             sync.RWMutex
 	serviceSpecs   map[string]*ServiceOpenAPISpec // serviceName -> spec
@@ -46,7 +53,8 @@ type OpenAPIAggregator struct {
 // NewAggregator creates a new OpenAPI aggregator.
 func NewAggregator(config OpenAPIConfig, logger forge.Logger, rm RouteRegistry, disc *Manager) *OpenAPIAggregator {
 	httpClient := &http.Client{
-		Timeout: config.FetchTimeout,
+		Timeout:   config.FetchTimeout,
+		Transport: telemetry.NewTransport(nil, "fetch openapi spec"),
 	}
 
 	return &OpenAPIAggregator{
@@ -61,12 +69,20 @@ func NewAggregator(config OpenAPIConfig, logger forge.Logger, rm RouteRegistry, 
 	}
 }
 
+// SetMetrics sets where the aggregator records the duration of each
+// refresh. Nil records none. Call it before Start.
+func (oa *OpenAPIAggregator) SetMetrics(m *observability.Metrics) { oa.metrics = m }
+
 // Start begins the periodic spec refresh loop and subscribes to service
-// change events for reactive refresh.
+// change events for reactive refresh. The refreshes it runs are each the
+// root of their own trace.
 func (oa *OpenAPIAggregator) Start(ctx context.Context) {
 	if !oa.config.Enabled {
 		return
 	}
+
+	// The loops outlive Start, so they drop the boot span ctx carries.
+	ctx = telemetry.Detach(ctx)
 
 	// Subscribe to service changes for reactive refresh with debouncing.
 	// When services push-register to the gateway, this triggers an OpenAPI
@@ -96,7 +112,7 @@ func (oa *OpenAPIAggregator) Start(ctx context.Context) {
 	go func() {
 		select {
 		case <-time.After(2 * time.Second):
-			oa.Refresh(ctx)
+			oa.refresh(ctx, true)
 		case <-ctx.Done():
 		}
 	}()
@@ -111,7 +127,7 @@ func (oa *OpenAPIAggregator) Start(ctx context.Context) {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				oa.Refresh(ctx)
+				oa.refresh(ctx, true)
 			}
 		}
 	}()
@@ -154,13 +170,32 @@ func (oa *OpenAPIAggregator) debounceLoop(ctx context.Context) {
 				}
 			}
 
-			oa.Refresh(ctx)
+			oa.refresh(ctx, true)
 		}
 	}
 }
 
 // Refresh fetches all upstream OpenAPI specs and rebuilds the merged spec.
+// Its span is a child of whatever span ctx carries.
 func (oa *OpenAPIAggregator) Refresh(ctx context.Context) {
+	oa.refresh(ctx, false)
+}
+
+// RefreshDetached is Refresh for a caller that doesn't wait for it, such as
+// a request handler that answers before the refresh is done. The refresh
+// starts a trace of its own, linked to ctx's span, instead of hanging off a
+// span that ends first.
+func (oa *OpenAPIAggregator) RefreshDetached(ctx context.Context) {
+	oa.refresh(telemetry.Detach(ctx), true, trace.LinkFromContext(ctx))
+}
+
+// refresh is Refresh. root starts its span as the root of a new trace, for
+// the background loops, linked to links. The span only starts once there
+// are specs to fetch, so a gateway with no OpenAPI services records no
+// trace per tick.
+func (oa *OpenAPIAggregator) refresh(ctx context.Context, root bool, links ...trace.Link) {
+	start := time.Now()
+
 	oa.mu.Lock()
 	if oa.refreshing {
 		oa.mu.Unlock()
@@ -177,9 +212,6 @@ func (oa *OpenAPIAggregator) Refresh(ctx context.Context) {
 
 	// Fetch specs in parallel with concurrency limit and cycle timeout.
 	const maxConcurrentSpecFetches = 10
-
-	refreshCtx, refreshCancel := context.WithTimeout(ctx, 30*time.Second)
-	defer refreshCancel()
 
 	// Collect schema sources: FARP manifests (preferred) + fallback metadata-based services.
 	type schemaSource struct {
@@ -272,8 +304,30 @@ func (oa *OpenAPIAggregator) Refresh(ctx context.Context) {
 
 	if len(sources) == 0 {
 		oa.logger.Debug("OpenAPI: no schema sources found, skipping refresh")
+		oa.metrics.ObserveJob(observability.JobOpenAPI, false, time.Since(start))
+
 		return
 	}
+
+	startSpan := telemetry.Start
+	if root {
+		startSpan = telemetry.StartRoot
+	}
+
+	ctx, span := startSpan(ctx, "refresh openapi specs", trace.WithTimestamp(start), trace.WithLinks(validLinks(links)...))
+	defer span.End()
+
+	refreshCtx, refreshCancel := context.WithTimeout(ctx, 30*time.Second)
+	defer refreshCancel()
+
+	var failed atomic.Int64
+
+	defer func() {
+		span.SetAttributes(
+			attribute.Int("bastion.openapi.sources", len(sources)),
+			attribute.Int64("bastion.openapi.failed", failed.Load()),
+		)
+	}()
 
 	oa.logger.Debug("OpenAPI: refreshing schemas",
 		forge.F("sources", len(sources)),
@@ -318,6 +372,10 @@ func (oa *OpenAPIAggregator) Refresh(ctx context.Context) {
 				if retry != nil && retry.Healthy {
 					fetched = retry
 				}
+			}
+
+			if fetched == nil || !fetched.Healthy {
+				failed.Add(1)
 			}
 
 			if fetched == nil {
@@ -396,14 +454,25 @@ func (oa *OpenAPIAggregator) Refresh(ctx context.Context) {
 	}
 
 	// Build merged spec using FARP merger.
+	_, mergeSpan := telemetry.Start(ctx, "merge openapi specs")
 	merged := oa.buildMergedSpec(newSpecs)
 
 	// Serialize to JSON.
 	mergedJSON, err := json.Marshal(merged)
 	if err != nil {
+		telemetry.Fail(mergeSpan, "serialize merged spec failed", err)
+		mergeSpan.End()
+		telemetry.Fail(span, "merge failed", nil)
+		oa.metrics.ObserveJob(observability.JobOpenAPI, true, time.Since(start))
 		oa.logger.Error("failed to serialize merged OpenAPI spec", forge.F("error", err))
+
 		return
 	}
+
+	mergeSpan.End()
+
+	span.SetAttributes(attribute.Int("bastion.openapi.paths", countPaths(merged)))
+	oa.metrics.ObserveJob(observability.JobOpenAPI, failed.Load() > 0, time.Since(start))
 
 	// Atomically update.
 	oa.mu.Lock()
@@ -1891,7 +1960,7 @@ func (oa *OpenAPIAggregator) HandleServiceList(ctx forge.Context) error {
 func (oa *OpenAPIAggregator) HandleRefresh(ctx forge.Context) error {
 	// Detached: the request context ends when this handler returns, which
 	// used to cancel the refresh before it fetched anything.
-	go oa.Refresh(context.WithoutCancel(ctx.Request().Context()))
+	go oa.RefreshDetached(context.WithoutCancel(ctx.Request().Context()))
 
 	return ctx.JSON(http.StatusOK, map[string]string{
 		"status": "refresh initiated",
@@ -2232,4 +2301,18 @@ func schemaRefName(ref string) string {
 	}
 
 	return strings.TrimPrefix(ref, prefix)
+}
+
+// validLinks drops links to no span, such as one taken from a ctx that
+// carried none.
+func validLinks(links []trace.Link) []trace.Link {
+	out := links[:0:0]
+
+	for _, l := range links {
+		if l.SpanContext.IsValid() {
+			out = append(out, l)
+		}
+	}
+
+	return out
 }

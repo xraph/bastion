@@ -14,6 +14,7 @@ import (
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/xraph/bastion/health"
+	"github.com/xraph/bastion/internal/telemetry"
 	"github.com/xraph/bastion/observability"
 )
 
@@ -146,14 +147,15 @@ func (e *Gateway) Register(app forge.App) error {
 	}
 
 	// Initialize non-duplicate components (concrete types that stay in root)
+	e.gwMetrics = NewGatewayMetrics(app.Metrics(), e.config.Metrics)
 	e.hooks = NewHookEngine()
 	e.rateLimiter = NewRateLimiter(e.config.RateLimiting)
 	e.healthMon = health.NewMonitor(e.config.HealthCheck, e.Logger())
+	e.healthMon.SetMetrics(e.gwMetrics)
 	e.accessLog = NewAccessLogger(e.config.AccessLog, e.Logger())
 	e.gwAuth = NewGatewayAuth(e.config.Auth, e.Logger())
 	e.tlsManager = NewTLSManager(e.config.TLS, e.Logger())
 	e.respCache = NewResponseCache(e.config.Caching, e.Logger(), nil)
-	e.gwMetrics = NewGatewayMetrics(app.Metrics(), e.config.Metrics)
 
 	// NOTE: Interface-typed fields (routeManager, cbManager, proxyHandler,
 	// stats, retryExec, trafficSplit, hub) are injected by the extension/
@@ -225,12 +227,14 @@ func (e *Gateway) Start(ctx context.Context) error {
 	// Initialize and start OpenAPI aggregator
 	if e.config.OpenAPI.Enabled {
 		e.openAPI = NewOpenAPIAggregator(e.config.OpenAPI, e.Logger(), e.routeManager, e.disc)
+		e.openAPI.SetMetrics(e.gwMetrics)
 		e.openAPI.Start(ctx)
 	}
 
 	// Initialize and start AsyncAPI aggregator
 	if e.config.AsyncAPI.Enabled {
 		e.asyncAPI = NewAsyncAPIAggregator(e.config.AsyncAPI, e.Logger(), e.disc)
+		e.asyncAPI.SetMetrics(e.gwMetrics)
 		e.asyncAPI.Start(ctx)
 	}
 
@@ -243,14 +247,17 @@ func (e *Gateway) Start(ctx context.Context) error {
 		e.routesRegistered = true
 	}
 
+	// The loops below outlive Start, so they drop the boot span ctx carries.
+	bg := telemetry.Detach(ctx)
+
 	// Start WebSocket hub for dashboard
 	if e.hub != nil {
 		go e.hub.Run()
-		go e.broadcastUpdates(ctx)
+		go e.broadcastUpdates(bg)
 	}
 
 	// Start rate limiter cleanup
-	go e.rateLimiterCleanup(ctx)
+	go e.rateLimiterCleanup(bg)
 
 	e.startedAt.Store(time.Now().UnixNano())
 	e.MarkStarted()
@@ -430,6 +437,7 @@ func (e *Gateway) SetDiscoveryService(svc DiscoveryService) {
 		e.routeManager,
 		svc,
 	)
+	e.disc.SetMetrics(e.gwMetrics)
 }
 
 // SetCacheStore sets an external cache store for response caching.
