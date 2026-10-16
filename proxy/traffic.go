@@ -9,8 +9,11 @@ import (
 	"time"
 
 	"github.com/xraph/forge"
+	"go.opentelemetry.io/otel/trace"
 
 	bastion "github.com/xraph/bastion"
+	"github.com/xraph/bastion/internal/telemetry"
+	"github.com/xraph/bastion/observability"
 )
 
 const (
@@ -80,7 +83,11 @@ func (pe *Engine) mirrorTarget(route *bastion.Route) *url.URL {
 // returns at once. The copy gets the same path, query and headers the
 // real upstream gets, and body, its own connection and a timeout of its
 // own. Its response is read and dropped, and nothing about it reaches the
-// client, the breakers, health or stats.
+// client, the breakers, health, stats or metrics.
+//
+// The copy gets a client span of its own, the root of a new trace linked
+// to the live request's span. A mirror target that fails or lags then
+// never shows up as an error or a long tail in the live request's trace.
 func (pe *Engine) mirror(r *http.Request, route *bastion.Route, target *url.URL, body []byte) {
 	select {
 	case pe.mirrorSlots <- struct{}{}:
@@ -92,7 +99,14 @@ func (pe *Engine) mirror(r *http.Request, route *bastion.Route, target *url.URL,
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), mirrorTimeout)
+	// The copy outlives the request, so its ctx drops the request's span.
+	ctx, cancel := context.WithTimeout(telemetry.Detach(context.WithoutCancel(r.Context())), mirrorTimeout)
+
+	ctx, span := telemetry.StartRoot(ctx, spanMirrorRequest,
+		trace.WithSpanKind(trace.SpanKindClient),
+		trace.WithLinks(trace.LinkFromContext(r.Context())),
+		trace.WithAttributes(routeAttributes(route, observability.ProtocolHTTP)...),
+	)
 
 	req := r.Clone(ctx)
 	req.RequestURI = ""
@@ -111,14 +125,23 @@ func (pe *Engine) mirror(r *http.Request, route *bastion.Route, target *url.URL,
 
 	pe.director(r, route, target)(req)
 
+	if span.IsRecording() {
+		span.SetAttributes(telemetry.RequestAttributes(req)...)
+	}
+
+	// The copy carries the mirror span's trace context, not the client's.
+	propagateTraceContext(ctx, req.Header)
+
 	go func() {
 		defer func() { <-pe.mirrorSlots }()
 		defer cancel()
+		defer span.End()
 
 		// #nosec G704 -- the mirror target comes from the route's
 		// configured traffic policy; the client only shapes the path.
 		resp, err := pe.transport.RoundTrip(req)
 		if err != nil {
+			telemetry.RecordRoundTripError(span, err)
 			pe.logger.Debug("mirror copy failed",
 				forge.F("route_id", route.ID),
 				forge.F("error", err),
@@ -126,6 +149,8 @@ func (pe *Engine) mirror(r *http.Request, route *bastion.Route, target *url.URL,
 
 			return
 		}
+
+		telemetry.RecordStatus(span, resp.StatusCode)
 
 		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<20))
 		_ = resp.Body.Close()

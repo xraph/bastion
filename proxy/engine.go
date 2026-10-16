@@ -17,6 +17,7 @@ import (
 
 	bastion "github.com/xraph/bastion"
 	"github.com/xraph/bastion/health"
+	"github.com/xraph/bastion/observability"
 )
 
 // Engine handles HTTP reverse proxying to upstream targets.
@@ -48,6 +49,8 @@ type Engine struct {
 	traffic bastion.TrafficRouter
 	// budgets holds a *retryBudget per target ID. See retryBudget.
 	budgets sync.Map
+	// metrics records the gateway's metrics. Nil records none.
+	metrics *observability.Metrics
 	// clock replaces time.Now for the retry budget in tests.
 	clock       func() time.Time
 	mirrorSlots chan struct{}
@@ -352,6 +355,7 @@ func (pe *Engine) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Rate limiting
 	if !pe.rl.Allow(r) {
 		pe.stats.RecordRateLimited()
+		pe.reject(r, observability.RejectGlobalRateLimit)
 		// Name the limiter and show its numbers. Both 429 sites in this file
 		// used to emit a byte-identical body, so an operator could not tell a
 		// global cap from a per-route one, and a zero-valued config looked
@@ -367,6 +371,7 @@ func (pe *Engine) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Route matching
 	route := pe.rm.MatchRoute(r.URL.Path, r.Method)
 	if route == nil {
+		pe.reject(r, observability.RejectNoRoute)
 		pe.logger.Debug("no matching route",
 			forge.F("path", r.URL.Path),
 			forge.F("method", r.Method),
@@ -377,8 +382,11 @@ func (pe *Engine) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	annotateServerSpan(r, route, requestProtocol(r, route))
+
 	// Extension path blocking — reject requests to excluded extension paths
 	if pe.isExtensionPathBlocked(route, r.URL.Path) {
+		pe.reject(r, observability.RejectPathBlocked)
 		http.Error(w, `{"error":"extension path not allowed"}`, http.StatusForbidden)
 
 		return
@@ -387,6 +395,7 @@ func (pe *Engine) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Per-route rate limiting
 	if route.RateLimit != nil && !pe.rl.AllowWithConfig(r, route.RateLimit) {
 		pe.stats.RecordRateLimited()
+		pe.reject(r, observability.RejectRouteRateLimit)
 		http.Error(w, fmt.Sprintf(
 			`{"error":"rate limit exceeded","limiter":"route","route":%q,"rps":%v,"burst":%v,"perClient":%v}`,
 			route.Path, route.RateLimit.RequestsPerSec, route.RateLimit.Burst, route.RateLimit.PerClient,
@@ -401,6 +410,8 @@ func (pe *Engine) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if pe.auth != nil {
 		authCtx, authErr := pe.auth.Authenticate(r, route)
 		if authErr != nil {
+			pe.reject(r, observability.RejectUnauthenticated)
+
 			if ae, ok := authErr.(*bastion.AuthError); ok {
 				http.Error(w, fmt.Sprintf(`{"error":"%s"}`, ae.Message), ae.Code)
 			} else {
@@ -427,6 +438,7 @@ func (pe *Engine) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// OnRequest hook
 	if pe.hooks != nil {
 		if err := pe.hooks.RunOnRequest(r, route); err != nil {
+			pe.reject(r, observability.RejectHook)
 			pe.logger.Warn("on_request hook rejected request",
 				forge.F("route_id", route.ID),
 				forge.F("error", err),
@@ -463,12 +475,14 @@ func (pe *Engine) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if target == nil {
 		if refused {
 			pe.stats.RecordCircuitBreak()
+			pe.reject(r, observability.RejectCircuitOpen)
 			http.Error(w, `{"error":"circuit breaker open"}`, http.StatusServiceUnavailable)
 
 			return
 		}
 
 		pe.stats.RecordError(route.ID)
+		pe.reject(r, observability.RejectNoHealthyUpstream)
 		http.Error(w, `{"error":"no healthy upstream"}`, http.StatusServiceUnavailable)
 
 		return
@@ -500,7 +514,10 @@ func (pe *Engine) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		defer stop()
 	}
 
-	var roundTripper http.RoundTripper = transport
+	// Every attempt gets its own client span and duration observation.
+	traced := newUpstreamTransport(transport, route, observability.ProtocolHTTP, pe.metrics)
+
+	var roundTripper http.RoundTripper = traced
 
 	// Retries and mirroring both send the body more than once, so it has
 	// to be replayable: none, or one small enough to hold in memory. A
@@ -529,7 +546,7 @@ func (pe *Engine) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 		if retryable && replayable {
 			roundTripper = &retryTransport{
-				base: transport, policy: pe.retry, pe: pe,
+				base: traced, policy: pe.retry, pe: pe,
 				route: route, target: target, cb: cb, body: body,
 				budget: budget, budgetPercent: retryCfg.BudgetPercent,
 			}
@@ -777,36 +794,47 @@ func (pe *Engine) closedCircuits(targets []*bastion.Target) []*bastion.Target {
 func (pe *Engine) proxyWebSocket(w http.ResponseWriter, r *http.Request, route *bastion.Route) {
 	target := pe.selectTarget(r, route)
 	if target == nil {
+		pe.reject(r, observability.RejectNoHealthyUpstream)
 		http.Error(w, `{"error":"no healthy upstream"}`, http.StatusServiceUnavailable)
 
 		return
 	}
 
-	ProxyWebSocket(w, r, route, target, pe.config.WebSocket, pe.logger)
+	defer pe.metrics.StreamStarted(observability.ProtocolWebSocket)()
+
+	proxyWebSocket(w, r, route, target, pe.config.WebSocket, pe.logger, pe.metrics)
 }
 
 // proxyGRPC handles gRPC requests.
 func (pe *Engine) proxyGRPC(w http.ResponseWriter, r *http.Request, route *bastion.Route) {
 	target := pe.selectTarget(r, route)
 	if target == nil {
+		pe.reject(r, observability.RejectNoHealthyUpstream)
 		writeGRPCError(w, http.StatusServiceUnavailable, "no healthy upstream")
 
 		return
 	}
 
-	ProxyGRPC(w, r, route, target, pe.config, pe.logger)
+	defer pe.metrics.StreamStarted(observability.ProtocolGRPC)()
+
+	gp := NewGRPCProxy(pe.config, pe.logger)
+	gp.metrics = pe.metrics
+	gp.ServeHTTP(w, r, route, target)
 }
 
 // proxySSE handles SSE requests.
 func (pe *Engine) proxySSE(w http.ResponseWriter, r *http.Request, route *bastion.Route) {
 	target := pe.selectTarget(r, route)
 	if target == nil {
+		pe.reject(r, observability.RejectNoHealthyUpstream)
 		http.Error(w, `{"error":"no healthy upstream"}`, http.StatusServiceUnavailable)
 
 		return
 	}
 
-	ProxySSE(w, r, route, target, pe.config, pe.logger)
+	defer pe.metrics.StreamStarted(observability.ProtocolSSE)()
+
+	proxySSE(w, r, route, target, pe.config, pe.logger, pe.metrics)
 }
 
 func isWebSocketUpgrade(r *http.Request) bool {

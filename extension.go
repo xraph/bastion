@@ -10,8 +10,11 @@ import (
 	"time"
 
 	"github.com/xraph/forge"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/xraph/bastion/health"
+	"github.com/xraph/bastion/observability"
 )
 
 // Gateway implements the Bastion API gateway.
@@ -354,6 +357,11 @@ func (e *Gateway) Hub() WSBroadcaster { return e.hub }
 // App returns the Forge app instance.
 func (e *Gateway) App() forge.App { return e.app }
 
+// GatewayMetrics returns the gateway's metrics, recorded through the Forge
+// app's metrics. It is nil before Register and when metrics are disabled,
+// and a nil value records nothing.
+func (e *Gateway) GatewayMetrics() *GatewayMetrics { return e.gwMetrics }
+
 // Snapshot returns current gateway statistics. Uptime counts from the
 // moment Start completed and is zero before it. Cache counters come from
 // the response cache, so they count real lookups only.
@@ -639,11 +647,13 @@ func (e *Gateway) registerRoutes() {
 	basePath := strings.TrimRight(e.config.BasePath, "/")
 
 	// Use a custom handler that wraps the proxy handler with middleware
-	proxyHandler := GatewayMiddleware(e.config, e.proxyHandler)
+	proxyHandler := gatewayMiddleware(e.config, e.proxyHandler, e.rejected)
 
 	// Register catch-all for all methods
 	catchAll := func(ctx forge.Context) error {
 		if e.draining.Load() {
+			e.rejected(ctx.Request(), observability.RejectDraining)
+
 			return ctx.JSON(http.StatusServiceUnavailable, map[string]string{"error": "gateway is draining"})
 		}
 
@@ -694,6 +704,16 @@ func (e *Gateway) registerRoutes() {
 		forge.F("base_path", basePath),
 		forge.F("dashboard", e.config.Dashboard.Enabled),
 	)
+}
+
+// rejected counts a request the gateway answered itself and says why on the
+// request's server span.
+func (e *Gateway) rejected(r *http.Request, reason observability.RejectReason) {
+	e.gwMetrics.RequestRejected(reason)
+
+	if span := trace.SpanFromContext(r.Context()); span.IsRecording() {
+		span.SetAttributes(attribute.String("bastion.reject.reason", string(reason)))
+	}
 }
 
 func (e *Gateway) broadcastUpdates(ctx context.Context) {
