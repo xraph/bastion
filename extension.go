@@ -491,13 +491,12 @@ func (e *Gateway) SetAdminHandlerSetup(fn func(gw *Gateway, router forge.Router)
 func (e *Gateway) wireCallbacks() {
 	if e.cbManager != nil {
 		e.cbManager.SetOnStateChange(func(targetID string, from, to CircuitState) {
-			e.gwMetrics.SetCircuitBreakerState(targetID, to)
+			e.gwMetrics.CircuitTransitioned(to)
 			e.hooks.RunOnCircuitBreak(targetID, from, to)
 		})
 	}
 
 	e.healthMon.SetOnHealthChange(func(event health.Event) {
-		e.gwMetrics.SetUpstreamHealth(event.TargetID, event.Healthy)
 		e.hooks.RunOnUpstreamHealth(healthEventToUpstream(event))
 	})
 
@@ -873,7 +872,7 @@ func (e *Gateway) wireStorePersistence() {
 	// Persist circuit breaker state changes
 	if e.cbStore != nil && e.cbManager != nil {
 		e.cbManager.SetOnStateChange(func(targetID string, from, to CircuitState) {
-			e.gwMetrics.SetCircuitBreakerState(targetID, to)
+			e.gwMetrics.CircuitTransitioned(to)
 			e.hooks.RunOnCircuitBreak(targetID, from, to)
 
 			snap := &CircuitBreakerSnapshot{
@@ -894,7 +893,6 @@ func (e *Gateway) wireStorePersistence() {
 	// Persist health check results
 	if e.healthStore != nil {
 		e.healthMon.SetOnHealthChange(func(event health.Event) {
-			e.gwMetrics.SetUpstreamHealth(event.TargetID, event.Healthy)
 			e.hooks.RunOnUpstreamHealth(healthEventToUpstream(event))
 
 			result := &HealthCheckResult{
