@@ -88,7 +88,8 @@ type Config struct {
 	// Metrics configures Prometheus metrics
 	Metrics MetricsConfig `json:"metrics" yaml:"metrics"`
 
-	// Tracing configures OpenTelemetry tracing
+	// Tracing is accepted but not read. Bastion's spans follow the Forge
+	// app's tracing config; the field stays so existing config parses.
 	Tracing TracingConfig `json:"tracing" yaml:"tracing"`
 
 	// AccessLog configures structured access logging
@@ -264,7 +265,9 @@ type AsyncAPIConfig = disc.AsyncAPIConfig
 // The canonical definition lives in the observability subpackage.
 type MetricsConfig = observability.MetricsConfig
 
-// TracingConfig holds tracing settings.
+// TracingConfig holds tracing settings. The gateway doesn't read it:
+// tracing, sampling and propagation are set on the Forge app, and bastion's
+// spans follow that. It is kept so existing config and code keep working.
 type TracingConfig struct {
 	Enabled         bool    `json:"enabled" yaml:"enabled"`
 	PropagateFormat string  `json:"propagateFormat,omitempty" yaml:"propagate_format"`
@@ -597,7 +600,9 @@ func WithMetrics(m MetricsConfig) ConfigOption {
 	return func(c *Config) { c.Metrics = m }
 }
 
-// WithTracing sets the tracing configuration.
+// WithTracing sets Config.Tracing, which the gateway doesn't read. Configure
+// tracing on the Forge app instead. The option is kept so existing code
+// still compiles.
 func WithTracing(t TracingConfig) ConfigOption {
 	return func(c *Config) { c.Tracing = t }
 }

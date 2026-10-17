@@ -235,7 +235,9 @@ extensions:
       admin_token: ""
 ```
 
-The defaults have discovery, retries, circuit breakers, health checks, metrics, tracing, access logs and the admin API turned on, and rate limiting, caching, auth, CORS, IP filtering and traffic splitting turned off. Every block has a matching option in code: `WithTimeouts`, `WithRetry`, `WithCircuitBreaker`, `WithRateLimiting`, `WithHealthCheck`, `WithLoadBalancing`, `WithAuth`, `WithTLS`, `WithCaching`, `WithCORS`, `WithIPFilter`, `WithOpenAPI`, `WithAsyncAPI`, `WithMetrics`, `WithTracing`, `WithAccessLog`, `WithDashboard` and `WithConfig` for the whole thing.
+The defaults have discovery, retries, circuit breakers, health checks, metrics, access logs and the admin API turned on, and rate limiting, caching, auth, CORS, IP filtering and traffic splitting turned off. Every block has a matching option in code: `WithTimeouts`, `WithRetry`, `WithCircuitBreaker`, `WithRateLimiting`, `WithHealthCheck`, `WithLoadBalancing`, `WithAuth`, `WithTLS`, `WithCaching`, `WithCORS`, `WithIPFilter`, `WithOpenAPI`, `WithAsyncAPI`, `WithMetrics`, `WithTracing`, `WithAccessLog`, `WithDashboard` and `WithConfig` for the whole thing.
+
+Tracing is the exception. Bastion's spans follow your Forge app's tracing config, so you turn them on, sample them and export them there. The `tracing` block and `WithTracing` are still accepted so existing config parses, but the gateway doesn't read them. The [observability docs](https://www.xraph.com/docs/bastion/subsystems/observability) list every span and metric.
 
 ## Documentation
 

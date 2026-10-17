@@ -114,7 +114,9 @@ If any probe request fails during the Half-Open state, the circuit immediately r
 
 ### Metrics
 
-When metrics are enabled, every state change counts toward `forge_bastion_circuit_breakers_transitioned_total`, labelled with the `state` the breaker moved into (`closed`, `open` or `half_open`). It's a count, not a per-target gauge, so one upstream can't add series of its own. For which breaker is open right now, ask the admin API below. A request turned away because every candidate's breaker refused it also counts toward `forge_bastion_requests_rejected_total{reason="circuit_open"}`.
+When metrics are enabled, every state change counts toward `forge_bastion_circuit_breakers_transitioned_total`, labelled with the `state` the breaker moved into (`closed`, `open` or `half_open`). It's a count, not a per-target gauge, so one upstream can't add series of its own. For which breaker is open right now, ask the admin API below.
+
+A request the gateway turns away because breakers took its route's targets out counts toward `forge_bastion_requests_rejected_total{reason="circuit_open"}`. That covers a pool whose breakers are all open and a half-open breaker with every probe slot in flight. The response body tells those two apart differently: all open still answers `{"error":"no healthy upstream"}`, and only the half-open refusal answers `{"error":"circuit breaker open"}`. Go by the metric.
 
 ```text
 sum(rate(forge_bastion_circuit_breakers_transitioned_total{state="open"}[5m]))
