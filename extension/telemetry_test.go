@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/xraph/forge"
 	"go.opentelemetry.io/otel"
@@ -115,4 +116,91 @@ func TestExtension_TelemetryEndToEnd(t *testing.T) {
 	}
 
 	telemetrytest.NeverRecorded(t, rec, "alice@example.com")
+}
+
+// A breaker that trips counts as a transition, and a gateway that is
+// draining counts the requests it turns away.
+func TestExtension_BreakerTransitionAndDraining(t *testing.T) {
+	prevTP, prevProp := otel.GetTracerProvider(), otel.GetTextMapPropagator()
+	t.Cleanup(func() {
+		otel.SetTracerProvider(prevTP)
+		otel.SetTextMapPropagator(prevProp)
+	})
+
+	dead := httptest.NewServer(http.NotFoundHandler())
+	deadURL := dead.URL
+	dead.Close()
+
+	app := forge.New(forge.WithAppName("bastion-breaker"), forge.WithAppLogger(forge.NewNoopLogger()))
+
+	ext := extension.New(
+		bastion.WithDiscoveryEnabled(false),
+		bastion.WithCircuitBreaker(bastion.CircuitBreakerConfig{Enabled: true, FailureThreshold: 1, ResetTimeout: time.Hour, HalfOpenMax: 1}),
+		bastion.WithRetry(bastion.RetryConfig{}),
+		bastion.WithRoute(bastion.RouteConfig{
+			Path:    "/svc/*",
+			Enabled: true,
+			Targets: []bastion.TargetConfig{{URL: deadURL}},
+		}),
+	)
+
+	if err := app.RegisterExtension(ext); err != nil {
+		t.Fatalf("RegisterExtension: %v", err)
+	}
+
+	if err := app.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() { _ = app.Stop(context.Background()) })
+
+	// The transition is recorded on the breaker's own goroutine, just
+	// before the circuit-break hooks run.
+	opened := make(chan struct{}, 1)
+	ext.Gateway().Hooks().OnCircuitBreak(func(_ string, _, to bastion.CircuitState) {
+		if to == bastion.CircuitOpen {
+			select {
+			case opened <- struct{}{}:
+			default:
+			}
+		}
+	})
+
+	rr := httptest.NewRecorder()
+	app.Router().ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/svc/x", nil))
+
+	if rr.Code != http.StatusBadGateway {
+		t.Fatalf("status %d, want 502 from the dead upstream", rr.Code)
+	}
+
+	select {
+	case <-opened:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the breaker never opened")
+	}
+
+	// Gateway.Stop is what sets draining. Under app.Run Forge stops the
+	// HTTP server first, so this only shows when the extension is stopped
+	// on its own, as here.
+	if err := ext.Stop(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	rr = httptest.NewRecorder()
+	app.Router().ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/svc/x", nil))
+
+	if rr.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status %d while draining, want 503", rr.Code)
+	}
+
+	body := telemetrytest.Scrape(t, app)
+
+	for _, want := range []string{
+		`forge_` + observability.MetricCircuitTransitions + `{state="open"} 1`,
+		`forge_` + observability.MetricRequestsRejected + `{reason="draining"} 1`,
+		`forge_` + observability.MetricUpstreamRequestDuration + `_count{protocol="http",status_class="error"} 1`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("scrape is missing %s", want)
+		}
+	}
 }
