@@ -236,7 +236,7 @@ func recordGRPCStatus(span trace.Span, resp *http.Response) {
 	)
 
 	if grpcServerFaults[code] {
-		Fail(span, "grpc status "+raw, nil)
+		Fail(span, "grpc status "+strconv.Itoa(code), nil)
 	}
 }
 
