@@ -173,7 +173,7 @@ The proxy engine integrates with several subsystems during request processing:
 6. **Authentication** -- credentials are validated if auth is enabled for the route.
 7. **Caching** -- cached responses are served without hitting the upstream.
 8. **Proxy** -- the request is forwarded and the response streamed back.
-9. **Metrics and logging** -- latency, status, and upstream info are recorded.
+9. **Metrics, tracing and logging** -- each attempt is a `proxy request` client span and a latency observation, and the access log records the request. See [Observability](/docs/subsystems/observability).
 
 ## Graceful Shutdown
 

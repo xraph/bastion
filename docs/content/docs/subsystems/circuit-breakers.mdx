@@ -114,13 +114,11 @@ If any probe request fails during the Half-Open state, the circuit immediately r
 
 ### Metrics
 
-When metrics are enabled, the gateway exports a gauge per target:
+When metrics are enabled, every state change counts toward `forge_bastion_circuit_breakers_transitioned_total`, labelled with the `state` the breaker moved into (`closed`, `open` or `half_open`). It's a count, not a per-target gauge, so one upstream can't add series of its own. For which breaker is open right now, ask the admin API below. A request turned away because every candidate's breaker refused it also counts toward `forge_bastion_requests_rejected_total{reason="circuit_open"}`.
 
+```text
+sum(rate(forge_bastion_circuit_breakers_transitioned_total{state="open"}[5m]))
 ```
-gateway.circuit_breaker_state.<targetID>
-```
-
-Values: `0` = Closed, `1` = Half-Open, `2` = Open.
 
 ### Admin API
 

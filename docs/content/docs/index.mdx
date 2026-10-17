@@ -22,7 +22,7 @@ Bastion is an extension, not a standalone service. You add it to an existing For
 - TLS and mTLS: TLS to upstreams, client certificate authentication, and certificate reloading from disk on an interval.
 - Request/response transformation: path rewriting, header injection, header removal, and header value manipulation at the route level.
 - CORS and IP filtering: cross-origin resource sharing configuration and IP-based allow/deny lists.
-- Observability: metrics through Forge's metrics system, structured access logs, and OpenTelemetry trace propagation.
+- Observability: metrics and OpenTelemetry spans through your Forge app, with trace context sent to every upstream, plus structured access logs.
 - Admin dashboard: a React plugin for the Forge dashboard shell, with overview, routes and upstreams pages today and more on the way.
 - Admin REST API: CRUD for routes, upstreams, statistics, configuration, and service discovery.
 - Runtime route changes: create, update, enable and disable routes through the admin API without restarting the gateway. The config file itself is read once, at start.
