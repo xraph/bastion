@@ -18,6 +18,7 @@ import (
 	bastion "github.com/xraph/bastion"
 	"github.com/xraph/bastion/health"
 	"github.com/xraph/bastion/observability"
+	"github.com/xraph/bastion/security"
 )
 
 // Engine handles HTTP reverse proxying to upstream targets.
@@ -410,7 +411,7 @@ func (pe *Engine) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if pe.auth != nil {
 		authCtx, authErr := pe.auth.Authenticate(r, route)
 		if authErr != nil {
-			pe.reject(r, observability.RejectUnauthenticated)
+			pe.reject(r, authRejectReason(authErr))
 
 			if ae, ok := authErr.(*bastion.AuthError); ok {
 				http.Error(w, fmt.Sprintf(`{"error":"%s"}`, ae.Message), ae.Code)
@@ -772,6 +773,17 @@ func unavailableReason(breakerOpen bool) observability.RejectReason {
 	return observability.RejectNoHealthyUpstream
 }
 
+// authRejectReason is the reject reason for a failed authentication.
+func authRejectReason(err error) observability.RejectReason {
+	switch security.AuthFailureClass(err) {
+	case security.AuthFailureForbidden:
+		return observability.RejectForbidden
+	case security.AuthFailureUnavailable:
+		return observability.RejectAuthUnavailable
+	default:
+		return observability.RejectUnauthenticated
+	}
+}
 
 // pick asks the load balancer for one of candidates.
 func (pe *Engine) pick(r *http.Request, candidates []*bastion.Target) *bastion.Target {

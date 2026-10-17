@@ -46,7 +46,7 @@ func TestAuth_SpanWrapsTheForwardAuthCall(t *testing.T) {
 	for _, tc := range []struct {
 		token  string
 		result string
-	}{{"good-" + email, "ok"}, {"bad-" + email, "denied"}} {
+	}{{"good-" + email, "ok"}, {"bad-" + email, "unauthenticated"}} {
 		rec.Reset()
 
 		ctx, server := telemetry.Start(context.Background(), "GET /*path", trace.WithSpanKind(trace.SpanKindServer))
@@ -152,5 +152,54 @@ func TestJWKS_RefreshSpans(t *testing.T) {
 
 	if s := telemetrytest.One(t, rec, "refresh jwks").Status(); s.Code != codes.Error || s.Description != "unexpected status" {
 		t.Errorf("failed refresh status = %+v", s)
+	}
+}
+
+func TestAuth_ClassifiesFailures(t *testing.T) {
+	rec := telemetrytest.Recorder(t)
+
+	forbid := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusForbidden) }))
+	t.Cleanup(forbid.Close)
+
+	dead := httptest.NewServer(http.NotFoundHandler())
+	deadURL := dead.URL
+	dead.Close()
+
+	scoped := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.Header().Set("X-Auth-Scopes", "read") }))
+	t.Cleanup(scoped.Close)
+
+	for _, tc := range []struct {
+		endpoint string
+		route    Route
+		want     string
+		failed   bool
+	}{
+		{forbid.URL, testRoute{}, AuthFailureForbidden, false},
+		{deadURL, testRoute{}, AuthFailureUnavailable, true},
+		{scoped.URL, testRoute{auth: &RouteAuthConfig{Enabled: true, Scopes: []string{"write"}}}, AuthFailureForbidden, false},
+	} {
+		rec.Reset()
+
+		ga := NewAuth(AuthConfig{Enabled: true, Providers: []string{"fwd"}}, forge.NewNoopLogger())
+		ga.RegisterProvider(NewForwardAuthProvider("fwd", tc.endpoint, nil))
+
+		_, err := ga.Authenticate(httptest.NewRequest(http.MethodGet, "/", nil), tc.route)
+		if got := AuthFailureClass(err); got != tc.want {
+			t.Errorf("%s: class = %q, want %q", tc.endpoint, got, tc.want)
+		}
+
+		span := telemetrytest.One(t, rec, "authenticate request")
+
+		if v, _ := telemetrytest.Attr(span, "bastion.auth.result"); v.AsString() != tc.want {
+			t.Errorf("bastion.auth.result = %q, want %q", v.AsString(), tc.want)
+		}
+
+		if failed := span.Status().Code == codes.Error; failed != tc.failed {
+			t.Errorf("%s: span failed = %v, want %v", tc.want, failed, tc.failed)
+		}
+	}
+
+	if got := AuthFailureClass(&AuthError{Code: http.StatusUnauthorized}); got != AuthFailureUnauthenticated {
+		t.Errorf("plain 401 = %q", got)
 	}
 }

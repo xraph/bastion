@@ -76,6 +76,8 @@ const (
 	RejectNoRoute           RejectReason = "no_route"
 	RejectPathBlocked       RejectReason = "path_blocked"
 	RejectUnauthenticated   RejectReason = "unauthenticated"
+	RejectForbidden         RejectReason = "forbidden"
+	RejectAuthUnavailable   RejectReason = "auth_unavailable"
 	RejectHook              RejectReason = "hook"
 	RejectCircuitOpen       RejectReason = "circuit_open"
 	RejectNoHealthyUpstream RejectReason = "no_healthy_upstream"

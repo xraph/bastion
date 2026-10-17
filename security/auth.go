@@ -79,7 +79,8 @@ func (ga *Auth) Authenticate(r *http.Request, route Route) (*AuthContext, error)
 
 	// The span covers the providers, so a forward-auth call shows up
 	// inside it. A denial is the answer auth exists to give, not a failure,
-	// so it sets bastion.auth.result and leaves the status alone.
+	// so it only sets bastion.auth.result. An auth service that couldn't
+	// answer does fail the span.
 	ctx, span := telemetry.Start(r.Context(), "authenticate request")
 	defer span.End()
 
@@ -89,10 +90,14 @@ func (ga *Auth) Authenticate(r *http.Request, route Route) (*AuthContext, error)
 
 	result := "ok"
 	if err != nil {
-		result = "denied"
+		result = AuthFailureClass(err)
 	}
 
 	span.SetAttributes(attribute.String("bastion.auth.result", result))
+
+	if result == AuthFailureUnavailable {
+		telemetry.Fail(span, "auth unavailable", nil)
+	}
 
 	if authCtx != nil {
 		span.SetAttributes(attribute.String("bastion.auth.provider", authCtx.ProviderName))
@@ -143,7 +148,7 @@ func (ga *Auth) authenticate(r *http.Request, routeAuth *RouteAuthConfig, provid
 
 	// All providers failed
 	if lastErr != nil {
-		return nil, &AuthError{Code: http.StatusUnauthorized, Message: lastErr.Error()}
+		return nil, &AuthError{Code: http.StatusUnauthorized, Message: lastErr.Error(), cause: lastErr}
 	}
 
 	return nil, &AuthError{Code: http.StatusUnauthorized, Message: "authentication required"}
