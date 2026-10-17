@@ -471,18 +471,21 @@ func (pe *Engine) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Select a target whose breaker admits the request. A half-open breaker
 	// with every probe slot in flight refuses; the next candidate gets the
 	// request instead of the client getting a 503.
-	target, cb, refused := pe.admitTarget(r, route)
+	target, cb, refused, open := pe.admitTarget(r, route)
 	if target == nil {
+		pe.reject(r, unavailableReason(refused || open))
+
 		if refused {
 			pe.stats.RecordCircuitBreak()
-			pe.reject(r, observability.RejectCircuitOpen)
 			http.Error(w, `{"error":"circuit breaker open"}`, http.StatusServiceUnavailable)
 
 			return
 		}
 
+		// Every breaker was already open, or no target is healthy. The
+		// body has always said "no healthy upstream" for both; the metric
+		// tells them apart.
 		pe.stats.RecordError(route.ID)
-		pe.reject(r, observability.RejectNoHealthyUpstream)
 		http.Error(w, `{"error":"no healthy upstream"}`, http.StatusServiceUnavailable)
 
 		return
@@ -722,17 +725,22 @@ func (pe *Engine) errorHandler(route *bastion.Route, target *bastion.Target, cb 
 	}
 }
 
-func (pe *Engine) selectTarget(r *http.Request, route *bastion.Route) *bastion.Target {
-	return pe.pick(r, pe.closedCircuits(pe.routeTargets(r, route)))
+// selectTarget picks a target whose breaker isn't open. open reports
+// whether an open breaker took any target out of the running.
+func (pe *Engine) selectTarget(r *http.Request, route *bastion.Route) (target *bastion.Target, open bool) {
+	candidates, open := pe.closedCircuits(pe.routeTargets(r, route))
+
+	return pe.pick(r, candidates), open
 }
 
 // admitTarget picks a target and asks its breaker to admit the request,
 // moving on to the remaining candidates when a breaker refuses. refused
-// reports whether any breaker refused, so the caller can tell "circuit
-// breaker open" from "no healthy upstream".
-func (pe *Engine) admitTarget(r *http.Request, route *bastion.Route) (*bastion.Target, bastion.Breaker, bool) {
-	candidates := pe.closedCircuits(pe.routeTargets(r, route))
-	refused := false
+// reports whether a breaker refused the request (a half-open one with its
+// probe slots taken), so the caller can tell "circuit breaker open" from
+// "no healthy upstream". open reports whether an open breaker took any
+// target out of the running before that.
+func (pe *Engine) admitTarget(r *http.Request, route *bastion.Route) (target *bastion.Target, cb bastion.Breaker, refused, open bool) {
+	candidates, open := pe.closedCircuits(pe.routeTargets(r, route))
 
 	for len(candidates) > 0 {
 		t := pe.pick(r, candidates)
@@ -742,15 +750,28 @@ func (pe *Engine) admitTarget(r *http.Request, route *bastion.Route) (*bastion.T
 
 		cb := pe.cbm.Get(t.ID)
 		if cb.Allow() {
-			return t, cb, refused
+			return t, cb, refused, open
 		}
 
 		refused = true
 		candidates = slices.DeleteFunc(candidates, func(c *bastion.Target) bool { return c == t })
 	}
 
-	return nil, nil, refused
+	return nil, nil, refused, open
 }
+
+// unavailableReason is the reject reason when no target is left for a
+// request: circuit_open when a breaker took at least one target out, so a
+// pool whose breakers are all open counts there, and no_healthy_upstream
+// otherwise.
+func unavailableReason(breakerOpen bool) observability.RejectReason {
+	if breakerOpen {
+		return observability.RejectCircuitOpen
+	}
+
+	return observability.RejectNoHealthyUpstream
+}
+
 
 // pick asks the load balancer for one of candidates.
 func (pe *Engine) pick(r *http.Request, candidates []*bastion.Target) *bastion.Target {
@@ -774,27 +795,30 @@ func (pe *Engine) pick(r *http.Request, candidates []*bastion.Target) *bastion.T
 	return pe.lb.Select(candidates, key)
 }
 
-// closedCircuits drops targets whose breaker is open. A breaker past its
-// reset timeout reports half_open and stays eligible, so probes still reach
-// it. The proxy asks the breaker rather than reading Target.CircuitState,
-// which nothing assigns on live targets.
-func (pe *Engine) closedCircuits(targets []*bastion.Target) []*bastion.Target {
-	out := make([]*bastion.Target, 0, len(targets))
+// closedCircuits drops targets whose breaker is open, and reports whether
+// it dropped any. A breaker past its reset timeout reports half_open and
+// stays eligible, so probes still reach it. The proxy asks the breaker
+// rather than reading Target.CircuitState, which nothing assigns on live
+// targets.
+func (pe *Engine) closedCircuits(targets []*bastion.Target) (out []*bastion.Target, dropped bool) {
+	out = make([]*bastion.Target, 0, len(targets))
 
 	for _, t := range targets {
 		if pe.cbm.Get(t.ID).State() != bastion.CircuitOpen {
 			out = append(out, t)
+		} else {
+			dropped = true
 		}
 	}
 
-	return out
+	return out, dropped
 }
 
 // proxyWebSocket handles WebSocket upgrade requests.
 func (pe *Engine) proxyWebSocket(w http.ResponseWriter, r *http.Request, route *bastion.Route) {
-	target := pe.selectTarget(r, route)
+	target, open := pe.selectTarget(r, route)
 	if target == nil {
-		pe.reject(r, observability.RejectNoHealthyUpstream)
+		pe.reject(r, unavailableReason(open))
 		http.Error(w, `{"error":"no healthy upstream"}`, http.StatusServiceUnavailable)
 
 		return
@@ -807,9 +831,9 @@ func (pe *Engine) proxyWebSocket(w http.ResponseWriter, r *http.Request, route *
 
 // proxyGRPC handles gRPC requests.
 func (pe *Engine) proxyGRPC(w http.ResponseWriter, r *http.Request, route *bastion.Route) {
-	target := pe.selectTarget(r, route)
+	target, open := pe.selectTarget(r, route)
 	if target == nil {
-		pe.reject(r, observability.RejectNoHealthyUpstream)
+		pe.reject(r, unavailableReason(open))
 		writeGRPCError(w, http.StatusServiceUnavailable, "no healthy upstream")
 
 		return
@@ -824,9 +848,9 @@ func (pe *Engine) proxyGRPC(w http.ResponseWriter, r *http.Request, route *basti
 
 // proxySSE handles SSE requests.
 func (pe *Engine) proxySSE(w http.ResponseWriter, r *http.Request, route *bastion.Route) {
-	target := pe.selectTarget(r, route)
+	target, open := pe.selectTarget(r, route)
 	if target == nil {
-		pe.reject(r, observability.RejectNoHealthyUpstream)
+		pe.reject(r, unavailableReason(open))
 		http.Error(w, `{"error":"no healthy upstream"}`, http.StatusServiceUnavailable)
 
 		return
