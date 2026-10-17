@@ -17,6 +17,8 @@ import (
 
 	bastion "github.com/xraph/bastion"
 	"github.com/xraph/bastion/health"
+	"github.com/xraph/bastion/observability"
+	"github.com/xraph/bastion/security"
 )
 
 // Engine handles HTTP reverse proxying to upstream targets.
@@ -48,6 +50,8 @@ type Engine struct {
 	traffic bastion.TrafficRouter
 	// budgets holds a *retryBudget per target ID. See retryBudget.
 	budgets sync.Map
+	// metrics records the gateway's metrics. Nil records none.
+	metrics *observability.Metrics
 	// clock replaces time.Now for the retry budget in tests.
 	clock       func() time.Time
 	mirrorSlots chan struct{}
@@ -352,6 +356,7 @@ func (pe *Engine) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Rate limiting
 	if !pe.rl.Allow(r) {
 		pe.stats.RecordRateLimited()
+		pe.reject(r, observability.RejectGlobalRateLimit)
 		// Name the limiter and show its numbers. Both 429 sites in this file
 		// used to emit a byte-identical body, so an operator could not tell a
 		// global cap from a per-route one, and a zero-valued config looked
@@ -367,6 +372,7 @@ func (pe *Engine) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Route matching
 	route := pe.rm.MatchRoute(r.URL.Path, r.Method)
 	if route == nil {
+		pe.reject(r, observability.RejectNoRoute)
 		pe.logger.Debug("no matching route",
 			forge.F("path", r.URL.Path),
 			forge.F("method", r.Method),
@@ -377,8 +383,11 @@ func (pe *Engine) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	annotateServerSpan(r, route, requestProtocol(r, route))
+
 	// Extension path blocking — reject requests to excluded extension paths
 	if pe.isExtensionPathBlocked(route, r.URL.Path) {
+		pe.reject(r, observability.RejectPathBlocked)
 		http.Error(w, `{"error":"extension path not allowed"}`, http.StatusForbidden)
 
 		return
@@ -387,6 +396,7 @@ func (pe *Engine) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Per-route rate limiting
 	if route.RateLimit != nil && !pe.rl.AllowWithConfig(r, route.RateLimit) {
 		pe.stats.RecordRateLimited()
+		pe.reject(r, observability.RejectRouteRateLimit)
 		http.Error(w, fmt.Sprintf(
 			`{"error":"rate limit exceeded","limiter":"route","route":%q,"rps":%v,"burst":%v,"perClient":%v}`,
 			route.Path, route.RateLimit.RequestsPerSec, route.RateLimit.Burst, route.RateLimit.PerClient,
@@ -401,6 +411,8 @@ func (pe *Engine) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if pe.auth != nil {
 		authCtx, authErr := pe.auth.Authenticate(r, route)
 		if authErr != nil {
+			pe.reject(r, authRejectReason(authErr))
+
 			if ae, ok := authErr.(*bastion.AuthError); ok {
 				http.Error(w, fmt.Sprintf(`{"error":"%s"}`, ae.Message), ae.Code)
 			} else {
@@ -427,6 +439,7 @@ func (pe *Engine) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// OnRequest hook
 	if pe.hooks != nil {
 		if err := pe.hooks.RunOnRequest(r, route); err != nil {
+			pe.reject(r, observability.RejectHook)
 			pe.logger.Warn("on_request hook rejected request",
 				forge.F("route_id", route.ID),
 				forge.F("error", err),
@@ -459,8 +472,10 @@ func (pe *Engine) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Select a target whose breaker admits the request. A half-open breaker
 	// with every probe slot in flight refuses; the next candidate gets the
 	// request instead of the client getting a 503.
-	target, cb, refused := pe.admitTarget(r, route)
+	target, cb, refused, open := pe.admitTarget(r, route)
 	if target == nil {
+		pe.reject(r, unavailableReason(refused || open))
+
 		if refused {
 			pe.stats.RecordCircuitBreak()
 			http.Error(w, `{"error":"circuit breaker open"}`, http.StatusServiceUnavailable)
@@ -468,6 +483,9 @@ func (pe *Engine) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
+		// Every breaker was already open, or no target is healthy. The
+		// body has always said "no healthy upstream" for both; the metric
+		// tells them apart.
 		pe.stats.RecordError(route.ID)
 		http.Error(w, `{"error":"no healthy upstream"}`, http.StatusServiceUnavailable)
 
@@ -500,7 +518,10 @@ func (pe *Engine) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		defer stop()
 	}
 
-	var roundTripper http.RoundTripper = transport
+	// Every attempt gets its own client span and duration observation.
+	traced := newUpstreamTransport(transport, route, observability.ProtocolHTTP, pe.metrics)
+
+	var roundTripper http.RoundTripper = traced
 
 	// Retries and mirroring both send the body more than once, so it has
 	// to be replayable: none, or one small enough to hold in memory. A
@@ -529,7 +550,7 @@ func (pe *Engine) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 		if retryable && replayable {
 			roundTripper = &retryTransport{
-				base: transport, policy: pe.retry, pe: pe,
+				base: traced, policy: pe.retry, pe: pe,
 				route: route, target: target, cb: cb, body: body,
 				budget: budget, budgetPercent: retryCfg.BudgetPercent,
 			}
@@ -705,17 +726,22 @@ func (pe *Engine) errorHandler(route *bastion.Route, target *bastion.Target, cb 
 	}
 }
 
-func (pe *Engine) selectTarget(r *http.Request, route *bastion.Route) *bastion.Target {
-	return pe.pick(r, pe.closedCircuits(pe.routeTargets(r, route)))
+// selectTarget picks a target whose breaker isn't open. open reports
+// whether an open breaker took any target out of the running.
+func (pe *Engine) selectTarget(r *http.Request, route *bastion.Route) (target *bastion.Target, open bool) {
+	candidates, open := pe.closedCircuits(pe.routeTargets(r, route))
+
+	return pe.pick(r, candidates), open
 }
 
 // admitTarget picks a target and asks its breaker to admit the request,
 // moving on to the remaining candidates when a breaker refuses. refused
-// reports whether any breaker refused, so the caller can tell "circuit
-// breaker open" from "no healthy upstream".
-func (pe *Engine) admitTarget(r *http.Request, route *bastion.Route) (*bastion.Target, bastion.Breaker, bool) {
-	candidates := pe.closedCircuits(pe.routeTargets(r, route))
-	refused := false
+// reports whether a breaker refused the request (a half-open one with its
+// probe slots taken), so the caller can tell "circuit breaker open" from
+// "no healthy upstream". open reports whether an open breaker took any
+// target out of the running before that.
+func (pe *Engine) admitTarget(r *http.Request, route *bastion.Route) (target *bastion.Target, cb bastion.Breaker, refused, open bool) {
+	candidates, open := pe.closedCircuits(pe.routeTargets(r, route))
 
 	for len(candidates) > 0 {
 		t := pe.pick(r, candidates)
@@ -725,14 +751,38 @@ func (pe *Engine) admitTarget(r *http.Request, route *bastion.Route) (*bastion.T
 
 		cb := pe.cbm.Get(t.ID)
 		if cb.Allow() {
-			return t, cb, refused
+			return t, cb, refused, open
 		}
 
 		refused = true
 		candidates = slices.DeleteFunc(candidates, func(c *bastion.Target) bool { return c == t })
 	}
 
-	return nil, nil, refused
+	return nil, nil, refused, open
+}
+
+// unavailableReason is the reject reason when no target is left for a
+// request: circuit_open when a breaker took at least one target out, so a
+// pool whose breakers are all open counts there, and no_healthy_upstream
+// otherwise.
+func unavailableReason(breakerOpen bool) observability.RejectReason {
+	if breakerOpen {
+		return observability.RejectCircuitOpen
+	}
+
+	return observability.RejectNoHealthyUpstream
+}
+
+// authRejectReason is the reject reason for a failed authentication.
+func authRejectReason(err error) observability.RejectReason {
+	switch security.AuthFailureClass(err) {
+	case security.AuthFailureForbidden:
+		return observability.RejectForbidden
+	case security.AuthFailureUnavailable:
+		return observability.RejectAuthUnavailable
+	default:
+		return observability.RejectUnauthenticated
+	}
 }
 
 // pick asks the load balancer for one of candidates.
@@ -757,56 +807,70 @@ func (pe *Engine) pick(r *http.Request, candidates []*bastion.Target) *bastion.T
 	return pe.lb.Select(candidates, key)
 }
 
-// closedCircuits drops targets whose breaker is open. A breaker past its
-// reset timeout reports half_open and stays eligible, so probes still reach
-// it. The proxy asks the breaker rather than reading Target.CircuitState,
-// which nothing assigns on live targets.
-func (pe *Engine) closedCircuits(targets []*bastion.Target) []*bastion.Target {
-	out := make([]*bastion.Target, 0, len(targets))
+// closedCircuits drops targets whose breaker is open, and reports whether
+// it dropped any. A breaker past its reset timeout reports half_open and
+// stays eligible, so probes still reach it. The proxy asks the breaker
+// rather than reading Target.CircuitState, which nothing assigns on live
+// targets.
+func (pe *Engine) closedCircuits(targets []*bastion.Target) (out []*bastion.Target, dropped bool) {
+	out = make([]*bastion.Target, 0, len(targets))
 
 	for _, t := range targets {
 		if pe.cbm.Get(t.ID).State() != bastion.CircuitOpen {
 			out = append(out, t)
+		} else {
+			dropped = true
 		}
 	}
 
-	return out
+	return out, dropped
 }
 
 // proxyWebSocket handles WebSocket upgrade requests.
 func (pe *Engine) proxyWebSocket(w http.ResponseWriter, r *http.Request, route *bastion.Route) {
-	target := pe.selectTarget(r, route)
+	target, open := pe.selectTarget(r, route)
 	if target == nil {
+		pe.reject(r, unavailableReason(open))
 		http.Error(w, `{"error":"no healthy upstream"}`, http.StatusServiceUnavailable)
 
 		return
 	}
 
-	ProxyWebSocket(w, r, route, target, pe.config.WebSocket, pe.logger)
+	defer pe.metrics.StreamStarted(observability.ProtocolWebSocket)()
+
+	proxyWebSocket(w, r, route, target, pe.config.WebSocket, pe.logger, pe.metrics)
 }
 
 // proxyGRPC handles gRPC requests.
 func (pe *Engine) proxyGRPC(w http.ResponseWriter, r *http.Request, route *bastion.Route) {
-	target := pe.selectTarget(r, route)
+	target, open := pe.selectTarget(r, route)
 	if target == nil {
+		pe.reject(r, unavailableReason(open))
 		writeGRPCError(w, http.StatusServiceUnavailable, "no healthy upstream")
 
 		return
 	}
 
-	ProxyGRPC(w, r, route, target, pe.config, pe.logger)
+	defer pe.metrics.StreamStarted(observability.ProtocolGRPC)()
+
+	gp := NewGRPCProxy(pe.config, pe.logger)
+	gp.metrics = pe.metrics
+	gp.ServeHTTP(w, r, route, target)
 }
 
 // proxySSE handles SSE requests.
 func (pe *Engine) proxySSE(w http.ResponseWriter, r *http.Request, route *bastion.Route) {
-	target := pe.selectTarget(r, route)
+	target, open := pe.selectTarget(r, route)
 	if target == nil {
+		pe.reject(r, unavailableReason(open))
 		http.Error(w, `{"error":"no healthy upstream"}`, http.StatusServiceUnavailable)
 
 		return
 	}
 
-	ProxySSE(w, r, route, target, pe.config, pe.logger)
+	defer pe.metrics.StreamStarted(observability.ProtocolSSE)()
+
+	proxySSE(w, r, route, target, pe.config, pe.logger, pe.metrics)
 }
 
 func isWebSocketUpgrade(r *http.Request) bool {

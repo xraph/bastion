@@ -10,8 +10,12 @@ import (
 	"time"
 
 	"github.com/xraph/forge"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/xraph/bastion/health"
+	"github.com/xraph/bastion/internal/telemetry"
+	"github.com/xraph/bastion/observability"
 )
 
 // Gateway implements the Bastion API gateway.
@@ -143,14 +147,15 @@ func (e *Gateway) Register(app forge.App) error {
 	}
 
 	// Initialize non-duplicate components (concrete types that stay in root)
+	e.gwMetrics = NewGatewayMetrics(app.Metrics(), e.config.Metrics)
 	e.hooks = NewHookEngine()
 	e.rateLimiter = NewRateLimiter(e.config.RateLimiting)
 	e.healthMon = health.NewMonitor(e.config.HealthCheck, e.Logger())
+	e.healthMon.SetMetrics(e.gwMetrics)
 	e.accessLog = NewAccessLogger(e.config.AccessLog, e.Logger())
 	e.gwAuth = NewGatewayAuth(e.config.Auth, e.Logger())
 	e.tlsManager = NewTLSManager(e.config.TLS, e.Logger())
 	e.respCache = NewResponseCache(e.config.Caching, e.Logger(), nil)
-	e.gwMetrics = NewGatewayMetrics(app.Metrics(), e.config.Metrics)
 
 	// NOTE: Interface-typed fields (routeManager, cbManager, proxyHandler,
 	// stats, retryExec, trafficSplit, hub) are injected by the extension/
@@ -222,12 +227,14 @@ func (e *Gateway) Start(ctx context.Context) error {
 	// Initialize and start OpenAPI aggregator
 	if e.config.OpenAPI.Enabled {
 		e.openAPI = NewOpenAPIAggregator(e.config.OpenAPI, e.Logger(), e.routeManager, e.disc)
+		e.openAPI.SetMetrics(e.gwMetrics)
 		e.openAPI.Start(ctx)
 	}
 
 	// Initialize and start AsyncAPI aggregator
 	if e.config.AsyncAPI.Enabled {
 		e.asyncAPI = NewAsyncAPIAggregator(e.config.AsyncAPI, e.Logger(), e.disc)
+		e.asyncAPI.SetMetrics(e.gwMetrics)
 		e.asyncAPI.Start(ctx)
 	}
 
@@ -240,14 +247,17 @@ func (e *Gateway) Start(ctx context.Context) error {
 		e.routesRegistered = true
 	}
 
+	// The loops below outlive Start, so they drop the boot span ctx carries.
+	bg := telemetry.Detach(ctx)
+
 	// Start WebSocket hub for dashboard
 	if e.hub != nil {
 		go e.hub.Run()
-		go e.broadcastUpdates(ctx)
+		go e.broadcastUpdates(bg)
 	}
 
 	// Start rate limiter cleanup
-	go e.rateLimiterCleanup(ctx)
+	go e.rateLimiterCleanup(bg)
 
 	e.startedAt.Store(time.Now().UnixNano())
 	e.MarkStarted()
@@ -354,6 +364,11 @@ func (e *Gateway) Hub() WSBroadcaster { return e.hub }
 // App returns the Forge app instance.
 func (e *Gateway) App() forge.App { return e.app }
 
+// GatewayMetrics returns the gateway's metrics, recorded through the Forge
+// app's metrics. It is nil before Register and when metrics are disabled,
+// and a nil value records nothing.
+func (e *Gateway) GatewayMetrics() *GatewayMetrics { return e.gwMetrics }
+
 // Snapshot returns current gateway statistics. Uptime counts from the
 // moment Start completed and is zero before it. Cache counters come from
 // the response cache, so they count real lookups only.
@@ -422,6 +437,7 @@ func (e *Gateway) SetDiscoveryService(svc DiscoveryService) {
 		e.routeManager,
 		svc,
 	)
+	e.disc.SetMetrics(e.gwMetrics)
 }
 
 // SetCacheStore sets an external cache store for response caching.
@@ -491,13 +507,12 @@ func (e *Gateway) SetAdminHandlerSetup(fn func(gw *Gateway, router forge.Router)
 func (e *Gateway) wireCallbacks() {
 	if e.cbManager != nil {
 		e.cbManager.SetOnStateChange(func(targetID string, from, to CircuitState) {
-			e.gwMetrics.SetCircuitBreakerState(targetID, to)
+			e.gwMetrics.CircuitTransitioned(to)
 			e.hooks.RunOnCircuitBreak(targetID, from, to)
 		})
 	}
 
 	e.healthMon.SetOnHealthChange(func(event health.Event) {
-		e.gwMetrics.SetUpstreamHealth(event.TargetID, event.Healthy)
 		e.hooks.RunOnUpstreamHealth(healthEventToUpstream(event))
 	})
 
@@ -640,11 +655,13 @@ func (e *Gateway) registerRoutes() {
 	basePath := strings.TrimRight(e.config.BasePath, "/")
 
 	// Use a custom handler that wraps the proxy handler with middleware
-	proxyHandler := GatewayMiddleware(e.config, e.proxyHandler)
+	proxyHandler := gatewayMiddleware(e.config, e.proxyHandler, e.rejected)
 
 	// Register catch-all for all methods
 	catchAll := func(ctx forge.Context) error {
 		if e.draining.Load() {
+			e.rejected(ctx.Request(), observability.RejectDraining)
+
 			return ctx.JSON(http.StatusServiceUnavailable, map[string]string{"error": "gateway is draining"})
 		}
 
@@ -695,6 +712,16 @@ func (e *Gateway) registerRoutes() {
 		forge.F("base_path", basePath),
 		forge.F("dashboard", e.config.Dashboard.Enabled),
 	)
+}
+
+// rejected counts a request the gateway answered itself and says why on the
+// request's server span.
+func (e *Gateway) rejected(r *http.Request, reason observability.RejectReason) {
+	e.gwMetrics.RequestRejected(reason)
+
+	if span := trace.SpanFromContext(r.Context()); span.IsRecording() {
+		span.SetAttributes(attribute.String("bastion.reject.reason", string(reason)))
+	}
 }
 
 func (e *Gateway) broadcastUpdates(ctx context.Context) {
@@ -873,7 +900,7 @@ func (e *Gateway) wireStorePersistence() {
 	// Persist circuit breaker state changes
 	if e.cbStore != nil && e.cbManager != nil {
 		e.cbManager.SetOnStateChange(func(targetID string, from, to CircuitState) {
-			e.gwMetrics.SetCircuitBreakerState(targetID, to)
+			e.gwMetrics.CircuitTransitioned(to)
 			e.hooks.RunOnCircuitBreak(targetID, from, to)
 
 			snap := &CircuitBreakerSnapshot{
@@ -894,7 +921,6 @@ func (e *Gateway) wireStorePersistence() {
 	// Persist health check results
 	if e.healthStore != nil {
 		e.healthMon.SetOnHealthChange(func(event health.Event) {
-			e.gwMetrics.SetUpstreamHealth(event.TargetID, event.Healthy)
 			e.hooks.RunOnUpstreamHealth(healthEventToUpstream(event))
 
 			result := &HealthCheckResult{

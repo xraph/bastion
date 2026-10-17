@@ -110,7 +110,7 @@ type Event struct {
 }
 ```
 
-These events are used by the dashboard for real-time health updates and by the metrics system to update upstream health gauges.
+These events are used by the dashboard for real-time health updates.
 
 ## Health Check History
 
@@ -158,10 +158,6 @@ The load balancer's target filter checks `target.Healthy` before including a tar
 
 ## Metrics
 
-When metrics are enabled, the health monitor updates a gauge per target:
+When metrics are enabled, the health monitor keeps `forge_bastion_upstream_targets` at the number of monitored targets that are healthy and unhealthy right now, with the label `health` set to `healthy` or `unhealthy`. It recounts on every registration, every health change and after each check cycle. Each cycle also records `forge_bastion_background_job_duration_seconds{job="health_check"}`, with `result="error"` when at least one probe failed.
 
-```
-gateway.upstream_health.<targetID>
-```
-
-Values: `1.0` = healthy, `0.0` = unhealthy.
+Each cycle with targets to probe is a `check upstream health` span, the root of its own trace, with the number of targets, failed probes and unhealthy targets. See [Observability](/docs/subsystems/observability).

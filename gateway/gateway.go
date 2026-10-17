@@ -128,6 +128,7 @@ func Wire(gw *bastion.Gateway) (*admin.Service, error) {
 	pe.SetTLSManager(gw.TLS())
 	pe.SetRetryPolicy(retry)
 	pe.SetTrafficRouter(traffic)
+	pe.SetMetrics(gw.GatewayMetrics())
 	gw.SetProxyHandler(pe)
 
 	// Dashboard hub + admin handlers

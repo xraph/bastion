@@ -83,20 +83,6 @@ type StatsRecorder interface {
 	RecordCacheMiss()
 }
 
-// MetricsReporter handles observability metrics for the gateway.
-type MetricsReporter interface {
-	RecordRequest(routeID, method, status, upstream string)
-	RecordLatency(routeID, method, upstream string, seconds float64)
-	SetActiveConnections(protocol string, count float64)
-	SetUpstreamHealth(targetID string, healthy bool)
-	SetCircuitBreakerState(targetID string, state CircuitState)
-	RecordRetry(routeID string, attempt int)
-	RecordCacheHit()
-	RecordCacheMiss()
-	RecordRateLimited()
-	SetDiscoveryRoutes(source string, count float64)
-}
-
 // AccessLogWriter logs HTTP request/response access entries.
 type AccessLogWriter interface {
 	Log(r *http.Request, statusCode int, latency time.Duration, route *Route, target *Target)

@@ -2,6 +2,7 @@ package security
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"time"
 )
@@ -80,10 +81,61 @@ type AuthRegistry interface {
 type AuthError struct {
 	Code    int
 	Message string
+
+	// cause is the last provider's error when every provider failed, so
+	// AuthFailureClass can tell an auth service that was down from a
+	// denial.
+	cause error
 }
 
 func (e *AuthError) Error() string {
 	return e.Message
+}
+
+// Unwrap returns the provider error behind e, if there is one.
+func (e *AuthError) Unwrap() error { return e.cause }
+
+// The classes AuthFailureClass sorts a failed authentication into.
+const (
+	// AuthFailureUnauthenticated is a request with no credentials, or ones
+	// no provider accepted.
+	AuthFailureUnauthenticated = "unauthenticated"
+
+	// AuthFailureForbidden is a request whose credentials were accepted
+	// but don't carry the route's scopes, or that a provider answered 403.
+	AuthFailureForbidden = "forbidden"
+
+	// AuthFailureUnavailable is a request that couldn't be checked: an auth
+	// service that was down or answered 5xx.
+	AuthFailureUnavailable = "unavailable"
+)
+
+// AuthFailureClass sorts an error from Auth.Authenticate into one of the
+// AuthFailure classes. It looks through the whole chain, so a forward-auth
+// service that was down counts as unavailable even though the gateway
+// answers the client 401.
+func AuthFailureClass(err error) string {
+	forbidden := false
+
+	for e := err; e != nil; e = errors.Unwrap(e) {
+		ae, ok := e.(*AuthError)
+		if !ok {
+			continue
+		}
+
+		switch {
+		case ae.Code >= http.StatusInternalServerError:
+			return AuthFailureUnavailable
+		case ae.Code == http.StatusForbidden:
+			forbidden = true
+		}
+	}
+
+	if forbidden {
+		return AuthFailureForbidden
+	}
+
+	return AuthFailureUnauthenticated
 }
 
 // RouteAuthConfig defines per-route auth requirements.

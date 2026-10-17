@@ -556,7 +556,7 @@ func TestFARP_ProcessService_Idempotent(t *testing.T) {
 
 	// Call processService 5 times.
 	for i := 0; i < 5; i++ {
-		sd.processService("my-svc", instances)
+		sd.processService(context.Background(), "my-svc", instances)
 	}
 
 	// Should have 1 add (first call) and 4 updates (subsequent calls).

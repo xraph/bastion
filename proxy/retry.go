@@ -136,6 +136,7 @@ func (t *retryTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 		// Over budget: the client gets this attempt, as if it were the last.
 		if t.budget != nil && !t.budget.tryRetry(t.pe.now(), t.budgetPercent) {
 			t.pe.stats.RecordRetryBudgetExhausted()
+			t.pe.metrics.RetryBudgetExhausted()
 
 			return resp, err
 		}
@@ -160,6 +161,8 @@ func (t *retryTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 		if err := sleepCtx(req.Context(), t.policy.Delay(attempt-1, t.route.Retry)); err != nil {
 			return nil, accountedError{err: err}
 		}
+
+		t.pe.metrics.RetrySent()
 
 		req = req.Clone(req.Context())
 		if len(t.body) > 0 {

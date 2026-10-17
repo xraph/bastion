@@ -10,6 +10,7 @@ import (
 	"github.com/xraph/forge"
 
 	bastion "github.com/xraph/bastion"
+	"github.com/xraph/bastion/observability"
 )
 
 // sseTransport is a shared transport for SSE upstream connections.
@@ -38,6 +39,19 @@ func ProxySSE(
 	target *bastion.Target,
 	config bastion.Config,
 	logger forge.Logger,
+) {
+	proxySSE(w, r, route, target, config, logger, nil)
+}
+
+// proxySSE is ProxySSE recording into m, which may be nil.
+func proxySSE(
+	w http.ResponseWriter,
+	r *http.Request,
+	route *bastion.Route,
+	target *bastion.Target,
+	config bastion.Config,
+	logger forge.Logger,
+	m *observability.Metrics,
 ) {
 	// Check if the response writer supports flushing
 	flusher, ok := w.(http.Flusher)
@@ -112,10 +126,15 @@ func ProxySSE(
 	applyHeaderPolicy(upstreamReq, route.Headers)
 
 	// Make upstream request using the shared SSE transport.
-	// Timeout=0 because SSE connections are long-lived streams.
+	// Timeout=0 because SSE connections are long-lived streams. The client
+	// span ends once the upstream answers, so it covers the connect and not
+	// the hours a stream can stay open.
+	traced := newUpstreamTransport(sseTransport, route, observability.ProtocolSSE, m)
+	traced.stream = true
+
 	client := &http.Client{
 		Timeout:   0,
-		Transport: sseTransport,
+		Transport: traced,
 	}
 
 	// #nosec G704 -- upstreamReq targets the route's configured upstream; see above.

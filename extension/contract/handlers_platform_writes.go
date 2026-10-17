@@ -90,7 +90,7 @@ func openapiRefreshHandler(deps Deps) func(context.Context, openapiRefreshReques
 		go func() {
 			rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), openapiRefreshTimeout)
 			defer cancel()
-			oa.Refresh(rctx)
+			oa.RefreshDetached(rctx)
 		}()
 
 		deps.audit("openapi.refresh", "", p)

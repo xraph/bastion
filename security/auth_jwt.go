@@ -14,6 +14,10 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"go.opentelemetry.io/otel/attribute"
+
+	"github.com/xraph/bastion/internal/telemetry"
 )
 
 // JWTAuthConfig configures JWT/OIDC authentication.
@@ -65,7 +69,7 @@ func NewJWTAuthProvider(config JWTAuthConfig) *JWTAuthProvider {
 
 	return &JWTAuthProvider{
 		config: config,
-		client: &http.Client{Timeout: 10 * time.Second},
+		client: &http.Client{Timeout: 10 * time.Second, Transport: telemetry.NewTransport(nil, "fetch jwks")},
 		keys:   make(map[string]crypto.PublicKey),
 	}
 }
@@ -98,13 +102,18 @@ func (p *JWTAuthProvider) Authenticate(ctx context.Context, r *http.Request) (*A
 }
 
 // StartKeyRefresh starts a background goroutine to refresh JWKS periodically.
+// The first fetch runs before it returns, under ctx's span. Each later one
+// is the root of its own trace.
 func (p *JWTAuthProvider) StartKeyRefresh(ctx context.Context) {
 	if p.config.JWKSURL == "" {
 		return
 	}
 
 	// Initial fetch
-	p.refreshKeys(ctx)
+	p.refreshKeysTraced(ctx, false)
+
+	// The loop outlives the caller's span, so it drops it.
+	ctx = telemetry.Detach(ctx)
 
 	go func() {
 		ticker := time.NewTicker(p.config.RefreshInterval)
@@ -115,10 +124,31 @@ func (p *JWTAuthProvider) StartKeyRefresh(ctx context.Context) {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				p.refreshKeys(ctx)
+				p.refreshKeysTraced(ctx, true)
 			}
 		}
 	}()
+}
+
+// refreshKeysTraced runs refreshKeys under a "refresh jwks" span. root
+// starts it as the root of a new trace.
+func (p *JWTAuthProvider) refreshKeysTraced(ctx context.Context, root bool) {
+	startSpan := telemetry.Start
+	if root {
+		startSpan = telemetry.StartRoot
+	}
+
+	ctx, span := startSpan(ctx, "refresh jwks")
+	defer span.End()
+
+	loaded, class, err := p.refreshKeys(ctx)
+	if class != "" {
+		telemetry.Fail(span, class, err)
+
+		return
+	}
+
+	span.SetAttributes(attribute.Int("bastion.jwks.keys", loaded))
 }
 
 func (p *JWTAuthProvider) validateToken(_ context.Context, token string) (map[string]any, error) {
@@ -327,24 +357,27 @@ func (p *JWTAuthProvider) buildAuthContext(claims map[string]any) (*AuthContext,
 	}, nil
 }
 
-func (p *JWTAuthProvider) refreshKeys(ctx context.Context) {
+// refreshKeys fetches the JWKS and swaps in the signing keys it holds. It
+// returns how many keys it loaded, or a short class and the error when the
+// fetch failed.
+func (p *JWTAuthProvider) refreshKeys(ctx context.Context) (loaded int, class string, err error) {
 	if p.config.JWKSURL == "" {
-		return
+		return 0, "", nil
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, p.config.JWKSURL, nil)
 	if err != nil {
-		return
+		return 0, "build request failed", err
 	}
 
 	resp, err := p.client.Do(req)
 	if err != nil {
-		return
+		return 0, "fetch failed", err
 	}
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
-		return
+		return 0, "unexpected status", nil
 	}
 
 	var jwks struct {
@@ -352,7 +385,7 @@ func (p *JWTAuthProvider) refreshKeys(ctx context.Context) {
 	}
 
 	if err := json.NewDecoder(resp.Body).Decode(&jwks); err != nil {
-		return
+		return 0, "decode failed", err
 	}
 
 	keys := make(map[string]crypto.PublicKey)
@@ -396,6 +429,8 @@ func (p *JWTAuthProvider) refreshKeys(ctx context.Context) {
 		p.keys = keys
 		p.mu.Unlock()
 	}
+
+	return len(keys), "", nil
 }
 
 func parseRSAKey(nStr, eStr string) *rsa.PublicKey {

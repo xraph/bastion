@@ -13,6 +13,7 @@ import (
 	"github.com/xraph/forge"
 
 	bastion "github.com/xraph/bastion"
+	"github.com/xraph/bastion/observability"
 )
 
 // GRPCProxy handles gRPC reverse proxying for both unary and streaming RPCs.
@@ -22,6 +23,8 @@ type GRPCProxy struct {
 	config    bastion.Config
 	logger    forge.Logger
 	transport *http.Transport
+	// metrics records the upstream call. Nil records none.
+	metrics *observability.Metrics
 }
 
 // NewGRPCProxy creates a new gRPC reverse proxy engine.
@@ -132,8 +135,11 @@ func (gp *GRPCProxy) ServeHTTP(w http.ResponseWriter, r *http.Request, route *ba
 	target.IncrConns()
 	defer target.DecrConns()
 
-	// Execute the upstream request
-	resp, err := gp.transport.RoundTrip(upstreamReq)
+	// Execute the upstream request. The call gets a client span that
+	// covers it until the last frame, and carries the trace context.
+	rt := newUpstreamTransport(gp.transport, route, observability.ProtocolGRPC, gp.metrics)
+
+	resp, err := rt.RoundTrip(upstreamReq)
 	if err != nil {
 		latency := time.Since(start)
 		target.RecordRequest(latency, true)
