@@ -7,6 +7,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/xraph/bastion/observability"
 )
 
 // PathRewriter rewrites request paths according to route configuration.
@@ -76,6 +78,12 @@ func applyRegexRewrite(path, rule string) string {
 
 // GatewayMiddleware wraps http.Handler with gateway-level middleware.
 func GatewayMiddleware(config Config, next http.Handler) http.Handler {
+	return gatewayMiddleware(config, next, nil)
+}
+
+// gatewayMiddleware is GatewayMiddleware reporting the requests it turns
+// away to onReject, which may be nil.
+func gatewayMiddleware(config Config, next http.Handler, onReject func(*http.Request, observability.RejectReason)) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// CORS handling
 		if config.CORS.Enabled {
@@ -91,6 +99,10 @@ func GatewayMiddleware(config Config, next http.Handler) http.Handler {
 		// IP filtering
 		if config.IPFilter.Enabled {
 			if !allowIP(r.RemoteAddr, config.IPFilter) {
+				if onReject != nil {
+					onReject(r, observability.RejectIPFiltered)
+				}
+
 				http.Error(w, `{"error":"forbidden"}`, http.StatusForbidden)
 
 				return

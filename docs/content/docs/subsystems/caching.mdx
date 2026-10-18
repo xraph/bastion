@@ -168,11 +168,4 @@ cache.Invalidate(ctx, "GET", "/api/products/123")
 
 ## Cache Metrics
 
-The gateway tracks cache hits and misses:
-
-| Metric | Description |
-|--------|-------------|
-| `gateway.cache_hits_total` | Total cache hits |
-| `gateway.cache_misses_total` | Total cache misses |
-
-These are also available in `GatewayStats.CacheHits` and `GatewayStats.CacheMisses` via the admin API and dashboard.
+The gateway counts cache hits and misses in `GatewayStats.CacheHits` and `GatewayStats.CacheMisses`, which you read through the admin API and the dashboard. There is no Prometheus metric for them.

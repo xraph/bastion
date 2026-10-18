@@ -328,7 +328,7 @@ func TestManager_RoutesFromFARP(t *testing.T) {
 			}
 
 			targets := []*Target{{ID: "t1", URL: "http://10.0.0.1:8080"}}
-			routes := sd.routesFromFARP("my-svc", instance, targets)
+			routes := sd.routesFromFARP(context.Background(), "my-svc", instance, targets)
 
 			if len(routes) != tt.wantRoutes {
 				t.Errorf("routesFromFARP() returned %d routes, want %d", len(routes), tt.wantRoutes)
@@ -1005,7 +1005,7 @@ func TestManager_ManifestFailure_PreservesExistingRoutes(t *testing.T) {
 
 	// processService should detect the manifest failure, keep existing route
 	// path as "/*", but update targets.
-	sd.processService("twinos", []*ServiceInstanceInfo{instance})
+	sd.processService(context.Background(), "twinos", []*ServiceInstanceInfo{instance})
 
 	// Verify the route still has path "/*" (not "/twinos/*")
 	routes := rm.ListRoutes()

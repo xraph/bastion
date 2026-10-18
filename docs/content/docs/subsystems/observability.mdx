@@ -1,71 +1,161 @@
 ---
 title: Observability
-description: Prometheus metrics, structured access logging, and OpenTelemetry trace propagation.
+description: Prometheus metrics and OpenTelemetry spans through your Forge app, plus structured access logs and gateway stats.
 ---
 
-Bastion provides comprehensive observability through three pillars: Prometheus-compatible metrics, structured access logging, and OpenTelemetry trace propagation. Together they give full visibility into gateway traffic, upstream health, and request flows.
+Bastion records its metrics and spans through the Forge app it runs in, so they land wherever your app's already go: the `/_/metrics` scrape, and the OTLP endpoint Forge's tracing exports to. There's nothing to install. On top of that you get structured access logs and the stats the admin API and dashboard read.
 
-## Prometheus Metrics
+## Prometheus metrics
 
-### Configuration
+Turn your app's metrics on and the gateway's come with them. Forge puts its namespace in front of every name, so they scrape as `forge_bastion_...`.
 
 ```go
 bastion.WithMetrics(bastion.MetricsConfig{
     Enabled: true,
-    Prefix:  "gateway",
 })
 ```
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `Enabled` | `bool` | `true` | Enable or disable metrics collection |
-| `Prefix` | `string` | `"gateway"` | Prefix for all metric names |
+| `Enabled` | `bool` | `true` | Record the gateway's metrics |
+| `Prefix` | `string` | `"gateway"` | Ignored. The names are fixed; the field is kept so existing config parses |
 
-### Exported Metrics
+### Exported metrics
 
-The gateway exports the following metrics through the Forge metrics system:
+| Scraped name | Type | Labels |
+|--------------|------|--------|
+| `forge_bastion_upstream_request_duration_seconds` | Histogram | `protocol`, `status_class` |
+| `forge_bastion_requests_rejected_total` | Counter | `reason` |
+| `forge_bastion_retries_attempted_total` | Counter | `result` |
+| `forge_bastion_circuit_breakers_transitioned_total` | Counter | `state` |
+| `forge_bastion_upstream_targets` | Gauge | `health` |
+| `forge_bastion_active_streams` | Gauge | `protocol` |
+| `forge_bastion_background_job_duration_seconds` | Histogram | `job`, `result` |
 
-#### Request Metrics
+`forge_bastion_upstream_request_duration_seconds` gets one observation per attempt to reach an upstream, retries included. It measures from sending the request to the upstream's response headers, or to the end of the handshake for WebSocket, so it tells you how slow the upstream is apart from the gateway. The buckets run from 5ms to 30s. Forge's own `http_server_request_duration_seconds` still measures the whole request as the client saw it.
 
-| Metric | Type | Description |
-|--------|------|-------------|
-| `gateway.requests_total` | Counter | Total number of proxied requests |
-| `gateway.request_duration_seconds` | Histogram | Request latency distribution |
-| `gateway.active_connections.<protocol>` | Gauge | Active connections by protocol (http, websocket, sse) |
+`forge_bastion_upstream_targets` is set from a count of the monitored targets, on every registration, every health change and after each health check cycle. `forge_bastion_active_streams` counts the WebSocket, SSE and gRPC streams in flight, from the moment the gateway picks a target until the stream closes.
 
-#### Resilience Metrics
+### Label values
 
-| Metric | Type | Description |
-|--------|------|-------------|
-| `gateway.retry_total` | Counter | Total retry attempts |
-| `gateway.rate_limited_total` | Counter | Total rate-limited requests |
-| `gateway.circuit_breaker_state.<targetID>` | Gauge | Circuit breaker state (0=closed, 1=half-open, 2=open) |
+Every label is a small fixed set. Route IDs, target IDs, URLs, hosts, paths and service names never become labels, because discovery creates those at runtime.
 
-#### Upstream Metrics
+| Label | Values |
+|-------|--------|
+| `protocol` | `http`, `websocket`, `sse`, `grpc` (`active_streams` has the last three) |
+| `status_class` | `1xx` to `5xx` for a response (a WebSocket handshake that succeeds is `1xx`), `error` when no response came back (dial, TLS, timeout), `canceled` when the client went away first |
+| `reason` | see [Rejection reasons](#rejection-reasons) |
+| `result` (retries) | `sent`, a retry that went out; `budget_exhausted`, an attempt the policy wanted to retry and the retry budget refused, so the client got that attempt's answer. It counts refused attempts, not requests |
+| `state` | `closed`, `open`, `half_open`: the state a breaker moved into |
+| `health` | `healthy`, `unhealthy` |
+| `job` | `discovery`, `openapi`, `asyncapi`, `health_check` |
+| `result` (jobs) | `ok`, or `error` when the run, or at least one unit inside it (a service lookup, a spec fetch, a probe), failed |
 
-| Metric | Type | Description |
-|--------|------|-------------|
-| `gateway.upstream_health.<targetID>` | Gauge | Target health (1.0=healthy, 0.0=unhealthy) |
-| `gateway.discovery_routes.<source>` | Gauge | Number of routes by source (manual, farp, discovery) |
+### Rejection reasons
 
-#### Cache Metrics
+`forge_bastion_requests_rejected_total` counts the requests the gateway answers itself, without sending them upstream.
 
-| Metric | Type | Description |
-|--------|------|-------------|
-| `gateway.cache_hits_total` | Counter | Total cache hits |
-| `gateway.cache_misses_total` | Counter | Total cache misses |
+| `reason` | When |
+|----------|------|
+| `draining` | The gateway is stopping. Only `Gateway.Stop` sets this, and under `app.Run` Forge stops the HTTP server before it stops extensions, so you'll only see it when the extension is stopped while the server keeps serving, as in an embedded setup or a test |
+| `ip_filtered` | The IP filter turned the client away (403) |
+| `global_rate_limit`, `route_rate_limit` | The gateway-wide or the route's rate limiter answered 429 |
+| `no_route` | No route matched (404) |
+| `path_blocked` | A FARP or discovery route's extension filter blocks the path (403) |
+| `unauthenticated` | No credentials, or no provider accepted them (401) |
+| `forbidden` | The credentials lack the route's scopes (403), or a provider such as forward auth answered 403 (the client gets 401) |
+| `auth_unavailable` | The forward-auth service was down or answered 5xx. The client gets 401 |
+| `hook` | An `OnRequest` hook rejected the request (403) |
+| `circuit_open` | A circuit breaker took at least one of the route's targets out and none was left: every breaker open, or a half-open breaker with its probe slots taken |
+| `no_healthy_upstream` | No target was healthy and no breaker was involved |
 
-### Custom Prefix
+The response bodies didn't change. A pool whose breakers are all open still answers `no healthy upstream`, and only a half-open refusal answers `circuit breaker open`, so count on the metric, not the body, to tell them apart.
 
-Change the metric prefix to avoid collisions when running multiple gateways:
+### Queries
 
-```go
-bastion.WithMetrics(bastion.MetricsConfig{
-    Enabled: true,
-    Prefix:  "api_gateway",
-})
-// Metrics: api_gateway.requests_total, api_gateway.request_duration_seconds, etc.
+Upstream p99 by protocol:
+
+```text
+histogram_quantile(0.99, sum by (le, protocol) (rate(forge_bastion_upstream_request_duration_seconds_bucket[5m])))
 ```
+
+Share of upstream attempts that got a 5xx or no answer:
+
+```text
+sum(rate(forge_bastion_upstream_request_duration_seconds_count{status_class=~"5xx|error"}[5m]))
+  / sum(rate(forge_bastion_upstream_request_duration_seconds_count[5m]))
+```
+
+Breakers opening, and why requests are being turned away:
+
+```text
+sum(rate(forge_bastion_circuit_breakers_transitioned_total{state="open"}[5m]))
+sum by (reason) (rate(forge_bastion_requests_rejected_total[5m]))
+```
+
+### Upgrading from the old metrics
+
+Bastion used to declare its metrics under a configurable prefix with dotted names, and only two of them were ever recorded. Both put the target ID inside the metric name, one series family per upstream. They're gone. If a dashboard or alert scrapes them, move it:
+
+| Old | Now |
+|-----|-----|
+| `gateway.circuit_breaker_state.<targetID>` | `forge_bastion_circuit_breakers_transitioned_total{state}`, and the per-target state in the admin API |
+| `gateway.upstream_health.<targetID>` | `forge_bastion_upstream_targets{health}`, and per-target health in the admin API |
+| `gateway.requests_total`, `gateway.request_duration_seconds` | Never recorded. Forge's HTTP server metrics, and `forge_bastion_upstream_request_duration_seconds` |
+| `gateway.retry_total`, `gateway.rate_limited_total` | Never recorded. `forge_bastion_retries_attempted_total`, `forge_bastion_requests_rejected_total` |
+| `gateway.active_connections.<protocol>` | Never recorded. `forge_bastion_active_streams{protocol}` |
+| `gateway.cache_hits_total`, `gateway.cache_misses_total`, `gateway.discovery_routes.<source>` | Never recorded, and not replaced |
+
+## Tracing
+
+Forge starts a server span for every request, named after the route, so a proxied request shows up as `GET /*path`. Bastion adds the spans below. They use the instrumentation scope `github.com/xraph/bastion` and go to the tracer provider Forge installs, so sampling, propagators and the exporter are whatever your app's tracing config says.
+
+| Span | Kind | Parent | Attributes |
+|------|------|--------|------------|
+| `proxy request` | Client | the server span | `bastion.route.id`, `bastion.route.path`, `bastion.route.source`, `bastion.protocol`, `bastion.proxy.attempt`, `http.request.method`, `url.scheme`, `server.address`, `server.port`, `http.response.status_code`, `error.type`, `rpc.system` and `rpc.grpc.status_code` for gRPC, `bastion.canceled` |
+| `mirror request` | Client | none: a new trace, linked to the server span | the route attributes, method, scheme, host, port, status |
+| `authenticate request` | Internal | the server span | `bastion.auth.result` (`ok`, `unauthenticated`, `forbidden` or `unavailable`), `bastion.auth.provider` |
+| `call forward auth` | Client | `authenticate request` | method, scheme, host, port, status |
+| `check upstream health` | Internal | none: one trace per cycle | `bastion.health.targets`, `bastion.health.failed`, `bastion.health.unhealthy` |
+| `discover services` | Internal | none for a poll; the caller's span for the pass in Start or one an operator asks for | `bastion.discovery.services`, `bastion.discovery.unresolved`, `bastion.discovery.removed` |
+| `fetch farp manifest` | Client | `discover services`, or the push request | method, scheme, host, port, status |
+| `refresh openapi specs`, `refresh asyncapi specs` | Internal | none for the loops or a refresh started from a handler (linked to the request); the caller's span otherwise | `bastion.openapi.sources`, `.failed`, `.paths`; `bastion.asyncapi.sources`, `.failed`, `.channels` |
+| `merge openapi specs`, `merge asyncapi specs` | Internal | the refresh | |
+| `fetch openapi spec`, `fetch asyncapi spec` | Client | the refresh | method, scheme, host, port, status |
+| `refresh jwks` | Internal | the caller for the first fetch, none after | `bastion.jwks.keys` |
+| `fetch jwks` | Client | `refresh jwks` | method, scheme, host, port, status |
+
+Every client span sends its trace context upstream, so the upstream joins the trace under the gateway's span instead of the client's. With tracing off, the client's own `traceparent` passes through untouched.
+
+### Baggage and trace headers
+
+The gateway injects through Forge's propagators, `tracecontext,baggage` unless `OTEL_PROPAGATORS` says otherwise. So the `traceparent`, `tracestate` and `baggage` a client sends reach your upstreams and the forward-auth service. HTTP and gRPC always copied the client's headers through. SSE, WebSocket, mirrored copies and forward auth now carry them too.
+
+That's what you want for your own services. If a route points at a third party, strip `baggage` (and `traceparent`, if trace IDs shouldn't leave) at your edge before requests reach the gateway. A route's header policy runs before the trace context is injected, so it can't remove them.
+
+The server span gets the matched route's `bastion.route.*` attributes and `bastion.protocol`, and `bastion.reject.reason` when the gateway answers the request itself.
+
+A retried request shows one `proxy request` span per attempt. An SSE span ends once the upstream answers and a WebSocket span once the handshake is done, so a stream that stays open for hours doesn't hold a span open with it. A gRPC span covers the whole call and ends with the last frame.
+
+### What a span never carries
+
+The path, the query string and the headers of the client's request, the auth subject and claims, and any error text. A span the gateway fails gets a short class (`transport error`, `timeout`, `503`, `grpc status 14`, `auth unavailable`, `list services failed`) and an `exception` event that holds only the error's Go type. A 5xx from the upstream fails the `proxy request` span. A 4xx doesn't, since it's the upstream's answer to the client, and neither does a client that hangs up first: that sets `bastion.canceled` instead.
+
+### Background work
+
+The health monitor, the discovery poll, the spec refresh loops and the JWKS refresh run on the ctx Start was given, which carries Forge's boot span. Each loop drops that span where it begins, then starts a root span per unit of work, and only when there's work: an idle gateway doesn't mint a trace every tick. The dashboard broadcast and the rate-limiter cleanup get no spans.
+
+### Tracing config
+
+`bastion.TracingConfig` (`Enabled`, `PropagateFormat`, `SampleRate`) and `WithTracing` are accepted but not read: they don't turn bastion's spans on or off. Tracing, sampling and propagation are set on the Forge app. The option and the fields stay so existing code and config keep working.
+
+## Go API changes
+
+The metrics rewrite removed exported API from the `observability` package and the root package:
+
+- The `MetricsReporter` interface is gone. Nothing implemented or used it.
+- `observability.Metrics` (and its alias `bastion.GatewayMetrics`) lost `RecordRequest`, `RecordLatency`, `SetActiveConnections`, `SetUpstreamHealth`, `SetCircuitBreakerState`, `RecordRetry`, `RecordCacheHit`, `RecordCacheMiss`, `RecordRateLimited` and `SetDiscoveryRoutes`. Its methods now are `ObserveUpstream`, `RequestRejected`, `RetrySent`, `RetryBudgetExhausted`, `CircuitTransitioned`, `SetUpstreamTargets`, `StreamStarted` and `ObserveJob`.
+- `observability.NewMetrics`, and `bastion.NewGatewayMetrics`, return nil when metrics are disabled or the app has none. `Gateway.GatewayMetrics()` returns that value, so it can be nil. Every method on a nil `*Metrics` is a no-op, so you can call it without checking.
 
 ## Structured Access Logging
 
@@ -152,43 +242,6 @@ Administrative actions (route creation, config changes, cache invalidation) are 
     "user_agent": "curl/7.88.0"
 }
 ```
-
-## OpenTelemetry Trace Propagation
-
-### Configuration
-
-```go
-bastion.WithTracing(bastion.TracingConfig{
-    Enabled:         true,
-    PropagateFormat: "w3c",
-    SampleRate:      1.0,
-})
-```
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `Enabled` | `bool` | `true` | Enable or disable trace propagation |
-| `PropagateFormat` | `string` | `"w3c"` | Trace context format to propagate |
-| `SampleRate` | `float64` | `1.0` | Sampling rate (0.0 to 1.0) |
-
-### Trace Context Propagation
-
-When tracing is enabled, the gateway propagates trace context headers between the client and upstream:
-
-- **W3C Trace Context** (`"w3c"`): Propagates `traceparent` and `tracestate` headers.
-
-The gateway acts as a pass-through for trace context -- it does not create new spans but ensures that distributed tracing works end-to-end across the gateway boundary.
-
-### Sample Rate
-
-The `SampleRate` controls what fraction of requests participate in tracing:
-
-| Value | Behavior |
-|-------|----------|
-| `1.0` | All requests are traced |
-| `0.5` | 50% of requests are traced |
-| `0.1` | 10% of requests are traced |
-| `0.0` | Tracing is effectively disabled |
 
 ## Gateway Stats
 

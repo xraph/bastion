@@ -1,6 +1,12 @@
 package observability
 
 import (
+	"context"
+	"errors"
+	"strconv"
+	"sync"
+	"time"
+
 	"github.com/xraph/forge"
 )
 
@@ -20,128 +26,274 @@ const (
 
 // MetricsConfig holds metrics settings used by the Metrics collector.
 type MetricsConfig struct {
-	Enabled bool   `json:"enabled" yaml:"enabled"`
-	Prefix  string `json:"prefix,omitempty" yaml:"prefix"`
+	// Enabled turns the gateway's metrics on. They are recorded through the
+	// Forge app's metrics, so the app's own metrics have to be on as well.
+	Enabled bool `json:"enabled" yaml:"enabled"`
+
+	// Prefix is ignored. The metric names are fixed (see the Metric*
+	// constants) and Forge adds its namespace in front of them. The field
+	// is kept so existing configuration still parses.
+	Prefix string `json:"prefix,omitempty" yaml:"prefix"`
 }
 
-// Metrics manages Prometheus metrics for the gateway.
+// Metric names. Forge exports them with its namespace in front, so
+// bastion_upstream_request_duration_seconds scrapes as
+// forge_bastion_upstream_request_duration_seconds.
+const (
+	MetricUpstreamRequestDuration = "bastion_upstream_request_duration_seconds"
+	MetricRequestsRejected        = "bastion_requests_rejected_total"
+	MetricRetriesAttempted        = "bastion_retries_attempted_total"
+	MetricCircuitTransitions      = "bastion_circuit_breakers_transitioned_total"
+	MetricUpstreamTargets         = "bastion_upstream_targets"
+	MetricActiveStreams           = "bastion_active_streams"
+	MetricBackgroundJobDuration   = "bastion_background_job_duration_seconds"
+)
+
+// Protocol is the protocol label: how the gateway talks to the upstream.
+type Protocol string
+
+// The protocol label's values.
+const (
+	ProtocolHTTP      Protocol = "http"
+	ProtocolWebSocket Protocol = "websocket"
+	ProtocolSSE       Protocol = "sse"
+	ProtocolGRPC      Protocol = "grpc"
+)
+
+// streamProtocols are the protocols bastion_active_streams reports.
+var streamProtocols = [...]Protocol{ProtocolWebSocket, ProtocolSSE, ProtocolGRPC}
+
+// RejectReason is the reason label of bastion_requests_rejected_total: why
+// the gateway answered a request itself instead of sending it upstream.
+type RejectReason string
+
+// The reason label's values.
+const (
+	RejectDraining          RejectReason = "draining"
+	RejectIPFiltered        RejectReason = "ip_filtered"
+	RejectGlobalRateLimit   RejectReason = "global_rate_limit"
+	RejectRouteRateLimit    RejectReason = "route_rate_limit"
+	RejectNoRoute           RejectReason = "no_route"
+	RejectPathBlocked       RejectReason = "path_blocked"
+	RejectUnauthenticated   RejectReason = "unauthenticated"
+	RejectForbidden         RejectReason = "forbidden"
+	RejectAuthUnavailable   RejectReason = "auth_unavailable"
+	RejectHook              RejectReason = "hook"
+	RejectCircuitOpen       RejectReason = "circuit_open"
+	RejectNoHealthyUpstream RejectReason = "no_healthy_upstream"
+)
+
+// Job is the job label of bastion_background_job_duration_seconds.
+type Job string
+
+// The job label's values.
+const (
+	JobDiscovery   Job = "discovery"
+	JobOpenAPI     Job = "openapi"
+	JobAsyncAPI    Job = "asyncapi"
+	JobHealthCheck Job = "health_check"
+)
+
+// Status classes reported on bastion_upstream_request_duration_seconds
+// besides 1xx to 5xx.
+const (
+	// StatusClassError is an attempt that got no response: the dial, the
+	// TLS handshake or the round trip failed, or it timed out.
+	StatusClassError = "error"
+
+	// StatusClassCanceled is an attempt abandoned because the client went
+	// away first.
+	StatusClassCanceled = "canceled"
+)
+
+var (
+	upstreamBuckets = []float64{0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30}
+	jobBuckets      = []float64{0.01, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60}
+)
+
+// Metrics records the gateway's metrics through Forge's metrics. Every
+// label is a small fixed enum: route IDs, target IDs, URLs, hosts and
+// service names never become labels.
+//
+// A nil *Metrics records nothing, so callers don't have to check.
 type Metrics struct {
-	metrics forge.Metrics
-	prefix  string
-	enabled bool
+	upstreamDuration *forge.Vec[forge.Histogram] // protocol, status_class
+	rejected         *forge.Vec[forge.Counter]   // reason
+	retries          *forge.Vec[forge.Counter]   // result
+	transitions      *forge.Vec[forge.Counter]   // state
+	targets          *forge.Vec[forge.Gauge]     // health
+	streams          *forge.Vec[forge.Gauge]     // protocol
+	jobDuration      *forge.Vec[forge.Histogram] // job, result
+
+	// open counts the streams in flight per protocol. The gauge is set
+	// from it under its lock, so it always shows the real count.
+	open [len(streamProtocols)]streamCount
 }
 
-// NewMetrics creates a new gateway metrics collector.
-func NewMetrics(metrics forge.Metrics, config MetricsConfig) *Metrics {
+type streamCount struct {
+	mu sync.Mutex
+	n  int64
+}
+
+// NewMetrics declares the gateway's metrics on m. It returns nil, which
+// records nothing, when config.Enabled is false or m is nil.
+func NewMetrics(m forge.Metrics, config MetricsConfig) *Metrics {
+	if !config.Enabled || m == nil {
+		return nil
+	}
+
 	return &Metrics{
-		metrics: metrics,
-		prefix:  config.Prefix,
-		enabled: config.Enabled,
+		upstreamDuration: forge.HistogramVec(m, MetricUpstreamRequestDuration, forge.HistogramOpts{
+			Buckets: upstreamBuckets,
+			Help:    "Time from sending a request upstream to its response headers (the handshake, for WebSocket), per attempt.",
+			Unit:    "s",
+		}, "protocol", "status_class"),
+		rejected:    forge.CounterVec(m, MetricRequestsRejected, "reason"),
+		retries:     forge.CounterVec(m, MetricRetriesAttempted, "result"),
+		transitions: forge.CounterVec(m, MetricCircuitTransitions, "state"),
+		targets:     forge.GaugeVec(m, MetricUpstreamTargets, "health"),
+		streams:     forge.GaugeVec(m, MetricActiveStreams, "protocol"),
+		jobDuration: forge.HistogramVec(m, MetricBackgroundJobDuration, forge.HistogramOpts{
+			Buckets: jobBuckets,
+			Help:    "Duration of one run of a background job: a discovery poll, a spec refresh or a health check cycle.",
+			Unit:    "s",
+		}, "job", "result"),
 	}
 }
 
-// RecordRequest records a request metric.
-func (gm *Metrics) RecordRequest(routeID, method, status, upstream string) {
-	if !gm.enabled || gm.metrics == nil {
+// ObserveUpstream records one attempt to reach an upstream. statusClass
+// comes from StatusClass.
+func (gm *Metrics) ObserveUpstream(protocol Protocol, statusClass string, d time.Duration) {
+	if gm == nil {
 		return
 	}
 
-	gm.metrics.Counter(gm.prefix + ".requests_total").Inc()
+	gm.upstreamDuration.With(string(protocol), statusClass).Observe(d.Seconds())
 }
 
-// RecordLatency records request latency.
-func (gm *Metrics) RecordLatency(routeID, method, upstream string, seconds float64) {
-	if !gm.enabled || gm.metrics == nil {
+// RequestRejected counts a request the gateway answered itself.
+func (gm *Metrics) RequestRejected(reason RejectReason) {
+	if gm == nil {
 		return
 	}
 
-	gm.metrics.Histogram(gm.prefix + ".request_duration_seconds").Observe(seconds)
+	gm.rejected.With(string(reason)).Inc()
 }
 
-// SetActiveConnections sets the active connections gauge.
-func (gm *Metrics) SetActiveConnections(protocol string, count float64) {
-	if !gm.enabled || gm.metrics == nil {
+// RetrySent counts a retry that went out.
+func (gm *Metrics) RetrySent() {
+	if gm == nil {
 		return
 	}
 
-	gm.metrics.Gauge(gm.prefix + ".active_connections." + protocol).Set(count)
+	gm.retries.With("sent").Inc()
 }
 
-// SetUpstreamHealth sets the upstream health gauge.
-func (gm *Metrics) SetUpstreamHealth(targetID string, healthy bool) {
-	if !gm.enabled || gm.metrics == nil {
+// RetryBudgetExhausted counts a retry the policy asked for and the
+// target's retry budget refused.
+func (gm *Metrics) RetryBudgetExhausted() {
+	if gm == nil {
 		return
 	}
 
-	val := 0.0
-	if healthy {
-		val = 1.0
-	}
-
-	gm.metrics.Gauge(gm.prefix + ".upstream_health." + targetID).Set(val)
+	gm.retries.With("budget_exhausted").Inc()
 }
 
-// SetCircuitBreakerState sets the circuit breaker state gauge.
-func (gm *Metrics) SetCircuitBreakerState(targetID string, state CircuitState) {
-	if !gm.enabled || gm.metrics == nil {
+// CircuitTransitioned counts a circuit breaker moving into state.
+func (gm *Metrics) CircuitTransitioned(state CircuitState) {
+	if gm == nil {
 		return
 	}
-
-	val := 0.0
 
 	switch state {
-	case CircuitClosed:
-		val = 0
-	case CircuitHalfOpen:
-		val = 1
-	case CircuitOpen:
-		val = 2
+	case CircuitClosed, CircuitOpen, CircuitHalfOpen:
+		gm.transitions.With(string(state)).Inc()
 	}
-
-	gm.metrics.Gauge(gm.prefix + ".circuit_breaker_state." + targetID).Set(val)
 }
 
-// RecordRetry records a retry attempt.
-func (gm *Metrics) RecordRetry(routeID string, attempt int) {
-	if !gm.enabled || gm.metrics == nil {
+// SetUpstreamTargets sets how many monitored upstream targets are healthy
+// and unhealthy right now.
+func (gm *Metrics) SetUpstreamTargets(healthy, unhealthy int) {
+	if gm == nil {
 		return
 	}
 
-	gm.metrics.Counter(gm.prefix + ".retry_total").Inc()
+	gm.targets.With("healthy").Set(float64(healthy))
+	gm.targets.With("unhealthy").Set(float64(unhealthy))
 }
 
-// RecordCacheHit records a cache hit.
-func (gm *Metrics) RecordCacheHit() {
-	if !gm.enabled || gm.metrics == nil {
+// StreamStarted counts a WebSocket, SSE or gRPC stream as open until the
+// returned func is called. Calling it more than once is harmless.
+func (gm *Metrics) StreamStarted(protocol Protocol) (done func()) {
+	if gm == nil {
+		return func() {}
+	}
+
+	idx := -1
+
+	for i, p := range streamProtocols {
+		if p == protocol {
+			idx = i
+
+			break
+		}
+	}
+
+	if idx < 0 {
+		return func() {}
+	}
+
+	gauge := gm.streams.With(string(protocol))
+	count := &gm.open[idx]
+
+	adjust := func(delta int64) {
+		count.mu.Lock()
+		defer count.mu.Unlock()
+
+		count.n += delta
+		gauge.Set(float64(count.n))
+	}
+
+	adjust(1)
+
+	var once sync.Once
+
+	return func() { once.Do(func() { adjust(-1) }) }
+}
+
+// ObserveJob records one run of a background job. failed is true when the
+// run, or at least one unit of work inside it, failed.
+func (gm *Metrics) ObserveJob(job Job, failed bool, d time.Duration) {
+	if gm == nil {
 		return
 	}
 
-	gm.metrics.Counter(gm.prefix + ".cache_hits_total").Inc()
+	gm.jobDuration.With(string(job), result(failed)).Observe(d.Seconds())
 }
 
-// RecordCacheMiss records a cache miss.
-func (gm *Metrics) RecordCacheMiss() {
-	if !gm.enabled || gm.metrics == nil {
-		return
+// StatusClass turns the outcome of an upstream attempt into the
+// status_class label: 1xx to 5xx for a response, StatusClassCanceled when
+// the client went away, StatusClassError for any other failure.
+func StatusClass(status int, err error) string {
+	if err != nil {
+		if errors.Is(err, context.Canceled) {
+			return StatusClassCanceled
+		}
+
+		return StatusClassError
 	}
 
-	gm.metrics.Counter(gm.prefix + ".cache_misses_total").Inc()
+	if status < 100 || status > 599 {
+		return StatusClassError
+	}
+
+	return strconv.Itoa(status/100) + "xx"
 }
 
-// RecordRateLimited records a rate-limited request.
-func (gm *Metrics) RecordRateLimited() {
-	if !gm.enabled || gm.metrics == nil {
-		return
+func result(failed bool) string {
+	if failed {
+		return "error"
 	}
 
-	gm.metrics.Counter(gm.prefix + ".rate_limited_total").Inc()
-}
-
-// SetDiscoveryRoutes sets the count of discovered routes by source.
-func (gm *Metrics) SetDiscoveryRoutes(source string, count float64) {
-	if !gm.enabled || gm.metrics == nil {
-		return
-	}
-
-	gm.metrics.Gauge(gm.prefix + ".discovery_routes." + source).Set(count)
+	return "ok"
 }

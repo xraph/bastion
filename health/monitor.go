@@ -11,6 +11,10 @@ import (
 	"time"
 
 	"github.com/xraph/forge"
+	"go.opentelemetry.io/otel/attribute"
+
+	"github.com/xraph/bastion/internal/telemetry"
+	"github.com/xraph/bastion/observability"
 )
 
 // Monitor monitors the health of upstream targets.
@@ -27,6 +31,9 @@ type Monitor struct {
 
 	// Callbacks
 	onHealthChange func(event Event)
+
+	// metrics records cycle durations and target counts. Nil records none.
+	metrics *observability.Metrics
 
 	client *http.Client
 }
@@ -75,6 +82,16 @@ func (hm *Monitor) SetOnHealthChange(fn func(event Event)) {
 	hm.onHealthChange = fn
 }
 
+// SetMetrics sets where the monitor records its metrics: the duration of
+// each check cycle and how many targets are healthy. Nil records none.
+func (hm *Monitor) SetMetrics(m *observability.Metrics) {
+	hm.mu.Lock()
+	defer hm.mu.Unlock()
+
+	hm.metrics = m
+	hm.recordTargetsLocked()
+}
+
 // Register registers a target for health monitoring.
 func (hm *Monitor) Register(routeID string, target Target) {
 	hm.mu.Lock()
@@ -84,6 +101,8 @@ func (hm *Monitor) Register(routeID string, target Target) {
 		target:  target,
 		routeID: routeID,
 	}
+
+	hm.recordTargetsLocked()
 }
 
 // Deregister removes a target from health monitoring.
@@ -92,6 +111,31 @@ func (hm *Monitor) Deregister(targetID string) {
 	defer hm.mu.Unlock()
 
 	delete(hm.targets, targetID)
+	hm.recordTargetsLocked()
+}
+
+// countLocked returns how many monitored targets are healthy and
+// unhealthy. hm.mu must be held.
+func (hm *Monitor) countLocked() (healthy, unhealthy int) {
+	for _, mt := range hm.targets {
+		if mt.target.IsHealthy() {
+			healthy++
+		} else {
+			unhealthy++
+		}
+	}
+
+	return healthy, unhealthy
+}
+
+// recordTargetsLocked sets bastion_upstream_targets from a fresh count.
+// hm.mu must be held, so the count and the gauge can't go out of step.
+func (hm *Monitor) recordTargetsLocked() {
+	if hm.metrics == nil {
+		return
+	}
+
+	hm.metrics.SetUpstreamTargets(hm.countLocked())
 }
 
 // Tracks reports whether a target is currently registered for monitoring.
@@ -155,7 +199,8 @@ func (hm *Monitor) Start(ctx context.Context) {
 
 	hm.wg.Add(1)
 
-	go hm.loop(ctx)
+	// The loop outlives Start, so it drops the boot span ctx carries.
+	go hm.loop(telemetry.Detach(ctx))
 }
 
 // Stop stops the health monitor. It is safe to call multiple times.
@@ -209,12 +254,28 @@ func (hm *Monitor) checkAll(ctx context.Context) {
 	}
 	hm.mu.RUnlock()
 
+	// Nothing to probe: no span, so an idle gateway doesn't start a trace
+	// every interval.
+	if len(targets) == 0 {
+		return
+	}
+
+	start := time.Now()
+
+	// One root span per cycle, and the probes run under it.
+	ctx, span := telemetry.StartRoot(ctx, "check upstream health")
+	defer span.End()
+
 	// Use a per-cycle context bounded to the check interval so that
 	// goroutines from a slow cycle cannot outlive the next tick.
 	cycleCtx, cancel := context.WithTimeout(ctx, hm.config.Interval)
 	defer cancel()
 
-	var wg sync.WaitGroup
+	var (
+		wg     sync.WaitGroup
+		failed atomic.Int64
+	)
+
 	sem := make(chan struct{}, maxConcurrentChecks)
 
 	for _, mt := range targets {
@@ -225,11 +286,26 @@ func (hm *Monitor) checkAll(ctx context.Context) {
 			defer wg.Done()
 			defer func() { <-sem }() // release
 
-			hm.checkTarget(cycleCtx, mt)
+			if !hm.checkTarget(cycleCtx, mt) {
+				failed.Add(1)
+			}
 		}(mt)
 	}
 
 	wg.Wait()
+
+	hm.mu.Lock()
+	_, unhealthy := hm.countLocked()
+	hm.recordTargetsLocked()
+	hm.mu.Unlock()
+
+	span.SetAttributes(
+		attribute.Int("bastion.health.targets", len(targets)),
+		attribute.Int64("bastion.health.failed", failed.Load()),
+		attribute.Int("bastion.health.unhealthy", unhealthy),
+	)
+
+	hm.metrics.ObserveJob(observability.JobHealthCheck, failed.Load() > 0, time.Since(start))
 
 	// Close any lingering connections from this cycle. With DisableKeepAlives
 	// this is mostly a no-op, but it prevents accumulation if the transport
@@ -237,7 +313,8 @@ func (hm *Monitor) checkAll(ctx context.Context) {
 	hm.client.CloseIdleConnections()
 }
 
-func (hm *Monitor) checkTarget(ctx context.Context, mt *monitoredTarget) {
+// checkTarget probes one target and reports whether the probe passed.
+func (hm *Monitor) checkTarget(ctx context.Context, mt *monitoredTarget) bool {
 	checkCtx, cancel := context.WithTimeout(ctx, hm.config.Timeout)
 	defer cancel()
 
@@ -248,7 +325,7 @@ func (hm *Monitor) checkTarget(ctx context.Context, mt *monitoredTarget) {
 	if err != nil {
 		hm.handleCheckFailure(mt, err)
 
-		return
+		return false
 	}
 
 	req.Header.Set("User-Agent", "forge-gateway-health-check")
@@ -257,7 +334,7 @@ func (hm *Monitor) checkTarget(ctx context.Context, mt *monitoredTarget) {
 	if err != nil {
 		hm.handleCheckFailure(mt, err)
 
-		return
+		return false
 	}
 
 	// Drain and close the body. Draining ensures the underlying TCP
@@ -269,11 +346,15 @@ func (hm *Monitor) checkTarget(ctx context.Context, mt *monitoredTarget) {
 		_ = resp.Body.Close()
 	}()
 
-	if probeHealthy(resp.StatusCode, explicit) {
-		hm.handleCheckSuccess(mt)
-	} else {
+	if !probeHealthy(resp.StatusCode, explicit) {
 		hm.handleCheckFailure(mt, fmt.Errorf("unhealthy status: %d", resp.StatusCode))
+
+		return false
 	}
+
+	hm.handleCheckSuccess(mt)
+
+	return true
 }
 
 // probeHealthy judges a probe response. An explicitly configured health
@@ -343,6 +424,7 @@ func (hm *Monitor) handleCheckFailure(mt *monitoredTarget, err error) {
 func (hm *Monitor) setHealthy(mt *monitoredTarget, healthy bool) {
 	previous := mt.target.IsHealthy()
 	mt.target.SetHealthy(healthy)
+	hm.recordTargetsLocked()
 
 	if hm.onHealthChange != nil {
 		event := Event{

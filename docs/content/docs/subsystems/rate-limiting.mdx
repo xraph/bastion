@@ -132,11 +132,7 @@ Per-client buckets are automatically cleaned up when they have been inactive for
 
 ## Metrics
 
-When metrics are enabled, rate-limited requests increment a counter:
-
-```
-gateway.rate_limited_total
-```
+When metrics are enabled, every rate-limited request counts toward `forge_bastion_requests_rejected_total`, with `reason="global_rate_limit"` or `reason="route_rate_limit"` depending on which limiter turned it away.
 
 The gateway stats also track `RateLimited` in the `GatewayStats` struct, visible in the admin dashboard.
 
