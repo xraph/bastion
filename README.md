@@ -157,7 +157,42 @@ err := app.RegisterHookFn(forge.PhaseAfterRegister, "bastion-hooks", func(ctx co
 })
 ```
 
-If your `OnRequest` hook returns an error, the request stops there. For gateway-level auth, you register a provider from the `security` package with `gw.Auth().RegisterProvider(...)`: `NewAPIKeyAuthProvider`, `NewBearerTokenAuthProvider`, `NewForwardAuthProvider` or `NewJWTAuthProvider`.
+If your `OnRequest` hook returns an error, the request stops there. For gateway-level auth, you register a provider from the `security` package with `gw.Auth().RegisterProvider(...)` and list its name in `AuthConfig.Providers`: `NewAPIKeyAuthProvider`, `NewBearerTokenAuthProvider`, `NewForwardAuthProvider` or `NewJWTAuthProvider`.
+
+### JWT provider
+
+Point it at your identity provider's JWKS and register it in the same kind of hook:
+
+```go
+gw := gateway.New(
+	bastion.WithRoutes(routes),
+	bastion.WithAuth(bastion.AuthConfig{Enabled: true, Providers: []string{"jwt"}, ForwardHeaders: true}),
+)
+
+err := app.RegisterHookFn(forge.PhaseAfterRegister, "bastion-jwt", func(ctx context.Context, app forge.App) error {
+	gw.Auth().RegisterProvider(security.NewJWTAuthProvider(security.JWTAuthConfig{
+		Name:     "jwt",
+		JWKSURL:  "https://idp.example.com/.well-known/jwks.json",
+		Issuer:   "https://idp.example.com",
+		Audience: "orders-api",
+	}))
+	return nil
+})
+```
+
+That's all you need. The gateway runs the provider for you, whether you register it before the gateway starts or after: the provider fetches the JWKS during startup, refreshes it every `RefreshInterval` (an hour unless you set it) and stops when the gateway does. You don't have to call `StartKeyRefresh`. If you already do, it keeps working, and a second start does nothing.
+
+The provider rejects every token until it holds a verification key, so while your identity provider is unreachable at boot, the routes behind it answer 401. If that first fetch fails, the refresh retries a few seconds later and backs off toward the refresh interval, and a request that finds no key loaded asks for one too (once every five seconds at most). A failed fetch, or a JWKS with no usable key in it, leaves the keys you already have in place.
+
+A token whose `kid` the provider hasn't loaded makes it fetch again, inside the same five-second limit, so a key your identity provider has just rotated in works straight away. A request waits at most three seconds on a fetch.
+
+Leave `JWKSURL` empty and the provider accepts nothing. Give it an https URL. The fetch only follows redirects to https, and the gateway logs a warning at start for a plain http JWKS anywhere but loopback.
+
+It accepts RS256, RS384, RS512, ES256, ES384 and ES512. Set `Algorithms` to narrow that list. A token signed with anything else, `none` included, is rejected before the provider looks at a key. When a token names a `kid`, the key has to carry that `kid`. When it doesn't, the provider uses the one key that fits the token's algorithm and rejects the token if several do. That's how a JWKS with a single key and no `kid` works. Either way, an ES token is never checked with an RSA key, or the other way round.
+
+A client that's turned away gets a 401 saying `invalid token` (or `token expired` for a good token past its `exp`). The reason goes to the gateway's debug log.
+
+The gateway drops any `X-Auth-Subject`, `X-Auth-Provider`, `X-Auth-Scopes`, `X-Auth-Role` or `X-Auth-Email` a client sends, on every route, so the ones your upstream sees are the ones the gateway set. Other `X-Auth-` headers pass through untouched.
 
 ## Persist routes in a database
 

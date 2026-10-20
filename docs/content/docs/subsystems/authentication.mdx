@@ -1,6 +1,6 @@
 ---
 title: Authentication
-description: Request authentication via API keys, Bearer tokens, and forward auth.
+description: Request authentication via API keys, Bearer tokens, JWTs checked against a JWKS, and forward auth.
 ---
 
 Bastion provides gateway-level authentication that validates incoming requests before they reach upstream services. It supports multiple authentication strategies, per-route overrides, and integration with the Forge auth extension.
@@ -116,14 +116,57 @@ Response headers from the auth service that populate the `AuthContext`:
 | `X-Auth-Role` | `AuthContext.Claims["role"]` |
 | `X-Auth-Scopes` | `AuthContext.Scopes` (comma-separated) |
 
-## Registering Providers
+### JWT
 
-Register auth providers on the gateway:
+Checks a Bearer JWT's signature against the keys in a JSON Web Key Set, then its `exp`, `nbf`, `iss` and `aud`:
 
 ```go
-gateway.RegisterAuthProvider(apiKeyProvider)
-gateway.RegisterAuthProvider(bearerProvider)
-gateway.RegisterAuthProvider(forwardAuthProvider)
+jwtProvider := security.NewJWTAuthProvider(security.JWTAuthConfig{
+    Name:     "jwt-tokens",
+    JWKSURL:  "https://idp.example.com/.well-known/jwks.json",
+    Issuer:   "https://idp.example.com",
+    Audience: "orders-api",
+})
+```
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `JWKSURL` | | Where the provider loads its verification keys. Leave it empty and the provider accepts nothing |
+| `Issuer` | | Expected `iss`, checked when set |
+| `Audience` | | Expected `aud` (a string or one entry of an array), checked when set |
+| `ScopesClaim` | `scope` | Claim the scopes come from, a space-separated string or an array |
+| `SubjectClaim` | `sub` | Claim the subject comes from |
+| `RefreshInterval` | `1h` | How often the JWKS is refetched |
+| `Algorithms` | all six | Which of RS256, RS384, RS512, ES256, ES384 and ES512 the provider accepts |
+
+You don't start anything yourself. The gateway starts the provider when it starts, or straight away if you register it once the gateway is running. On Forge's default boot path a `PhaseAfterRegister` hook runs after the extensions start, so registering there takes the second route. With `CentralMigrations` the hooks run before the extensions start, and the gateway's own start picks the provider up. Starting fetches the JWKS, then a refresh runs every `RefreshInterval` until the gateway stops. `StartKeyRefresh` still exists for code that calls it, and calling it on a running provider does nothing. A provider you use outside the gateway loads its keys on the first token it sees, and fetches again whenever they're older than `RefreshInterval`.
+
+The provider rejects every token until it holds a verification key:
+
+- A token whose `alg` isn't on the accepted list is rejected before any key is looked at. `none` and the HMAC algorithms are never on it.
+- A token whose header lists `crit` parameters is rejected. The provider supports no header extensions (RFC 7515, section 4.1.11).
+- If a fetch fails, the provider keeps the keys it has. A JWKS that comes back with no usable key counts as a failed fetch.
+- If it has no key yet, the refresh retries after a few seconds and backs off toward `RefreshInterval`. A request that finds no key loaded starts a fetch too, at most once every five seconds, and waits up to three seconds for it.
+- A token whose `kid` matches no loaded key makes the provider fetch again, inside the same five-second limit, so a key your identity provider has just rotated in is accepted without waiting for the next refresh.
+- A token that names a `kid` is checked with the key carrying that `kid`. One that names none is checked with the single key that fits its algorithm, so a JWKS holding one key without a `kid` works, and it's rejected when several keys fit.
+- A key is only used for its own algorithm family and curve: never an RSA key for an ES token, never a P-256 key for ES384, and never a key whose JWK `alg` names a different algorithm.
+- ES signatures are read in the JWS form, R followed by S (RFC 7518, section 3.4).
+- The JWKS fetch follows at most three redirects, and only to https URLs. When the gateway starts a provider whose `JWKSURL` is plain http to anything but loopback, it logs a warning.
+
+A rejected client gets a 401 with `invalid token`, or `token expired` and `token not yet valid` for a verified token outside its time window. The specific reason is in the gateway's debug log.
+
+## Registering Providers
+
+Register auth providers on the gateway's auth handler and list their names in `AuthConfig.Providers`. The handler exists once the app has registered the gateway, so register them in a Forge lifecycle hook:
+
+```go
+err := app.RegisterHookFn(forge.PhaseAfterRegister, "bastion-auth", func(ctx context.Context, app forge.App) error {
+    gw.Auth().RegisterProvider(apiKeyProvider)
+    gw.Auth().RegisterProvider(bearerProvider)
+    gw.Auth().RegisterProvider(jwtProvider)
+    gw.Auth().RegisterProvider(forwardAuthProvider)
+    return nil
+})
 ```
 
 ## Per-Route Auth
@@ -201,6 +244,8 @@ When `ForwardHeaders` is true and authentication succeeds, the gateway injects t
 | `X-Auth-Email` | The `email` claim (if present) |
 
 This allows upstream services to trust the gateway's authentication and extract identity information without re-validating credentials.
+
+The gateway deletes these five headers from every incoming request before anything else runs. That holds on every route and every protocol, including routes that skip auth and gateways with `ForwardHeaders` off, so the copies an upstream sees were set by the gateway from an identity a provider accepted. Other `X-Auth-` headers, such as a token an API key provider reads, pass through.
 
 ## Integration with Forge Auth Extension
 
