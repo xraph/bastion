@@ -224,6 +224,12 @@ func (e *Gateway) Start(ctx context.Context) error {
 		e.tlsManager.Start()
 	}
 
+	// Start the auth providers that have background work, so the JWT
+	// provider has fetched its keys before the routes take traffic.
+	if e.gwAuth != nil {
+		e.gwAuth.Start(ctx)
+	}
+
 	// Initialize and start OpenAPI aggregator
 	if e.config.OpenAPI.Enabled {
 		e.openAPI = NewOpenAPIAggregator(e.config.OpenAPI, e.Logger(), e.routeManager, e.disc)
@@ -273,7 +279,7 @@ func (e *Gateway) Start(ctx context.Context) error {
 }
 
 // Stop stops the bastion gateway.
-func (e *Gateway) Stop(_ context.Context) error {
+func (e *Gateway) Stop(ctx context.Context) error {
 	if !e.config.Enabled {
 		return nil
 	}
@@ -296,6 +302,11 @@ func (e *Gateway) Stop(_ context.Context) error {
 	// Stop TLS manager
 	if e.tlsManager != nil {
 		e.tlsManager.Stop()
+	}
+
+	// Stop the auth providers' background work
+	if e.gwAuth != nil {
+		e.gwAuth.Stop(ctx)
 	}
 
 	e.MarkStopped()

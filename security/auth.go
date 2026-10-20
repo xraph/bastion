@@ -2,8 +2,10 @@ package security
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/xraph/forge"
@@ -18,8 +20,30 @@ import (
 type Auth struct {
 	config    AuthConfig
 	logger    forge.Logger
-	providers map[string]AuthProvider
 	forgeAuth AuthRegistry // Optional integration with Forge auth extension
+
+	// mu guards providers and is all the request path takes.
+	mu        sync.RWMutex
+	providers map[string]AuthProvider
+
+	// lifeMu serialises Start, Stop and the starting and stopping
+	// RegisterProvider does, so a provider can't be started after Stop or
+	// left running once it's replaced. The request path never takes it.
+	lifeMu  sync.Mutex
+	started bool // guarded by lifeMu
+}
+
+// providerLifecycle is a provider with background work of its own, such as
+// the JWT provider's JWKS refresh. Auth.Start and Auth.Stop drive it.
+type providerLifecycle interface {
+	Start(ctx context.Context) error
+	Stop(ctx context.Context) error
+}
+
+// startWarner is a provider with a configuration problem worth a warning
+// each time it starts, such as a JWKS fetched over plain HTTP.
+type startWarner interface {
+	startWarning() string
 }
 
 // NewAuth creates a new gateway auth handler.
@@ -37,8 +61,114 @@ func (ga *Auth) SetForgeAuth(registry AuthRegistry) {
 }
 
 // RegisterProvider registers a custom gateway-level auth provider.
+//
+// A provider with background work, such as the JWT provider, runs with the
+// gateway: Start starts it, Stop stops it. One registered while the gateway
+// is already running is started here before RegisterProvider returns. That
+// covers a Forge PhaseAfterRegister hook on Forge's default boot path,
+// where those hooks run after the extensions start; with CentralMigrations
+// they run before, and Start picks the provider up. A provider it replaces
+// is stopped.
 func (ga *Auth) RegisterProvider(provider AuthProvider) {
-	ga.providers[provider.Name()] = provider
+	name := provider.Name()
+
+	ga.lifeMu.Lock()
+	defer ga.lifeMu.Unlock()
+
+	ga.mu.Lock()
+	old := ga.providers[name]
+	ga.providers[name] = provider
+	ga.mu.Unlock()
+
+	if !ga.started {
+		return
+	}
+
+	// Background, not a caller's context: the work belongs to the gateway
+	// and ends with Stop.
+	ctx := context.Background()
+
+	if lp, ok := old.(providerLifecycle); ok {
+		ga.stopProvider(ctx, name, lp)
+	}
+
+	if lp, ok := provider.(providerLifecycle); ok {
+		ga.startProvider(ctx, name, lp)
+	}
+}
+
+// Start starts the registered providers that have background work, so the
+// JWT provider holds its keys before the gateway takes traffic, and has
+// RegisterProvider start any registered later. Gateway calls it from its
+// own Start, and it does nothing while auth is disabled. A provider that
+// isn't ready afterwards is logged and stays registered; the JWT provider
+// rejects every token until it has a key.
+func (ga *Auth) Start(ctx context.Context) {
+	if !ga.config.Enabled {
+		return
+	}
+
+	ga.lifeMu.Lock()
+	defer ga.lifeMu.Unlock()
+
+	ga.started = true
+
+	for name, lp := range ga.lifecycles() {
+		ga.startProvider(ctx, name, lp)
+	}
+}
+
+// Stop stops the background work of every registered provider. Gateway
+// calls it from its own Stop.
+func (ga *Auth) Stop(ctx context.Context) {
+	ga.lifeMu.Lock()
+	defer ga.lifeMu.Unlock()
+
+	ga.started = false
+
+	for name, lp := range ga.lifecycles() {
+		ga.stopProvider(ctx, name, lp)
+	}
+}
+
+func (ga *Auth) startProvider(ctx context.Context, name string, lp providerLifecycle) {
+	if w, ok := lp.(startWarner); ok {
+		if msg := w.startWarning(); msg != "" {
+			ga.logger.Warn(msg, forge.F("provider", name))
+		}
+	}
+
+	if err := lp.Start(ctx); err != nil {
+		ga.logger.Warn("auth provider is not ready",
+			forge.F("provider", name),
+			forge.F("error", err.Error()),
+		)
+	}
+}
+
+func (ga *Auth) stopProvider(ctx context.Context, name string, lp providerLifecycle) {
+	if err := lp.Stop(ctx); err != nil {
+		ga.logger.Warn("auth provider did not stop cleanly",
+			forge.F("provider", name),
+			forge.F("error", err.Error()),
+		)
+	}
+}
+
+// lifecycles returns the registered providers that have background work.
+func (ga *Auth) lifecycles() map[string]providerLifecycle {
+	ga.mu.RLock()
+	defer ga.mu.RUnlock()
+
+	out := make(map[string]providerLifecycle)
+
+	for name, p := range ga.providers {
+		if lp, ok := p.(providerLifecycle); ok {
+			out[name] = lp
+		}
+	}
+
+	return out
 }
 
 // Authenticate checks if a request is authenticated based on configuration.
@@ -121,10 +251,17 @@ func (ga *Auth) authenticate(r *http.Request, routeAuth *RouteAuthConfig, provid
 		authCtx, err := provider.Authenticate(r.Context(), r)
 		if err != nil {
 			lastErr = err
-			ga.logger.Debug("auth provider failed",
-				forge.F("provider", name),
-				forge.F("error", err),
-			)
+
+			fields := []forge.Field{forge.F("provider", name), forge.F("error", err)}
+
+			// A provider can keep its client-facing message fixed and put
+			// the reason underneath it.
+			if reason := errors.Unwrap(err); reason != nil {
+				fields = append(fields, forge.F("reason", reason.Error()))
+			}
+
+			ga.logger.Debug("auth provider failed", fields...)
+
 			continue
 		}
 
@@ -187,7 +324,11 @@ func (ga *Auth) ForwardAuthHeaders(r *http.Request, authCtx *AuthContext) {
 // and the optional Forge auth extension registry.
 func (ga *Auth) getProvider(name string) AuthProvider {
 	// Check local gateway providers first
-	if p, ok := ga.providers[name]; ok {
+	ga.mu.RLock()
+	p, ok := ga.providers[name]
+	ga.mu.RUnlock()
+
+	if ok {
 		return p
 	}
 

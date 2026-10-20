@@ -126,7 +126,7 @@ func TestJWKS_RefreshSpans(t *testing.T) {
 	p := NewJWTAuthProvider(JWTAuthConfig{Name: "jwt", JWKSURL: jwks.URL})
 
 	ctx, caller := telemetry.Start(context.Background(), "start bastion")
-	p.refreshKeysTraced(ctx, true)
+	_ = p.refreshKeysTraced(ctx, true)
 	caller.End()
 
 	span := telemetrytest.One(t, rec, "refresh jwks")
@@ -148,7 +148,7 @@ func TestJWKS_RefreshSpans(t *testing.T) {
 
 	status = http.StatusInternalServerError
 
-	p.refreshKeysTraced(context.Background(), false)
+	_ = p.refreshKeysTraced(context.Background(), false)
 
 	if s := telemetrytest.One(t, rec, "refresh jwks").Status(); s.Code != codes.Error || s.Description != "unexpected status" {
 		t.Errorf("failed refresh status = %+v", s)
