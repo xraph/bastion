@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -95,6 +96,65 @@ func TestAuth_LifecycleRacesLeaveNothingRunning(t *testing.T) {
 			t.Fatalf("%d providers still running after Stop", got)
 		}
 	}
+}
+
+func spoofedRequest() *http.Request {
+	r := httptest.NewRequest(http.MethodGet, "/", nil)
+	r.Header.Set("X-Auth-Subject", "root")
+	r.Header.Set("X-Auth-Provider", "spoofed")
+	r.Header.Set("X-Auth-Scopes", "admin")
+	r.Header.Set("X-Auth-Role", "admin")
+	r.Header.Set("X-Auth-Email", "root@example.com")
+	r.Header.Set("X-Auth-Token", "kept")
+
+	return r
+}
+
+func TestDropAuthHeaders_RemovesOnlyTheFiveItSets(t *testing.T) {
+	r := spoofedRequest()
+	DropAuthHeaders(r.Header)
+
+	for _, h := range forwardedAuthHeaders {
+		if v := r.Header.Get(h); v != "" {
+			t.Errorf("%s = %q after DropAuthHeaders", h, v)
+		}
+	}
+
+	if r.Header.Get("X-Auth-Token") != "kept" {
+		t.Error("DropAuthHeaders removed X-Auth-Token")
+	}
+}
+
+func TestForwardAuthHeaders_NeverKeepsAClientValue(t *testing.T) {
+	authCtx := &AuthContext{Subject: "alice", ProviderName: "jwt", Claims: map[string]any{}}
+
+	t.Run("claims the token lacks", func(t *testing.T) {
+		ga := NewAuth(AuthConfig{Enabled: true, ForwardHeaders: true}, forge.NewNoopLogger())
+		r := spoofedRequest()
+		ga.ForwardAuthHeaders(r, authCtx)
+
+		if r.Header.Get("X-Auth-Subject") != "alice" || r.Header.Get("X-Auth-Provider") != "jwt" {
+			t.Errorf("subject %q provider %q", r.Header.Get("X-Auth-Subject"), r.Header.Get("X-Auth-Provider"))
+		}
+
+		for _, h := range []string{"X-Auth-Scopes", "X-Auth-Role", "X-Auth-Email"} {
+			if v := r.Header.Get(h); v != "" {
+				t.Errorf("%s = %q, from the request rather than the token", h, v)
+			}
+		}
+	})
+
+	t.Run("forwarding off", func(t *testing.T) {
+		ga := NewAuth(AuthConfig{Enabled: true}, forge.NewNoopLogger())
+		r := spoofedRequest()
+		ga.ForwardAuthHeaders(r, authCtx)
+
+		for _, h := range forwardedAuthHeaders {
+			if v := r.Header.Get(h); v != "" {
+				t.Errorf("%s = %q with forwarding off", h, v)
+			}
+		}
+	})
 }
 
 func TestAuth_WarnsWhenAJWKSIsFetchedOverPlainHTTP(t *testing.T) {

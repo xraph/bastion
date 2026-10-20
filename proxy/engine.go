@@ -353,6 +353,11 @@ func (pe *Engine) SetTLSManager(tlsMgr *bastion.TLSManager) { pe.tlsMgr = tlsMgr
 func (pe *Engine) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
 
+	// The identity headers ForwardAuthHeaders sets are the gateway's to
+	// set. Whatever a client sent under those names goes before anything
+	// else runs, on every route and every protocol, auth or no auth.
+	security.DropAuthHeaders(r.Header)
+
 	// Rate limiting
 	if !pe.rl.Allow(r) {
 		pe.stats.RecordRateLimited()

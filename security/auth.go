@@ -291,10 +291,35 @@ func (ga *Auth) authenticate(r *http.Request, routeAuth *RouteAuthConfig, provid
 	return nil, &AuthError{Code: http.StatusUnauthorized, Message: "authentication required"}
 }
 
+// forwardedAuthHeaders are the identity headers ForwardAuthHeaders sets on
+// the upstream request.
+var forwardedAuthHeaders = [...]string{
+	"X-Auth-Subject",
+	"X-Auth-Provider",
+	"X-Auth-Scopes",
+	"X-Auth-Role",
+	"X-Auth-Email",
+}
+
+// DropAuthHeaders deletes the identity headers ForwardAuthHeaders sets
+// (X-Auth-Subject, X-Auth-Provider, X-Auth-Scopes, X-Auth-Role and
+// X-Auth-Email) from h. The proxy calls it on every inbound request before
+// authentication, so the copies an upstream sees are always ones the
+// gateway set. Other X-Auth- headers, such as a token an API key provider
+// reads, are left alone.
+func DropAuthHeaders(h http.Header) {
+	for _, name := range forwardedAuthHeaders {
+		h.Del(name)
+	}
+}
+
 // ForwardAuthHeaders adds authentication context to upstream request headers.
 // This allows upstream services to access the authenticated user info
-// without re-authenticating.
+// without re-authenticating. It clears the five identity headers first, so
+// a claim the token doesn't carry is never filled in from the request.
 func (ga *Auth) ForwardAuthHeaders(r *http.Request, authCtx *AuthContext) {
+	DropAuthHeaders(r.Header)
+
 	if authCtx == nil || !ga.config.ForwardHeaders {
 		return
 	}
