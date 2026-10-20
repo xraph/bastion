@@ -122,7 +122,7 @@ Forge starts a server span for every request, named after the route, so a proxie
 | `refresh openapi specs`, `refresh asyncapi specs` | Internal | none for the loops or a refresh started from a handler (linked to the request); the caller's span otherwise | `bastion.openapi.sources`, `.failed`, `.paths`; `bastion.asyncapi.sources`, `.failed`, `.channels` |
 | `merge openapi specs`, `merge asyncapi specs` | Internal | the refresh | |
 | `fetch openapi spec`, `fetch asyncapi spec` | Client | the refresh | method, scheme, host, port, status |
-| `refresh jwks` | Internal | the caller for the first fetch, none after | `bastion.jwks.keys` |
+| `refresh jwks` | Internal | the gateway's Start for the first fetch of a provider registered before it, or `authenticate request` when a request finds no key loaded; none otherwise | `bastion.jwks.keys` |
 | `fetch jwks` | Client | `refresh jwks` | method, scheme, host, port, status |
 
 Every client span sends its trace context upstream, so the upstream joins the trace under the gateway's span instead of the client's. With tracing off, the client's own `traceparent` passes through untouched.
