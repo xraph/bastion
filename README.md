@@ -327,6 +327,6 @@ Format with that `goimports` line, not `make fmt`, which groups imports for the 
 
 ## License
 
-See the [Bastion repository](https://github.com/xraph/bastion) for license terms.
+MIT. See [LICENSE](LICENSE).
 
 Bastion is part of the [forgery stack](https://github.com/xraph/forge#the-forgery-stack) built on [Forge](https://github.com/xraph/forge), by [Rex Raphael](https://github.com/juicycleff) and [contributors](https://github.com/xraph/bastion/graphs/contributors).
