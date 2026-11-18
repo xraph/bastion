@@ -33,6 +33,8 @@ func TestQueriesOverTheWire(t *testing.T) {
 	post := func(intent, params string) map[string]any {
 		body := `{"envelope":"v1","kind":"query","contributor":"bastion","intent":"` + intent + `","params":` + params + `}`
 		req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/api/dashboard/v1", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+
 		rec := httptest.NewRecorder()
 		h.ServeHTTP(rec, req)
 
@@ -72,6 +74,8 @@ func TestCommandOverTheWireCarriesInvalidates(t *testing.T) {
 	body := `{"envelope":"v1","kind":"command","contributor":"bastion","intent":"routes.setEnabled",` +
 		`"csrf":"test","idempotencyKey":"test","payload":{"id":"manual-/users","enabled":false}}`
 	req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/api/dashboard/v1", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+
 	rec := httptest.NewRecorder()
 	transport.NewHandler(reg, wreg, d, nil).ServeHTTP(rec, req)
 
